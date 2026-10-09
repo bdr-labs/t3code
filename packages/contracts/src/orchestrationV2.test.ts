@@ -2,12 +2,19 @@ import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
-import { NodeId, RunAttemptId, TrimmedNonEmptyString } from "./index.ts";
+import {
+  NodeId,
+  ProviderThreadId,
+  ProviderTurnId,
+  RunAttemptId,
+  TrimmedNonEmptyString,
+} from "./index.ts";
 import {
   latestProviderTurnForAttempt,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
+  OrchestrationV2ProviderTurnJson,
   OrchestrationV2RpcSchemas,
   OrchestrationV2Subagent,
   OrchestrationV2ThreadShellJson,
@@ -637,5 +644,74 @@ describe("latestProviderTurnForAttempt", () => {
     ];
     expect(latestProviderTurnForAttempt(turns, RunAttemptId.make("goal-attempt"))?.id).toBe("last");
     expect(latestProviderTurnForAttempt(turns, null)).toBeUndefined();
+  });
+});
+
+describe("provider response throughput wire persistence", () => {
+  const base = {
+    id: ProviderTurnId.make("response-turn"),
+    providerThreadId: ProviderThreadId.make("response-thread"),
+    nodeId: NodeId.make("response-node"),
+    runAttemptId: null,
+    nativeTurnRef: null,
+    ordinal: 1,
+    status: "completed" as const,
+    startedAt: now,
+    completedAt: now,
+  };
+  const codec = Schema.fromJsonString(OrchestrationV2ProviderTurnJson);
+  const decodeTurn = Schema.decodeUnknownSync(OrchestrationV2ProviderTurnJson);
+  it("round-trips aggregates and reads historical payloads without inventing telemetry", () => {
+    const responseThroughput = {
+      outputTokens: 400,
+      elapsedMs: 4000.5,
+      responseCount: 2,
+      partial: true,
+    };
+    const encode = Schema.encodeSync(codec);
+    const decode = Schema.decodeUnknownSync(codec);
+    expect(decode(encode({ ...base, responseThroughput })).responseThroughput).toEqual(
+      responseThroughput,
+    );
+    expect(decode(encode(base)).responseThroughput).toBeUndefined();
+  });
+  it("round-trips both measurement bases and accepts pre-basis Claude telemetry", () => {
+    const encode = Schema.encodeSync(codec);
+    const decode = Schema.decodeUnknownSync(codec);
+    for (const basis of ["claude_observed", "codex_active_windows_estimate"] as const) {
+      const responseThroughput = {
+        basis,
+        outputTokens: 400,
+        elapsedMs: 4000,
+        responseCount: 2,
+        partial: true,
+      };
+      expect(decode(encode({ ...base, responseThroughput })).responseThroughput).toEqual(
+        responseThroughput,
+      );
+    }
+    expect(() =>
+      decodeTurn({
+        ...base,
+        responseThroughput: {
+          basis: "whole_turn",
+          outputTokens: 400,
+          elapsedMs: 4000,
+          responseCount: 2,
+          partial: false,
+        },
+      }),
+    ).toThrow();
+  });
+  it("rejects invalid aggregate durations and counts", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2ProviderTurnJson);
+    for (const elapsedMs of [0, -1, NaN, Infinity]) {
+      expect(() =>
+        decode({
+          ...base,
+          responseThroughput: { outputTokens: 400, elapsedMs, responseCount: 2, partial: false },
+        }),
+      ).toThrow();
+    }
   });
 });

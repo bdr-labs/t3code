@@ -528,6 +528,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior
       ? ["Follow-up behavior"]
       : []),
+    ...(settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled
+      ? ["Stats for nerds"]
+      : []),
     ...(settings.contextWindowMeterEnabled !== DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled
       ? ["Context window indicator"]
       : []),
@@ -645,6 +648,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       composerRichTextEnabled: DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled,
       sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut,
       followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
+      statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
       contextWindowMeterEnabled: DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled,
       environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
       glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity,
@@ -1159,6 +1163,31 @@ export function ChatSettingsPanel() {
                 ))}
               </SelectPopup>
             </Select>
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("stats-for-nerds")}
+          description="Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider."
+          resetAction={
+            settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled ? (
+              <SettingResetButton
+                label="stats for nerds"
+                onClick={() =>
+                  updateSettings({
+                    statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.statsForNerdsEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ statsForNerdsEnabled: Boolean(checked) })
+              }
+              aria-label="Stats for nerds"
+            />
           }
         />
         <AdvancedSettings targetIds={[searchableSetting("skills-in-slash-menu").id]}>

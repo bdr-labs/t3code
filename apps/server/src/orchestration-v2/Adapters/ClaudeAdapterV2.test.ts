@@ -3,6 +3,7 @@ import * as NodeEvents from "node:events";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeStream from "node:stream";
+import { observeClaudeFrame } from "./ClaudeResponseThroughput.ts";
 
 import * as ClaudeSdk from "@anthropic-ai/claude-agent-sdk";
 import { beforeEach, vi } from "vite-plus/test";
@@ -5931,6 +5932,215 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             NodeCrypto.layer,
           ),
         ),
+      ),
+    ),
+  );
+
+  it.effect(
+    "persists completed root response envelopes without counting snapshots or child output",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("throughput-attempt"),
+            text: "Check throughput",
+            attachments: [],
+          }),
+        );
+        const send = Effect.fnUntraced(function* (
+          event: unknown,
+          at: number,
+          parent: string | null = null,
+        ) {
+          const message = claudeSdkFrame({
+            type: "stream_event",
+            event,
+            parent_tool_use_id: parent,
+            session_id: WAKE_NATIVE_SESSION,
+            uuid: `throughput-${at}`,
+          });
+          observeClaudeFrame(message, at);
+          yield* harness.offerAndWait(message);
+        });
+        yield* send({ type: "message_start", message: { id: "response-one" } }, 0);
+        for (const output_tokens of [20, 100, 100]) {
+          yield* send({ type: "message_delta", usage: { output_tokens } }, 900);
+        }
+        const snapshot = claudeSdkFrame({
+          type: "assistant",
+          uuid: "snapshot-one",
+          session_id: WAKE_NATIVE_SESSION,
+          parent_tool_use_id: null,
+          message: {
+            id: "response-one",
+            model: "claude-sonnet-4-6",
+            content: [],
+            usage: {
+              input_tokens: 100,
+              output_tokens: 9999,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+          },
+        });
+        yield* harness.offerAndWait(snapshot);
+        yield* harness.offerAndWait(snapshot);
+        yield* send({ type: "message_stop" }, 1000);
+        yield* send({ type: "message_start", message: { id: "child" } }, 2000, "child-tool");
+        yield* send({ type: "message_delta", usage: { output_tokens: 10000 } }, 2100, "child-tool");
+        yield* send({ type: "message_stop" }, 2100, "child-tool");
+        yield* send({ type: "message_start", message: { id: "response-two" } }, 600000);
+        yield* send({ type: "message_delta", usage: { output_tokens: 300 } }, 603000);
+        yield* send({ type: "message_stop" }, 603000);
+        yield* harness.offerAndWait(
+          makeResultFrame({ uuid: "throughput-result", result: "", numTurns: 2 }),
+        );
+        yield* Queue.take(harness.terminalReceipts);
+        const turns = harness.events.filter((event) => event.type === "provider_turn.updated");
+        const final = turns.at(-1);
+        assert.equal(final?.type, "provider_turn.updated");
+        if (final?.type !== "provider_turn.updated") throw new Error("missing turn");
+        assert.deepEqual(final.providerTurn.responseThroughput, {
+          basis: "claude_observed",
+          outputTokens: 400,
+          elapsedMs: 4000,
+          responseCount: 2,
+          partial: false,
+        });
+        assert.equal(final.providerTurn.status, "completed");
+        assert.equal(final.providerTurn.tokenUsage, undefined);
+        assert.equal(final.providerTurn.turnTokenUsage?.outputTokens, 1);
+        assert.equal(
+          turns.filter((event) => event.providerTurn.responseThroughput !== undefined).length,
+          3,
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
+  it.effect("measures held root frames at ingress while tracking live permission mode", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const now = yield* DateTime.now;
+      const firstAttempt = RunAttemptId.make("throughput-echo-1");
+      const secondAttempt = RunAttemptId.make("throughput-echo-2");
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: firstAttempt,
+          text: "First",
+          attachments: [],
+        }),
+      );
+      const echoed = (message: SDKMessage, promptIndex: number) =>
+        claudeSdkFrame({
+          ...message,
+          user_message_uuid: harness.promptUuid(promptIndex),
+        });
+      yield* harness.offerAndWait(
+        echoed(makeAssistantTextFrame({ uuid: "echo-first", text: "First" }), 0),
+      );
+      yield* harness.offerAndWait(
+        echoed(makeResultFrame({ uuid: "echo-first-result", result: "" }), 0),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: secondAttempt,
+          providerTurnOrdinal: 2,
+          text: "Second",
+          attachments: [],
+        }),
+      );
+      const frames = [
+        [{ type: "message_start", message: { id: "held-response" } }, 10],
+        [{ type: "message_delta", usage: { output_tokens: 100 } }, 1010],
+        [{ type: "message_stop" }, 1010],
+      ] as const;
+      for (const [event, at] of frames) {
+        const frame = claudeSdkFrame({
+          type: "stream_event",
+          event,
+          parent_tool_use_id: null,
+          session_id: WAKE_NATIVE_SESSION,
+          uuid: `held-${event.type}`,
+        });
+        observeClaudeFrame(frame, at);
+        yield* harness.offerAndWait(frame);
+      }
+      assert.equal(
+        harness.events.some(
+          (event) =>
+            event.type === "provider_turn.updated" &&
+            event.providerTurn.responseThroughput !== undefined,
+        ),
+        false,
+      );
+      yield* harness.offerAndWait(
+        claudeSdkFrame({
+          type: "system",
+          subtype: "status",
+          status: null,
+          permissionMode: "plan",
+          uuid: "held-permission-mode",
+          session_id: WAKE_NATIVE_SESSION,
+        }),
+      );
+      yield* harness.offerAndWait(
+        echoed(makeResultFrame({ uuid: "echo-second-result", result: "" }), 1),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+      const final = harness.events.findLast((event) => event.type === "provider_turn.updated");
+      if (final?.type !== "provider_turn.updated") throw new Error("missing turn");
+      assert.deepEqual(final.providerTurn.responseThroughput, {
+        basis: "claude_observed",
+        outputTokens: 100,
+        elapsedMs: 1000,
+        responseCount: 1,
+        partial: false,
+      });
+      const thirdAttempt = RunAttemptId.make("throughput-echo-3");
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: thirdAttempt,
+          providerTurnOrdinal: 3,
+          text: "Third",
+          attachments: [],
+        }),
+      );
+      assert.deepEqual(harness.permissionModeChanges, ["bypassPermissions"]);
+      yield* harness.offerAndWait(
+        echoed(makeResultFrame({ uuid: "echo-third-result", result: "" }), 2),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
       ),
     ),
   );

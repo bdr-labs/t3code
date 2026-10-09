@@ -312,6 +312,8 @@ import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEn
 import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
+import { ComposerStats } from "./chat/ComposerStats";
+import { selectComposerStatsTurns, selectRecordedCompactions } from "./chat/ComposerStats.logic";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
 import { hasAvailableCompactionProvider } from "./chat/ContextWindowMeter.logic";
@@ -1455,6 +1457,31 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadLiveTokenUsage,
     activeProviderThread,
   );
+  const activeUsageLimits = activeProviderStatus?.usageLimits;
+  const activeProviderName =
+    activeProviderStatus?.displayName?.trim() || activeProviderStatus?.instanceId || "";
+  const composerStats = (() => {
+    if (!settings.statsForNerdsEnabled) return null;
+    const usageLimits = activeUsageLimits
+      ? { limits: activeUsageLimits, providerName: activeProviderName }
+      : null;
+    if (!serverProjection) return { turn: null, compactions: [], context: null, usageLimits };
+    const turns = selectComposerStatsTurns(serverProjection);
+    const contextUsage = turns.findLast((turn) => turn.tokenUsage !== undefined)?.tokenUsage;
+    const compactions = selectRecordedCompactions(serverProjection.turnItems, turns);
+    return {
+      turn: turns.at(-1) ?? null,
+      compactions,
+      usageLimits,
+      context: deriveLatestContextWindowSnapshot(
+        compactions.map((item) => ({ item })),
+        contextUsage,
+        serverProjection.providerThreads.find(
+          (thread) => thread.id === serverProjection.thread.activeProviderThreadId,
+        ),
+      ),
+    };
+  })();
   const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
   const activeWorkStartedAt =
     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
@@ -3810,10 +3837,14 @@ export default function ChatView(props: ChatViewProps) {
                         </div>
                       ) : null}
                     </ComposerSurface.Shell>
-                    <div
-                      aria-hidden
-                      className="h-[calc(env(safe-area-inset-bottom)+1rem)] sm:h-[calc(env(safe-area-inset-bottom)+1.25rem)]"
-                    />
+                    {/* Opaque so timeline content scrolling under the overlay can't show through the stats line. */}
+                    <div className={composerStats !== null ? "bg-background" : undefined}>
+                      {composerStats !== null && <ComposerStats {...composerStats} />}
+                      <div
+                        aria-hidden
+                        className="h-[calc(env(safe-area-inset-bottom)+1rem)] sm:h-[calc(env(safe-area-inset-bottom)+1.25rem)]"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>

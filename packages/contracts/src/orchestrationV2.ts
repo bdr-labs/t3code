@@ -1184,6 +1184,16 @@ export const OrchestrationV2ProviderTurn = Schema.Struct({
   completedAt: Schema.NullOr(Schema.DateTimeUtc),
   tokenUsage: Schema.optional(OrchestrationV2ProviderTurnTokenUsage),
   turnTokenUsage: Schema.optional(TurnTokenUsage),
+  /** Provider output over response activity. Missing basis is legacy Claude observed telemetry. */
+  responseThroughput: Schema.optional(
+    Schema.Struct({
+      basis: Schema.optional(Schema.Literals(["claude_observed", "codex_active_windows_estimate"])),
+      outputTokens: NonNegativeInt,
+      elapsedMs: Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0)),
+      responseCount: PositiveInt,
+      partial: Schema.Boolean,
+    }),
+  ),
 });
 export type OrchestrationV2ProviderTurn = typeof OrchestrationV2ProviderTurn.Type;
 

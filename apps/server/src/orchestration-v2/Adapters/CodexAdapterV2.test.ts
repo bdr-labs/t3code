@@ -1238,6 +1238,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
     beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
     onUsageLimits?: CodexAdapterV2.CodexAdapterV2Options["onUsageLimits"],
+    hooks: Pick<CodexAdapterV2.CodexAdapterV2Options, "registerUsageLimitsReader"> = {},
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1297,6 +1298,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         clientFactory,
         ...(onUsageLimits ? { onUsageLimits } : {}),
         digest: yield* Digest.Digest,
+        ...hooks,
         fileSystem,
         idAllocator,
         serverConfig,
@@ -1475,6 +1477,81 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ),
         ),
       ),
+  );
+
+  it.effect("reads fresh limits through the existing initialized session connection", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let reader:
+          | Effect.Effect<import("@t3tools/contracts").ServerProviderUsageLimits | undefined>
+          | undefined;
+        const methods: string[] = [];
+        const transcript = makeCodexReplayTranscript({
+          scenario: "limits-only-existing-client",
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId: "limits-thread",
+              nativeTurnId: "unused",
+              prompt: "unused",
+            }).slice(0, 5),
+            {
+              type: "expect_outbound",
+              label: "limits-read",
+              frame: { id: 3, method: "account/rateLimits/read", params: null },
+            },
+            {
+              type: "emit_inbound",
+              label: "limits-result",
+              frame: {
+                id: 3,
+                result: {
+                  rateLimits: {
+                    limitId: "codex",
+                    primary: { usedPercent: 60, windowDurationMins: 300, resetsAt: 2000100000 },
+                  },
+                  rateLimitsByLimitId: null,
+                  rateLimitResetCredits: null,
+                },
+              },
+            },
+          ],
+        });
+        yield* makeCodexReplayHarness(
+          transcript,
+          () => Effect.void,
+          (method) =>
+            Effect.sync(() => {
+              methods.push(method);
+            }),
+          undefined,
+          undefined,
+          undefined,
+          {
+            registerUsageLimitsReader: (read) =>
+              Effect.gen(function* () {
+                reader = read;
+                // Reading before initialization must not initialize or spawn anything.
+                assert.isUndefined(yield* read);
+              }),
+          },
+        );
+        assert.isDefined(reader);
+        yield* TestClock.adjust("1 minute");
+        const limits = yield* reader!;
+        assert.strictEqual(limits?.windows[0]?.usedPercent, 60);
+        assert.strictEqual(limits?.checkedAt, "1970-01-01T00:01:00.000Z");
+        assert.deepStrictEqual(methods, ["initialize", "thread/start", "account/rateLimits/read"]);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+    ),
   );
 
   it.effect.each(["supported", "unsupported", "invalid"] as const)(
@@ -1958,6 +2035,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.equal(completed?.type, "provider_turn.updated");
         if (completed?.type === "provider_turn.updated") {
+          assert.equal(completed.providerTurn.responseThroughput, undefined);
           assert.deepEqual(completed.providerTurn.turnTokenUsage, {
             usageStatus: "complete",
             usageScope: "main_agent",
@@ -2192,6 +2270,162 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         ),
       ),
     ),
+  );
+
+  it.effect(
+    "persists a stock Codex estimate across long waits without timing delayed usage or children",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = "stock-stats-thread";
+          const nativeTurnId = "stock-stats-turn";
+          const epoch = 1782622440_000;
+          const entry = (
+            method: string,
+            params: Record<string, unknown>,
+          ): CodexReplay.CodexAppServerReplayEntry => ({
+            type: "emit_inbound",
+            label: method,
+            frame: { method, params },
+          });
+          const boundary = (
+            method: "item/started" | "item/completed",
+            item: Record<string, unknown>,
+            at: number,
+          ) =>
+            entry(method, {
+              threadId: nativeThreadId,
+              turnId: nativeTurnId,
+              item,
+              [method === "item/started" ? "startedAtMs" : "completedAtMs"]: epoch + at,
+            });
+          const tokens = (threadId: string, turnId: string, total: number, last: number) => {
+            const breakdown = (outputTokens: number) => ({
+              totalTokens: 10 + outputTokens,
+              inputTokens: 10,
+              cachedInputTokens: 0,
+              outputTokens,
+              reasoningOutputTokens: 0,
+            });
+            return entry("thread/tokenUsage/updated", {
+              threadId,
+              turnId,
+              tokenUsage: {
+                total: breakdown(total),
+                last: breakdown(last),
+                modelContextWindow: 200_000,
+              },
+            });
+          };
+          const reasoning = { type: "reasoning", id: "reasoning", summary: [], content: [] };
+          const first = { type: "agentMessage", id: "first", text: "Working", phase: "commentary" };
+          const final = { type: "agentMessage", id: "final", text: "Done", phase: "final_answer" };
+          const tool = {
+            type: "dynamicToolCall",
+            id: "tool",
+            tool: "test",
+            arguments: {},
+            status: "inProgress",
+          };
+          const transcript = makeCodexReplayTranscript({
+            scenario: "stock-response-stats",
+            entries: [
+              ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "Work" }),
+              boundary("item/started", reasoning, 0),
+              boundary("item/started", first, 500),
+              boundary("item/completed", reasoning, 1000),
+              boundary("item/completed", first, 2000),
+              boundary("item/started", tool, 2000),
+              boundary("item/started", { ...tool, id: "parallel" }, 3000),
+              entry("thread/status/changed", {
+                threadId: nativeThreadId,
+                status: {
+                  type: "active",
+                  activeFlags: ["waitingOnApproval", "waitingOnUserInput"],
+                },
+              }),
+              boundary(
+                "item/completed",
+                { ...tool, status: "completed", contentItems: [], success: true },
+                100_000,
+              ),
+              boundary(
+                "item/completed",
+                { ...tool, id: "parallel", status: "completed", contentItems: [], success: true },
+                200_000,
+              ),
+              tokens(nativeThreadId, nativeTurnId, 100, 100),
+              // Child and previous-turn usage/output must never borrow the root's windows or tokens.
+              tokens("child-thread", "child-turn", 9999, 9999),
+              entry("item/started", {
+                threadId: "child-thread",
+                turnId: "child-turn",
+                startedAtMs: epoch,
+                item: { ...final, id: "child" },
+              }),
+              entry("item/completed", {
+                threadId: "child-thread",
+                turnId: "child-turn",
+                completedAtMs: epoch + 999_000,
+                item: { ...final, id: "child" },
+              }),
+              boundary("item/started", final, 201_000),
+              boundary("item/completed", final, 203_000),
+              tokens(nativeThreadId, nativeTurnId, 400, 300),
+              entry("turn/completed", {
+                threadId: nativeThreadId,
+                turn: {
+                  ...makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  completedAt: epoch / 1000 + 300,
+                },
+              }),
+            ],
+          });
+          const harness = yield* makeCodexReplayHarness(transcript);
+          yield* harness.runtime.startTurn(
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("stock-stats-attempt"),
+              text: "Work",
+            }),
+          );
+          yield* harness.firstTerminal;
+          const completed = harness.events.find(
+            (event) =>
+              event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
+          );
+          assert.equal(completed?.type, "provider_turn.updated");
+          if (completed?.type === "provider_turn.updated") {
+            assert.equal(completed.providerTurn.turnTokenUsage?.outputTokens, 400);
+            assert.deepEqual(completed.providerTurn.responseThroughput, {
+              basis: "codex_active_windows_estimate",
+              outputTokens: 400,
+              elapsedMs: 4000,
+              responseCount: 2,
+              partial: true,
+            });
+          }
+          assert.equal(
+            harness.events.filter(
+              (event) =>
+                event.type === "provider_turn.updated" &&
+                event.providerTurn.responseThroughput !== undefined,
+            ).length,
+            1,
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+          ),
+        ),
+      ),
   );
 
   it.effect("preserves T3 context on the wire and restores it after compaction", () =>

@@ -1,5 +1,6 @@
 import { pipe } from "effect/Function";
 import * as DocumentText from "../../provider/DocumentText.ts";
+import { CodexResponseThroughput } from "./CodexResponseThroughput.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -24,6 +25,7 @@ import {
 } from "../../provider/CodexProvider.ts";
 import {
   codexRateLimitsToUpdate,
+  codexRateLimitsToLimits,
   mergeCodexRateLimits,
   codexUsageLimitResetAt,
   type CodexRateLimitSnapshot,
@@ -75,6 +77,7 @@ import type {
   ProviderThreadId,
   ProviderTurnId,
   ProviderInstanceId,
+  ServerProviderUsageLimits,
   RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
@@ -1181,6 +1184,7 @@ interface ActiveCodexTurnContext {
   capacityRetryAttempt?: number;
   capacityRetryPending?: Deferred.Deferred<ActiveCodexTurnContext | undefined>;
   closedCommandItemIds?: ReadonlySet<string>;
+  readonly responseThroughput?: CodexResponseThroughput;
   latestProviderFailure?: {
     readonly nativeMessage: string;
     readonly nativeCode: string | null;
@@ -1646,7 +1650,10 @@ export type CodexAdapterV2DriverEnv =
 
 export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapterV2")(function* (
   { instanceId, environment, enabled, config }: ProviderAdapterDriverCreateInput<CodexSettings>,
-  hooks: Pick<CodexAdapterV2Options, "onUsageLimits" | "resolveRuntime" | "compatibility"> = {},
+  hooks: Pick<
+    CodexAdapterV2Options,
+    "onUsageLimits" | "resolveRuntime" | "compatibility" | "registerUsageLimitsReader"
+  > = {},
 ) {
   const clientFactory = yield* CodexAppServerClientFactory;
   const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
@@ -1691,6 +1698,9 @@ export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapter
 });
 
 export interface CodexAdapterV2Options {
+  readonly registerUsageLimitsReader?: (
+    reader: Effect.Effect<ServerProviderUsageLimits | undefined>,
+  ) => Effect.Effect<void, never, Scope.Scope>;
   readonly instanceId: ProviderInstanceId;
   readonly settings: CodexSettings;
   readonly environment: NodeJS.ProcessEnv;
@@ -1840,6 +1850,23 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         );
         // A failed open is discarded, so the next turn spawns the updated binary.
         if (adapterOptions.compatibility !== undefined) yield* ensureInitialized;
+        if (adapterOptions.registerUsageLimitsReader) {
+          yield* adapterOptions.registerUsageLimitsReader(
+            Effect.gen(function* () {
+              if (!(yield* Ref.get(initialized))) return undefined;
+              const response = yield* client.request("account/rateLimits/read", null);
+              return codexRateLimitsToLimits({
+                snapshot: response.rateLimits,
+                rateLimitsByLimitId: response.rateLimitsByLimitId,
+                resetCredits: response.rateLimitResetCredits,
+                checkedAt: DateTime.formatIso(yield* DateTime.now),
+              });
+            }).pipe(
+              Effect.timeout("3 seconds"),
+              Effect.orElseSucceed(() => undefined),
+            ),
+          );
+        }
         const now = yield* DateTime.now;
         const session = providerSession({
           providerSessionId: input.providerSessionId,
@@ -2125,6 +2152,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             itemParentNodeId: input.turnInput.rootNodeId,
             rootNodeId: input.turnInput.rootNodeId,
             subagent: null,
+            responseThroughput: new CodexResponseThroughput(
+              DateTime.toEpochMillis(yield* DateTime.now),
+            ),
             startedAt: input.startedAt,
             itemPositions: new Map(),
             fileChangeKindsByItem: new Map(),
@@ -3475,12 +3505,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           return key;
         };
         const appendReasoning = Effect.fn("CodexAdapterV2.appendReasoning")(function* (
-          payload: { turnId: string; itemId: string; delta: string },
+          payload: { threadId: string; turnId: string; itemId: string; delta: string },
           stream: "summary" | "content",
           index: number,
+          receipt: number,
         ) {
           const context = yield* awaitActiveTurn(payload.turnId);
           if (context === undefined || payload.delta.length === 0) return;
+          if (context.providerThread.nativeThreadRef?.nativeId === payload.threadId)
+            context.responseThroughput?.activity(payload.itemId, receipt);
           yield* completeProviderRetry(context, yield* DateTime.now);
           const itemId = reasoningPartKey(payload.turnId, payload.itemId, stream, index);
           // Reserve positions before delayed flushes so later tools stay after them.
@@ -4213,6 +4246,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           readonly appName?: string;
           readonly options?: ReadonlyArray<ProviderApprovalOption>;
         }) {
+          input.context.responseThroughput?.wait();
           const createdAt = yield* DateTime.now;
           const { owner, subagent } = approvalOwnerCodexTurn(input.context);
           const parentNodeId =
@@ -4308,6 +4342,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           readonly questions: ReadonlyArray<CodexSchema.ToolRequestUserInputParams__ToolRequestUserInputQuestion>;
           readonly responseMode?: "message";
         }) {
+          if (input.responseMode !== "message") input.context.responseThroughput?.wait();
           const createdAt = yield* DateTime.now;
           const requestId = yield* idAllocator.allocate.runtimeRequest({
             driver: CODEX_PROVIDER,
@@ -4397,10 +4432,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           return { node, request, turnItem };
         });
 
-        yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
-          Effect.gen(function* () {
+        yield* client.handleServerNotification("item/agentMessage/delta", (payload) => {
+          const receipt = performance.now();
+          return Effect.gen(function* () {
             const context = (yield* Ref.get(activeTurns)).get(payload.turnId);
             if (context !== undefined) {
+              if (
+                payload.delta.length > 0 &&
+                context.providerThread.nativeThreadRef?.nativeId === payload.threadId
+              )
+                context.responseThroughput?.activity(payload.itemId, receipt);
               yield* completeProviderRetry(context, yield* DateTime.now);
             }
             yield* agentMessageDeltas.append({
@@ -4408,8 +4449,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               itemId: payload.itemId,
               delta: payload.delta,
             });
-          }),
-        );
+          });
+        });
 
         yield* client.handleServerNotification("item/commandExecution/outputDelta", (payload) =>
           Effect.gen(function* () {
@@ -4432,33 +4473,41 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         );
 
         yield* client.handleServerNotification("item/reasoning/summaryTextDelta", (payload) =>
-          appendReasoning(payload, "summary", payload.summaryIndex),
+          appendReasoning(payload, "summary", payload.summaryIndex, performance.now()),
         );
         yield* client.handleServerNotification("item/reasoning/textDelta", (payload) =>
-          appendReasoning(payload, "content", payload.contentIndex),
+          appendReasoning(payload, "content", payload.contentIndex, performance.now()),
         );
 
-        yield* client.handleServerNotification("item/plan/delta", (payload) =>
-          Effect.gen(function* () {
+        yield* client.handleServerNotification("item/plan/delta", (payload) => {
+          const receipt = performance.now();
+          return Effect.gen(function* () {
             const context = yield* awaitActiveTurn(payload.turnId);
             if (context === undefined) {
               return;
             }
+            if (
+              payload.delta.length > 0 &&
+              context.providerThread.nativeThreadRef?.nativeId === payload.threadId
+            )
+              context.responseThroughput?.activity(payload.itemId, receipt);
             yield* completeProviderRetry(context, yield* DateTime.now);
             yield* planDeltas.append({
               turnId: payload.turnId,
               itemId: payload.itemId,
               delta: payload.delta,
             });
-          }).pipe(Effect.orDie),
-        );
+          }).pipe(Effect.orDie);
+        });
 
-        yield* client.handleServerNotification("turn/plan/updated", (payload) =>
-          Effect.gen(function* () {
+        yield* client.handleServerNotification("turn/plan/updated", (payload) => {
+          return Effect.gen(function* () {
             const context = yield* awaitActiveTurn(payload.turnId);
             if (context === undefined) {
               return;
             }
+            if (context.providerThread.nativeThreadRef?.nativeId === payload.threadId)
+              context.responseThroughput?.unmeasuredActivity();
             yield* completeProviderRetry(context, yield* DateTime.now);
             const steps = payload.plan.map((step, index) => ({
               id: `step-${index + 1}`,
@@ -4488,8 +4537,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               driver: CODEX_PROVIDER,
               turnItem: artifacts.turnItem,
             });
-          }).pipe(Effect.orDie),
-        );
+          }).pipe(Effect.orDie);
+        });
 
         yield* client.handleServerNotification("account/rateLimits/updated", (payload) =>
           Effect.gen(function* () {
@@ -4520,6 +4569,29 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               yield* adapterOptions.onUsageLimits({ ...update, checkedAt });
             }
           }).pipe(Effect.orDie),
+        );
+
+        for (const method of [
+          "item/commandExecution/outputDelta",
+          "item/fileChange/outputDelta",
+        ] as const) {
+          yield* client.handleServerNotification(method, (payload) =>
+            Effect.gen(function* () {
+              const context = (yield* Ref.get(activeTurns)).get(payload.turnId);
+              if (context?.providerThread.nativeThreadRef?.nativeId === payload.threadId)
+                context.responseThroughput?.toolOutput(payload.itemId);
+            }),
+          );
+        }
+
+        yield* client.handleServerNotification("thread/status/changed", (payload) =>
+          Effect.gen(function* () {
+            if (payload.status.type !== "active" || payload.status.activeFlags.length === 0) return;
+            for (const context of (yield* Ref.get(activeTurns)).values()) {
+              if (context.providerThread.nativeThreadRef?.nativeId === payload.threadId)
+                context.responseThroughput?.wait();
+            }
+          }),
         );
 
         yield* client.handleServerNotification("thread/tokenUsage/updated", (payload) =>
@@ -4848,12 +4920,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           }).pipe(Effect.orDie, turnTerminalizationPermit.withPermits(1)),
         );
 
-        yield* client.handleServerNotification("item/started", (payload) =>
-          Effect.gen(function* () {
+        yield* client.handleServerNotification("item/started", (payload) => {
+          const receipt = performance.now();
+          return Effect.gen(function* () {
             const context = yield* awaitActiveTurn(payload.turnId);
             if (context === undefined) {
               return;
             }
+
+            if (context.providerThread.nativeThreadRef?.nativeId === payload.threadId)
+              context.responseThroughput?.itemStarted(payload.item, payload.startedAtMs, receipt);
 
             if (payload.item.type === "contextCompaction") {
               yield* emitCompactionItem(
@@ -4986,11 +5062,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               driver: CODEX_PROVIDER,
               turnItem: artifacts.turnItem,
             });
-          }).pipe(Effect.orDie, turnTerminalizationPermit.withPermits(1)),
-        );
+          }).pipe(Effect.orDie, turnTerminalizationPermit.withPermits(1));
+        });
 
-        yield* client.handleServerNotification("item/completed", (payload) =>
-          Effect.gen(function* () {
+        yield* client.handleServerNotification("item/completed", (payload) => {
+          const receipt = performance.now();
+          return Effect.gen(function* () {
             if (payload.item.type === "contextCompaction")
               // Fork requests off the notification reader so it can read their responses.
               yield* restoreAdditionalContext(payload.threadId).pipe(
@@ -5016,6 +5093,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               return;
             }
             const { context, settled } = resolved;
+            if (!settled && context.providerThread.nativeThreadRef?.nativeId === payload.threadId)
+              context.responseThroughput?.itemCompleted(
+                payload.item,
+                payload.completedAtMs,
+                receipt,
+              );
 
             if (payload.item.type === "reasoning") {
               yield* completeReasoning(payload.turnId, payload.item);
@@ -5308,8 +5391,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 result: text,
               });
             }
-          }).pipe(Effect.orDie, turnTerminalizationPermit.withPermits(1)),
-        );
+          }).pipe(Effect.orDie, turnTerminalizationPermit.withPermits(1));
+        });
 
         yield* client.handleServerRequest("item/commandExecution/requestApproval", (payload) =>
           Effect.gen(function* () {
@@ -6190,6 +6273,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   yield* emitImageWorkState(input.context, images.running.size > 0);
                 }
               }
+              const turnTokenUsage = completeCodexTurnTokenUsage(
+                usageStateForThread(
+                  input.context.providerThread.nativeThreadRef?.nativeId ??
+                    String(input.context.providerThread.id),
+                ),
+                input.nativeTurnId,
+                input.status === "completed",
+                reportedTurnModel(
+                  input.context.providerThread.nativeThreadRef?.nativeId ?? "",
+                  input.nativeTurnId,
+                ),
+              );
+              const responseThroughput = input.context.responseThroughput?.finalize(turnTokenUsage);
               const nativeThreadId = input.context.providerThread.nativeThreadRef?.nativeId;
               const activation =
                 nativeThreadId == null ? undefined : goalActivations.get(nativeThreadId);
@@ -6214,18 +6310,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 status: input.status,
                 startedAt: input.context.startedAt,
                 completedAt: input.completedAt,
-                turnTokenUsage: completeCodexTurnTokenUsage(
-                  usageStateForThread(
-                    input.context.providerThread.nativeThreadRef?.nativeId ??
-                      String(input.context.providerThread.id),
-                  ),
-                  input.nativeTurnId,
-                  input.status === "completed",
-                  reportedTurnModel(
-                    input.context.providerThread.nativeThreadRef?.nativeId ?? "",
-                    input.nativeTurnId,
-                  ),
-                ),
+                turnTokenUsage,
+                ...(responseThroughput === undefined ? {} : { responseThroughput }),
               };
               if (!holdsForGoal) {
                 yield* emitProviderEvent({

@@ -589,6 +589,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["composer rich text tiptap bold italic markdown styled wysiwyg"],
   },
   {
+    id: "stats-for-nerds",
+    title: "Stats for nerds",
+    to: "/settings/chat",
+    searchTerms: ["context tokens cache elapsed telemetry composer usage"],
+  },
+  {
     id: "send-shortcut",
     title: "Send shortcut",
     to: "/settings/chat",

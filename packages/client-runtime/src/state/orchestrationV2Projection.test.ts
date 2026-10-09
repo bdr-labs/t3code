@@ -146,6 +146,13 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
       status: "running" as const,
       startedAt: now,
       completedAt: null,
+      responseThroughput: {
+        basis: "codex_active_windows_estimate" as const,
+        outputTokens: 400,
+        elapsedMs: 4000,
+        responseCount: 2,
+        partial: true,
+      },
       tokenUsage: {
         usedTokens: 50_000,
         maxTokens: 200_000,
@@ -164,6 +171,7 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
         status: "completed",
         completedAt: now,
         tokenUsage: undefined,
+        responseThroughput: undefined,
       },
     } as OrchestrationV2DomainEvent;
 
@@ -171,6 +179,11 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
 
     expect(next?.providerTurns[0]?.status).toBe("completed");
     expect(next?.providerTurns[0]?.tokenUsage).toEqual(running.tokenUsage);
+    expect(next?.providerTurns[0]?.responseThroughput).toEqual(running.responseThroughput);
+    // Reapplying an event after subscription replay must not accumulate samples.
+    expect(
+      applyOrchestrationV2ProjectionEvent(next!, event)?.providerTurns[0]?.responseThroughput,
+    ).toEqual(running.responseThroughput);
   });
 
   it("applies thread lifecycle payloads instead of leaving stale metadata", () => {

@@ -2532,6 +2532,13 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         outputTokens: 1_000,
         updatedAt: "2026-08-29T12:00:00.000Z",
       } as const;
+      const throughput = {
+        basis: "codex_active_windows_estimate" as const,
+        outputTokens: 400,
+        elapsedMs: 4000,
+        responseCount: 2,
+        partial: false,
+      };
       const replacementUsage = {
         usedTokens: 18_000,
         maxTokens: 200_000,
@@ -2588,10 +2595,10 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         nodeId,
         driver,
         occurredAt: now,
-        payload: { ...providerTurn, tokenUsage: initialUsage },
+        payload: { ...providerTurn, tokenUsage: initialUsage, responseThroughput: throughput },
       });
       yield* projectionStore.apply({
-        id: EventId.make("event:provider-usage-reload:completed"),
+        id: EventId.make("event:provider-usage-reload:without-usage"),
         type: "provider-turn.updated",
         threadId,
         nodeId,
@@ -2599,9 +2606,28 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         occurredAt: now,
         payload: { ...providerTurn, status: "completed", completedAt: now },
       });
+      const withoutUsage = yield* projectionStore.getThreadProjection(threadId);
+      assert.deepEqual(withoutUsage.providerTurns[0]?.tokenUsage, initialUsage);
+      assert.deepEqual(withoutUsage.providerTurns[0]?.responseThroughput, throughput);
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:provider-usage-reload:completed"),
+        type: "provider-turn.updated",
+        threadId,
+        nodeId,
+        driver,
+        occurredAt: now,
+        payload: {
+          ...providerTurn,
+          status: "completed",
+          completedAt: now,
+          tokenUsage: replacementUsage,
+        },
+      });
 
       const reloaded = yield* projectionStore.getThreadProjection(threadId);
-      assert.deepEqual(reloaded.providerTurns[0]?.tokenUsage, initialUsage);
+      assert.deepEqual(reloaded.providerTurns[0]?.tokenUsage, replacementUsage);
+      assert.deepEqual(reloaded.providerTurns[0]?.responseThroughput, throughput);
       assert.strictEqual(reloaded.providerTurns[0]?.status, "completed");
 
       yield* projectionStore.apply({
@@ -2616,11 +2642,16 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           status: "completed",
           completedAt: now,
           tokenUsage: replacementUsage,
+          responseThroughput: { ...throughput, partial: true },
         },
       });
 
       const replaced = yield* projectionStore.getThreadProjection(threadId);
       assert.deepEqual(replaced.providerTurns[0]?.tokenUsage, replacementUsage);
+      assert.deepEqual(replaced.providerTurns[0]?.responseThroughput, {
+        ...throughput,
+        partial: true,
+      });
     }),
   );
 

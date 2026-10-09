@@ -4,6 +4,7 @@ import {
   mcpToolResultOutput,
   toolOutputImages,
 } from "@t3tools/shared/toolOutput";
+import { ClaudeResponseThroughput, observeClaudeFrame } from "./ClaudeResponseThroughput.ts";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
 import {
@@ -1382,6 +1383,10 @@ export const layerQueryRunner: Layer.Layer<
                   answered = true;
                 }),
               ),
+              Stream.map((message) => {
+                observeClaudeFrame(message);
+                return message;
+              }),
               Stream.tap((message) =>
                 logProtocolEvent({
                   direction: "incoming",
@@ -4311,6 +4316,7 @@ function formatClaudeUsageLimitWait(waitMs: number): string {
 
 interface ActiveClaudeTurnContext {
   readonly queryPolicy: ClaudeRuntimeQueryPolicy;
+  readonly responseThroughput: ClaudeResponseThroughput;
   readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
   readonly nativeThreadId: string;
   readonly nativeTurnId: string;
@@ -5918,6 +5924,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             return ordinal;
           });
 
+        // Native message ids cannot be counted again after a query reconnect or wake replay.
+        const throughputMessageIds = new Set<string>();
         const providerTurnPayload = (input: {
           readonly context: ActiveClaudeTurnContext;
           readonly status: OrchestrationV2ProviderTurn["status"];
@@ -5936,6 +5944,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           status: input.status,
           startedAt: input.context.startedAt,
           completedAt: input.completedAt,
+          ...(input.context.responseThroughput.aggregate() === undefined
+            ? {}
+            : { responseThroughput: input.context.responseThroughput.aggregate() }),
         });
 
         const buildToolCallArtifacts = (input: {
@@ -8051,6 +8062,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   failure: null,
                   threadDisposition,
                 };
+          input.context.responseThroughput.finalize(input.status !== "completed");
           yield* Effect.all(
             [
               emitProviderEvent({
@@ -8928,6 +8940,20 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             return;
           }
           yield* trackClaudeGoal({ nativeThreadId: liveQuery.nativeThreadId, context, message });
+
+          const responseCompleted = context.responseThroughput.observe(
+            message,
+            throughputMessageIds,
+            input.query,
+          );
+          if (responseCompleted) {
+            yield* emitProviderEvent({
+              type: "provider_turn.updated",
+              driver: CLAUDE_PROVIDER,
+              threadId: context.input.threadId,
+              providerTurn: providerTurnPayload({ context, status: "running", completedAt: null }),
+            });
+          }
 
           if (message.type === "stream_event" && !message.parent_tool_use_id) {
             const event = message.event;
@@ -10956,8 +10982,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             return context;
           });
           yield* querySession.messages.pipe(
-            Stream.runForEach((message) =>
-              sdkMessageLock.withPermits(1)(
+            Stream.runForEach((message) => {
+              // Test/custom runners also stamp at ingress; held replays keep the first stamp.
+              observeClaudeFrame(message, undefined, querySession);
+              return sdkMessageLock.withPermits(1)(
                 Effect.suspend(() => {
                   if (
                     message.type === "system" &&
@@ -10995,8 +11023,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   }
                   return handleSdkMessage({ query: querySession, message });
                 }),
-              ),
-            ),
+              );
+            }),
             Effect.exit,
             Effect.flatMap(
               Effect.fnUntraced(function* (exit: ClaudeQueryStreamExit) {
@@ -11105,6 +11133,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   );
             const querySession = yield* openQuery(turnInput, nativeThreadId);
             const context: ActiveClaudeTurnContext = {
+              responseThroughput: new ClaudeResponseThroughput(),
               input: turnInput,
               queryPolicy: querySession.queryPolicy,
               nativeThreadId,
