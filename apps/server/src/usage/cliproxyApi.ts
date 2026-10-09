@@ -308,6 +308,7 @@ export const makeCliproxyApi = Effect.gen(function* () {
           plan: "Claude Subscription",
           usageLimits: claudeUsageResponseToLimits({
             checkedAt,
+            source: "account",
             response: {
               rate_limits_available: true,
               rate_limits: rateLimits,

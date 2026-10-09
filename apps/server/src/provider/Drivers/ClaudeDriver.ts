@@ -146,6 +146,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     });
 
     const scopedLimitNames = yield* makeClaudeScopedLimitNames;
+    const readUsageLimits = yield* ClaudeResetCredits.makeClaudeUsageLimitsReader(
+      configDir,
+      scopedLimitNames,
+      yield* ClaudeResetCredits.claudeUsageShareDirectory(),
+    );
     const orchestrationAdapter = yield* createClaudeAdapterV2(
       {
         instanceId,
@@ -243,11 +248,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
               catalog,
               scopedLimitNames,
               (version) =>
-                ClaudeResetCredits.readClaudeResetCredits(configDir, version).pipe(
-                  Effect.provideService(HttpClient.HttpClient, httpClient),
-                  Effect.provideService(FileSystem.FileSystem, fileSystem),
-                  Effect.provideService(Path.Path, path),
-                ),
+                readUsageLimits(version).pipe(Effect.map((limits) => limits?.resetCredits)),
             ),
           ),
           Effect.tap((provider) =>
@@ -276,6 +277,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         ),
       checkProvider,
       invalidateUsageCache: Cache.invalidateAll(capabilitiesProbeCache),
+      pollUsageLimits: (snapshot) =>
+        snapshot.version ? readUsageLimits(snapshot.version) : Effect.undefined,
       enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>
         resolveMaintenance().pipe(
           Effect.flatMap((maintenanceCapabilities) =>

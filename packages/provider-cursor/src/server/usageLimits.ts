@@ -51,6 +51,7 @@ export function cursorUsageResponseToLimits(
         id,
         kind: "monthly",
         label,
+        source: "account",
         usedPercent: clampPercent(usedPercent),
         ...(resetsAt ? { resetsAt } : {}),
       });

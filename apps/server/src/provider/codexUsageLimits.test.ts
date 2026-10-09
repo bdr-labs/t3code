@@ -19,15 +19,13 @@ describe("codexRateLimitsToLimits", () => {
       secondary: null,
       individualLimit: { remainingPercent: 99, resetsAt: 1_784_500_000 },
     };
-    const windows = [
-      {
-        id: "individual",
-        kind: "monthly",
-        label: "Monthly credit limit",
-        usedPercent: 1,
-        resetsAt: "2026-07-19T22:26:40.000Z",
-      },
-    ];
+    const window = {
+      id: "individual",
+      kind: "monthly",
+      label: "Monthly credit limit",
+      usedPercent: 1,
+      resetsAt: "2026-07-19T22:26:40.000Z",
+    };
 
     expect(
       codexRateLimitsToLimits({
@@ -35,8 +33,10 @@ describe("codexRateLimitsToLimits", () => {
         snapshot: { limitId: "spark" },
         rateLimitsByLimitId: { codex: snapshot },
       }),
-    ).toEqual({ checkedAt, windows });
-    expect(codexRateLimitsToUpdate(snapshot)).toEqual({ windows });
+    ).toEqual({ checkedAt, windows: [{ ...window, source: "account" }] });
+    expect(codexRateLimitsToUpdate(snapshot)).toEqual({
+      windows: [{ ...window, source: "turn" }],
+    });
   });
 
   it("maps primary and secondary onto the session and weekly windows", () => {
@@ -45,8 +45,8 @@ describe("codexRateLimitsToLimits", () => {
         checkedAt,
         snapshot: {
           planType: "plus",
-          primary: { usedPercent: 12, resetsAt: 1_784_000_000, windowDurationMins: 300 },
-          secondary: { usedPercent: 47, resetsAt: 1_784_500_000, windowDurationMins: 10080 },
+          primary: { usedPercent: 12, resetsAt: 1_784_800_000, windowDurationMins: 300 },
+          secondary: { usedPercent: 47, resetsAt: 1_784_900_000, windowDurationMins: 10080 },
         },
       }),
     ).toEqual({
@@ -56,17 +56,19 @@ describe("codexRateLimitsToLimits", () => {
           id: "primary",
           kind: "session",
           label: "Session",
+          source: "account",
           usedPercent: 12,
           windowDurationMins: 300,
-          resetsAt: "2026-07-14T03:33:20.000Z",
+          resetsAt: "2026-07-23T09:46:40.000Z",
         },
         {
           id: "secondary",
           kind: "weekly",
           label: "Weekly",
+          source: "account",
           usedPercent: 47,
           windowDurationMins: 10080,
-          resetsAt: "2026-07-19T22:26:40.000Z",
+          resetsAt: "2026-07-24T13:33:20.000Z",
         },
       ],
     });
@@ -83,6 +85,7 @@ describe("codexRateLimitsToLimits", () => {
         id: "primary",
         kind: "monthly",
         label: "Monthly",
+        source: "account",
         usedPercent: 80,
         windowDurationMins: 43_200,
       },
@@ -110,6 +113,7 @@ describe("codexRateLimitsToLimits", () => {
         id: "secondary",
         kind: "weekly",
         label: "Weekly",
+        source: "account",
         usedPercent: 42,
         windowDurationMins: 10080,
       },
@@ -162,6 +166,7 @@ describe("codexRateLimitsToUpdate", () => {
           id: "secondary",
           kind: "weekly",
           label: "Weekly",
+          source: "turn",
           usedPercent: 51,
           windowDurationMins: 10080,
         },
@@ -189,6 +194,7 @@ describe("codexRateLimitsToUpdate", () => {
         id: "secondary",
         kind: "weekly",
         label: "Weekly",
+        source: "turn",
         usedPercent: 42,
         windowDurationMins: 10080,
       },
@@ -226,6 +232,7 @@ describe("mergeCodexRateLimits", () => {
           id: "primary",
           kind: "session",
           label: "Session",
+          source: "turn",
           usedPercent: 12,
           windowDurationMins: 300,
         },
@@ -233,6 +240,7 @@ describe("mergeCodexRateLimits", () => {
           id: "individual",
           kind: "monthly",
           label: "Monthly credit limit",
+          source: "turn",
           usedPercent: 25,
           resetsAt: "2026-08-17T20:53:20.000Z",
         },

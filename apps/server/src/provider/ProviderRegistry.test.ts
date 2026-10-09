@@ -421,7 +421,11 @@ it.layer(
           checkCodexProviderStatus(defaultCodexSettings, () =>
             Effect.succeed(
               makeCodexProbeSnapshot({
-                rateLimits: { snapshot: { planType }, resetCredits: null },
+                rateLimits: {
+                  checkedAt: "2026-03-25T00:00:00.000Z",
+                  snapshot: { planType },
+                  resetCredits: null,
+                },
               }),
             ),
           );

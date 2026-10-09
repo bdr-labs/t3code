@@ -86,6 +86,7 @@ export function grokUsageResponseToLimits(
     id: "subscription",
     kind,
     label: kind === "weekly" ? "Weekly" : kind === "monthly" ? "Monthly" : "Subscription",
+    source: "account",
     usedPercent: clampPercent(usedPercent),
     ...(Option.isSome(reset) ? { resetsAt: DateTime.formatIso(reset.value) } : {}),
   };

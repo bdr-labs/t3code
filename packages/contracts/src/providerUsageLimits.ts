@@ -14,8 +14,18 @@ export const ServerProviderUsageWindow = Schema.Struct({
   id: TrimmedNonEmptyString,
   kind: Schema.Literals(["session", "weekly", "monthly", "other"]),
   label: TrimmedNonEmptyString,
+  /**
+   * How this reading was fetched. Account APIs and streamed turn events carry
+   * more authority than a CLI estimate, so the server merge keeps their recent
+   * values from being replaced by an untrusted probe.
+   */
+  source: Schema.optional(Schema.Literals(["account", "turn", "probe"])),
+  /** Time this window was fetched, retained across sparse updates and cached probes. */
+  checkedAt: Schema.optional(IsoDateTime),
   usedPercent: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
   resetsAt: Schema.optional(IsoDateTime),
+  /** The reset has passed and this zero is waiting for the next real reading. */
+  resetPending: Schema.optional(Schema.Boolean),
   windowDurationMins: Schema.optional(NonNegativeInt),
 });
 export type ServerProviderUsageWindow = typeof ServerProviderUsageWindow.Type;

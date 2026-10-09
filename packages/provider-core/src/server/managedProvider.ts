@@ -4,7 +4,9 @@ import {
   ServerSettingsError,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
+import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Fiber from "effect/Fiber";
@@ -16,12 +18,17 @@ import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ProviderHost from "./ProviderHost.ts";
-import { applyUsageLimitsUpdate, resolveUsageLimitsAfterProbe } from "./usageLimits.ts";
+import {
+  applyUsageLimitsUpdate,
+  resolveUsageLimitsAfterProbe,
+  usageWindowEquals,
+} from "./usageLimits.ts";
 import type { ManagedServerProvider } from "./snapshot.ts";
 
 interface ProviderSnapshotState {
   readonly snapshot: ServerProvider;
   readonly enrichmentGeneration: number;
+  readonly usageLimitsPublishedAt?: string | undefined;
 }
 
 function withUsageLimits(
@@ -46,6 +53,9 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   readonly checkProvider: Effect.Effect<ServerProvider, ServerSettingsError>;
   readonly checkUsageLimits?: Effect.Effect<ServerProvider["usageLimits"]>;
   readonly invalidateUsageCache?: Effect.Effect<void>;
+  readonly pollUsageLimits?: (
+    snapshot: ServerProvider,
+  ) => Effect.Effect<ServerProvider["usageLimits"]>;
   readonly enrichSnapshot?: (input: {
     readonly settings: Settings;
     readonly snapshot: ServerProvider;
@@ -202,11 +212,33 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
           update,
           checkedAt: update.checkedAt,
         });
+        // Duplicate or older reports leave state and subscribers untouched.
         if (usageLimits === state.snapshot.usageLimits) {
           return [null, state] as const;
         }
         const snapshot = withUsageLimits(state.snapshot, usageLimits);
-        return [snapshot, { ...state, snapshot }] as const;
+        const previous = state.snapshot.usageLimits;
+        const onlyFetchTimeChanged =
+          previous &&
+          usageLimits &&
+          previous.windows.length === usageLimits.windows.length &&
+          previous.windows.every((window, index) =>
+            usageWindowEquals(window, usageLimits.windows[index]!),
+          );
+        // Keep every fetch time for ordering, but coalesce identical token ticks
+        // on the wire. The published age is always a real fetch, at most 30s old.
+        const lastPublishedAt = state.usageLimitsPublishedAt ?? previous?.checkedAt;
+        if (
+          onlyFetchTimeChanged &&
+          lastPublishedAt &&
+          Date.parse(usageLimits.checkedAt) - Date.parse(lastPublishedAt) < 30_000
+        ) {
+          return [null, { ...state, snapshot, usageLimitsPublishedAt: lastPublishedAt }] as const;
+        }
+        return [
+          snapshot,
+          { ...state, snapshot, usageLimitsPublishedAt: usageLimits?.checkedAt },
+        ] as const;
       });
       if (snapshotToPublish !== null) {
         yield* PubSub.publish(changesPubSub, snapshotToPublish);
@@ -300,6 +332,41 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     ]);
     return genericDemand || instanceDemand;
   });
+
+  if (input.pollUsageLimits) {
+    const pollUsageLimits = input.pollUsageLimits;
+    yield* Effect.forever(
+      Effect.gen(function* () {
+        const startedAt = yield* Clock.currentTimeMillis;
+        // Limits keep local usage readings fresh even without a foreground client.
+        // Recover inside the tick so a failed read cannot skip its sleep or stop polling.
+        yield* Effect.gen(function* () {
+          const current = (yield* Ref.get(snapshotStateRef)).snapshot;
+          if (current.enabled) {
+            const limits = yield* pollUsageLimits(current);
+            if (limits) {
+              const next = yield* Ref.modify(snapshotStateRef, (state) => {
+                const usageLimits = resolveUsageLimitsAfterProbe({
+                  published: state.snapshot.usageLimits,
+                  probed: limits,
+                });
+                const snapshot = withUsageLimits(state.snapshot, usageLimits);
+                return [snapshot, { ...state, snapshot }] as const;
+              });
+              yield* PubSub.publish(changesPubSub, next);
+            }
+          }
+        }).pipe(
+          Effect.catchCauseIf(
+            (cause) => !Cause.hasInterrupts(cause),
+            (cause) => Effect.logError(cause),
+          ),
+        );
+        const finishedAt = yield* Clock.currentTimeMillis;
+        yield* Effect.sleep(Math.max(0, 60_000 - (finishedAt - startedAt)));
+      }),
+    ).pipe(Effect.forkScoped);
+  }
 
   const getRefreshInterval =
     input.refreshInterval !== undefined

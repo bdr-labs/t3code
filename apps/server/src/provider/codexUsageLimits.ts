@@ -59,6 +59,7 @@ function labelForKind(kind: ServerProviderUsageWindow["kind"]): string {
 /** primary/secondary are positions; without windowDurationMins, paid plans use 5-hour/weekly windows and Free/Go use monthly. */
 function codexRateLimitsToWindows(
   snapshot: CodexRateLimitSnapshot,
+  source: NonNullable<ServerProviderUsageWindow["source"]>,
 ): ReadonlyArray<ServerProviderUsageWindow> {
   // Keep model-specific limits out of main allowance rows; older CLIs omit limit IDs.
   if (snapshot.limitId && snapshot.limitId !== "codex") return [];
@@ -78,6 +79,7 @@ function codexRateLimitsToWindows(
       id,
       kind,
       label: labelForKind(kind),
+      source,
       usedPercent: clampPercent(window.usedPercent),
       windowDurationMins,
       ...(resetsAt ? { resetsAt } : {}),
@@ -90,6 +92,7 @@ function codexRateLimitsToWindows(
       id: "individual",
       kind: "monthly",
       label: "Monthly credit limit",
+      source,
       usedPercent: clampPercent(100 - individualLimit.remainingPercent),
       ...(resetsAt ? { resetsAt } : {}),
     });
@@ -123,7 +126,10 @@ export function codexRateLimitsToLimits(input: {
   readonly checkedAt: string;
 }): ServerProviderUsageLimits {
   const resetCredits = codexResetCreditsToContract(input.resetCredits);
-  const windows = codexRateLimitsToWindows(input.rateLimitsByLimitId?.codex ?? input.snapshot);
+  const windows = codexRateLimitsToWindows(
+    input.rateLimitsByLimitId?.codex ?? input.snapshot,
+    "account",
+  );
   return {
     ...makeUsageLimits({
       checkedAt: input.checkedAt,
@@ -137,9 +143,9 @@ export function codexRateLimitsToUpdate(
   snapshot: CodexRateLimitSnapshot,
   previous?: CodexRateLimitSnapshot,
 ): ProviderUsageLimitsUpdate | undefined {
-  const previousWindows = previous ? codexRateLimitsToWindows(previous) : [];
+  const previousWindows = previous ? codexRateLimitsToWindows(previous, "turn") : [];
   // Token ticks repeat session-cached limits that may predate an account probe or reset.
-  const windows = codexRateLimitsToWindows(snapshot).filter((window) => {
+  const windows = codexRateLimitsToWindows(snapshot, "turn").filter((window) => {
     const existing = previousWindows.find((candidate) => candidate.id === window.id);
     return (
       !existing ||
@@ -191,7 +197,9 @@ export function codexUsageLimitResetAt(
   snapshot: CodexRateLimitSnapshot | undefined,
 ): string | null {
   if (!snapshot) return null;
-  const windows = codexRateLimitsToWindows(snapshot).filter((window) => window.usedPercent >= 100);
+  const windows = codexRateLimitsToWindows(snapshot, "probe").filter(
+    (window) => window.usedPercent >= 100,
+  );
   if (windows.length === 0 || windows.some((window) => !window.resetsAt)) return null;
   return windows.reduce<string | null>(
     (latest, window) =>

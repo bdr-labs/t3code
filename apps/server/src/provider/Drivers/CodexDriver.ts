@@ -1,4 +1,8 @@
-import { CodexSettings, ProviderDriverKind } from "@t3tools/contracts";
+import {
+  CodexSettings,
+  ProviderDriverKind,
+  type ServerProviderUsageLimits,
+} from "@t3tools/contracts";
 import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import type * as Signature from "effect/crypto/Signature";
@@ -203,6 +207,7 @@ export const CodexDriver: ProviderDriver<
       ),
     );
 
+    const usageLimitsReaders = new Set<Effect.Effect<ServerProviderUsageLimits | undefined>>();
     const orchestrationAdapter = yield* createCodexAdapterV2(
       {
         instanceId,
@@ -215,6 +220,14 @@ export const CodexDriver: ProviderDriver<
       {
         onUsageLimits: (update) => snapshot.applyUsageLimits(update),
         compatibility: installation.compatibility,
+        registerUsageLimitsReader: (reader) =>
+          Effect.acquireRelease(
+            Effect.sync(() => usageLimitsReaders.add(reader)),
+            () =>
+              Effect.sync(() => {
+                usageLimitsReaders.delete(reader);
+              }),
+          ).pipe(Effect.asVoid),
       },
     ).pipe(
       Effect.mapError(
@@ -256,6 +269,13 @@ export const CodexDriver: ProviderDriver<
           (draft, catalog) => stampIdentity(applyCodexModelCatalog(draft, catalog)),
         ),
       checkProvider,
+      pollUsageLimits: Effect.fn("CodexDriver.pollUsageLimits")(function* () {
+        for (const reader of usageLimitsReaders) {
+          const limits = yield* reader;
+          if (limits) return limits;
+        }
+        return undefined;
+      }),
       enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>
         resolveMaintenance().pipe(
           Effect.flatMap((maintenanceCapabilities) =>

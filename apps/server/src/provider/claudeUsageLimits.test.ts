@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { claudeRateLimitEventToUpdate, claudeUsageResponseToLimits } from "./claudeUsageLimits.ts";
+import {
+  claudeOAuthUsageToLimits,
+  claudeRateLimitEventToUpdate,
+  claudeUsageResponseToLimits,
+} from "./claudeUsageLimits.ts";
 
 const checkedAt = "2026-07-18T10:00:00.000Z";
 const noNames = { overageIncluded: undefined } as const;
@@ -40,6 +44,7 @@ describe("claudeUsageResponseToLimits", () => {
             id: "five_hour",
             kind: "session",
             label: "Session",
+            source: "probe",
             usedPercent: 54,
             windowDurationMins: 300,
             resetsAt: "2026-07-18T14:39:00.000Z",
@@ -48,6 +53,7 @@ describe("claudeUsageResponseToLimits", () => {
             id: "seven_day",
             kind: "weekly",
             label: "Weekly",
+            source: "probe",
             usedPercent: 18.4,
             windowDurationMins: 10080,
             resetsAt: "2026-07-24T08:59:00.000Z",
@@ -56,6 +62,7 @@ describe("claudeUsageResponseToLimits", () => {
             id: "seven_day_fable",
             kind: "weekly",
             label: "Weekly · Fable",
+            source: "probe",
             usedPercent: 73,
             windowDurationMins: 10080,
             resetsAt: "2026-07-24T08:59:00.000Z",
@@ -101,6 +108,7 @@ describe("claudeUsageResponseToLimits", () => {
         id: "seven_day",
         kind: "weekly",
         label: "Weekly",
+        source: "probe",
         usedPercent: 100,
         windowDurationMins: 10080,
       },
@@ -159,6 +167,7 @@ describe("claudeUsageResponseToLimits", () => {
         id: "five_hour",
         kind: "session",
         label: "Session",
+        source: "probe",
         usedPercent: 12,
         windowDurationMins: 300,
       },
@@ -241,6 +250,7 @@ describe("claudeRateLimitEventToUpdate", () => {
           id: "seven_day",
           kind: "weekly",
           label: "Weekly",
+          source: "turn",
           usedPercent: 85,
           windowDurationMins: 10080,
           resetsAt: "2026-07-14T03:33:20.000Z",
@@ -262,10 +272,163 @@ describe("claudeRateLimitEventToUpdate", () => {
           id: "seven_day_fable",
           kind: "weekly",
           label: "Weekly · Fable",
+          source: "turn",
           usedPercent: 40,
           windowDurationMins: 10080,
         },
       ],
     });
+  });
+
+  it("reads every recognized window from unifiedWindows without a top-level utilization", () => {
+    const update = claudeRateLimitEventToUpdate(
+      {
+        status: "allowed",
+        rateLimitType: "five_hour",
+        resetsAt: 1_784_000_000,
+        unifiedWindows: {
+          five_hour: { utilization: 0.02, resetsAt: 1_784_000_000 },
+          seven_day: { utilization: 0.11, resetsAt: 1_784_600_000 },
+          seven_day_overage_included: { utilization: 0.4, resetsAt: 1_784_500_000 },
+        },
+      } as never,
+      { overageIncluded: "Fable" },
+    );
+
+    expect(update).toEqual({
+      windows: [
+        {
+          id: "five_hour",
+          kind: "session",
+          label: "Session",
+          source: "turn",
+          usedPercent: 2,
+          windowDurationMins: 300,
+          resetsAt: "2026-07-14T03:33:20.000Z",
+        },
+        {
+          id: "seven_day",
+          kind: "weekly",
+          label: "Weekly",
+          source: "turn",
+          usedPercent: 11,
+          windowDurationMins: 10080,
+          resetsAt: "2026-07-21T02:13:20.000Z",
+        },
+        {
+          id: "seven_day_fable",
+          kind: "weekly",
+          label: "Weekly · Fable",
+          source: "turn",
+          usedPercent: 40,
+          windowDurationMins: 10080,
+          resetsAt: "2026-07-19T22:26:40.000Z",
+        },
+      ],
+    });
+  });
+});
+
+describe("claudeOAuthUsageToLimits", () => {
+  it("maps OAuth percentages and model windows onto the SDK identities", () => {
+    const limits = claudeOAuthUsageToLimits({
+      checkedAt,
+      names: { overageIncluded: "Fable" },
+      response: {
+        five_hour: { utilization: 60, resets_at: "2026-07-18T14:39:00Z" },
+        seven_day: { utilization: 0.5, resets_at: null },
+        seven_day_opus: { utilization: 7, resets_at: null },
+        seven_day_sonnet: null,
+        seven_day_overage_included: { utilization: 42, resets_at: null },
+        cedar_ember: { eligible: false },
+      },
+    });
+    expect(
+      limits?.windows.map(
+        ({ id, label, kind, source, usedPercent, windowDurationMins, checkedAt }) => ({
+          id,
+          label,
+          kind,
+          source,
+          usedPercent,
+          windowDurationMins,
+          checkedAt,
+        }),
+      ),
+    ).toEqual([
+      {
+        id: "five_hour",
+        label: "Session",
+        kind: "session",
+        source: "account",
+        usedPercent: 60,
+        windowDurationMins: 300,
+        checkedAt,
+      },
+      {
+        id: "seven_day",
+        label: "Weekly",
+        kind: "weekly",
+        source: "account",
+        usedPercent: 0.5,
+        windowDurationMins: 10080,
+        checkedAt,
+      },
+      {
+        id: "seven_day_fable",
+        label: "Weekly · Fable",
+        kind: "weekly",
+        source: "account",
+        usedPercent: 42,
+        windowDurationMins: 10080,
+        checkedAt,
+      },
+      {
+        id: "seven_day_opus",
+        label: "Weekly · Opus",
+        kind: "weekly",
+        source: "account",
+        usedPercent: 7,
+        windowDurationMins: 10080,
+        checkedAt,
+      },
+    ]);
+    expect(limits?.windows[0]?.resetsAt).toBe("2026-07-18T14:39:00.000Z");
+  });
+
+  it("ignores null, malformed, and out-of-range numbers instead of reporting zero", () => {
+    for (const utilization of [null, "60", NaN, Infinity, -1, 101]) {
+      expect(
+        claudeOAuthUsageToLimits({
+          checkedAt,
+          names: noNames,
+          response: { five_hour: { utilization, resets_at: null } },
+        }),
+      ).toBeUndefined();
+    }
+    expect(claudeOAuthUsageToLimits({ checkedAt, names: noNames, response: null })).toBeUndefined();
+  });
+
+  it("uses the SDK's model_scoped display names and skips unsupported fields", () => {
+    expect(
+      claudeOAuthUsageToLimits({
+        checkedAt,
+        names: noNames,
+        response: {
+          model_scoped: [{ display_name: "Fable", utilization: 10, resets_at: null }],
+          seven_day_oauth_apps: { utilization: 80, resets_at: null },
+        },
+      })?.windows,
+    ).toEqual([
+      {
+        id: "seven_day_fable",
+        kind: "weekly",
+        label: "Weekly · Fable",
+        source: "account",
+        usedPercent: 10,
+        windowDurationMins: 10080,
+        checkedAt,
+      },
+    ]);
   });
 });

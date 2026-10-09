@@ -1,6 +1,7 @@
 import type {
   ProviderConsumeResetCreditOutcome,
   ServerProviderResetCredits,
+  ServerProviderUsageLimits,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as DateTime from "effect/DateTime";
@@ -9,6 +10,9 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Ref from "effect/Ref";
+import * as Semaphore from "effect/Semaphore";
+import { claudeOAuthUsageToLimits, type ClaudeScopedLimitNames } from "./claudeUsageLimits.ts";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 const API_BASE = "https://api.anthropic.com";
@@ -171,6 +175,154 @@ export const readClaudeResetCredits = Effect.fn("readClaudeResetCredits")(
   Effect.timeout("10 seconds"),
   Effect.orElseSucceed(() => undefined),
 );
+
+/**
+ * The endpoint allows each login about one request a minute, so other local
+ * readers of the same login (the desktop usage panel) would otherwise lose to
+ * this poller. Each good reading is kept here, one file per config directory,
+ * for them to use instead of asking again.
+ */
+export const claudeUsageShareDirectory = Effect.fn("claudeUsageShareDirectory")(function* () {
+  const env = yield* HostProcess.Environment;
+  return env.XDG_CACHE_HOME?.startsWith("/")
+    ? `${env.XDG_CACHE_HOME}/claude-usage`
+    : `${yield* HostProcess.HomeDirectory}/.cache/claude-usage`;
+});
+
+const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+
+const shareUsageJson = (directory: string, configDir: string, suffix: string, value: unknown) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const name = path
+        .resolve(configDir)
+        .replace(/^\/+/, "")
+        .replace(/[^A-Za-z0-9._-]+/g, "-");
+      yield* fs.makeDirectory(directory, { recursive: true });
+      const tempPath = yield* fs.makeTempFileScoped({ directory, prefix: ".usage-" });
+      yield* fs.chmod(tempPath, 0o600);
+      yield* fs.writeFileString(tempPath, yield* encodeJson(value));
+      yield* fs.rename(tempPath, path.join(directory, `${name}${suffix}.json`));
+    }),
+  );
+
+const shareUsageReading = (
+  directory: string,
+  configDir: string,
+  fetchedAtMs: number,
+  usage: unknown,
+) => shareUsageJson(directory, configDir, "", { configDir, fetchedAtMs, usage });
+
+/** A limits-only reader for one config directory; failures never manufacture a fetch time. */
+export const makeClaudeUsageLimitsReader = Effect.fn("makeClaudeUsageLimitsReader")(function* (
+  configDir: string,
+  names: Ref.Ref<ClaudeScopedLimitNames>,
+  shareDirectory?: string,
+) {
+  const client = yield* HttpClient.HttpClient;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const platform = yield* HostProcess.Platform;
+  const semaphore = yield* Semaphore.make(1);
+  let retryAt = 0;
+  let consecutive429s = 0;
+  let lastAttemptAt: number | undefined;
+  let lastResult: ServerProviderUsageLimits | undefined;
+  return (version: string) =>
+    semaphore.withPermits(1)(
+      Effect.gen(function* () {
+        const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+        if (lastAttemptAt !== undefined && nowMs < lastAttemptAt + 55_000) return lastResult;
+        if (nowMs < retryAt) return undefined;
+        let attemptedAtMs: number | undefined;
+        let status: "ok" | "rate_limited" | "error" = "error";
+        const result = yield* Effect.gen(function* () {
+          const token = yield* readAccessToken(configDir).pipe(
+            Effect.provideService(FileSystem.FileSystem, fs),
+            Effect.provideService(Path.Path, path),
+            Effect.provideService(HostProcess.Platform, platform),
+          );
+          if (!token) return undefined;
+          attemptedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
+          lastAttemptAt = attemptedAtMs;
+          lastResult = undefined;
+          const response = yield* client.execute(
+            HttpClientRequest.get(`${API_BASE}/api/oauth/usage`, {
+              urlParams: { cedar_ember: "1", skip_spend: "1" },
+            }).pipe(withClaudeHeaders(token, version)),
+          );
+          if (response.status === 429) {
+            const receivedAt = DateTime.toEpochMillis(yield* DateTime.now);
+            const value = response.headers["retry-after"];
+            const seconds = value?.trim() ? Number(value) : NaN;
+            const delay =
+              Number.isFinite(seconds) && seconds >= 0
+                ? seconds * 1000
+                : Date.parse(value ?? "") - receivedAt;
+            consecutive429s++;
+            retryAt =
+              receivedAt +
+              (Number.isFinite(delay) && delay > 0
+                ? delay
+                : Math.min(60_000 * 2 ** consecutive429s, 600_000));
+            status = "rate_limited";
+            return undefined;
+          }
+          const body = yield* HttpClientResponse.schemaBodyJson(Schema.Unknown)(
+            yield* HttpClientResponse.filterStatusOk(response),
+          );
+          const fetchedAt = yield* DateTime.now;
+          const limits = claudeOAuthUsageToLimits({
+            response: body,
+            checkedAt: DateTime.formatIso(fetchedAt),
+            names: yield* Ref.get(names),
+          });
+          if (!limits) return undefined;
+          consecutive429s = 0;
+          retryAt = 0;
+          status = "ok";
+          if (shareDirectory) {
+            yield* shareUsageReading(
+              shareDirectory,
+              configDir,
+              DateTime.toEpochMillis(fetchedAt),
+              body,
+            ).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+              Effect.orElseSucceed(() => undefined),
+            );
+          }
+          const resetCredits = claudeResetCreditsToContract(
+            (body as Record<string, unknown>).cedar_ember,
+            DateTime.toEpochMillis(fetchedAt),
+          );
+          return { ...limits, ...(resetCredits ? { resetCredits } : {}) };
+        }).pipe(
+          Effect.timeout("10 seconds"),
+          Effect.orElseSucceed(() => undefined),
+        );
+        if (attemptedAtMs !== undefined) {
+          lastResult = result;
+          if (shareDirectory) {
+            yield* shareUsageJson(shareDirectory, configDir, ".poll", {
+              configDir,
+              attemptedAtMs,
+              status,
+              nextAttemptAtMs: Math.max(attemptedAtMs + 55_000, retryAt),
+            }).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+              Effect.orElseSucceed(() => undefined),
+            );
+          }
+        }
+        return result;
+      }).pipe(Effect.orElseSucceed(() => undefined)),
+    );
+});
 
 export const readClaudeOrganizationId = (accountConfigPath: string) =>
   readJson(Config, accountConfigPath).pipe(

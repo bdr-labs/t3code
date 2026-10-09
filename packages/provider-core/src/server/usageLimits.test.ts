@@ -7,6 +7,7 @@ const session = {
   id: "five_hour",
   kind: "session",
   label: "Session",
+  checkedAt,
   usedPercent: 40,
   windowDurationMins: 300,
   resetsAt: "2026-09-03T14:00:00.000Z",
@@ -15,16 +16,17 @@ const weekly = {
   id: "seven_day",
   kind: "weekly",
   label: "Weekly",
+  checkedAt,
   usedPercent: 20,
   windowDurationMins: 10_080,
 } as const;
 const published = { checkedAt, windows: [session, weekly] };
 
 describe("applyUsageLimitsUpdate", () => {
-  it("returns the published object itself when no window moved", () => {
+  it("returns the published object itself when no window or fetch time moved", () => {
     const next = applyUsageLimitsUpdate({
       previous: published,
-      checkedAt: "2026-09-03T12:00:05.000Z",
+      checkedAt,
       update: {
         windows: [
           { ...weekly },
@@ -46,7 +48,7 @@ describe("applyUsageLimitsUpdate", () => {
     expect(next).not.toBe(published);
     expect(next).toEqual({
       checkedAt: "2026-09-03T12:00:05.000Z",
-      windows: [{ ...session, usedPercent: 55 }, weekly],
+      windows: [{ ...session, usedPercent: 55, checkedAt: "2026-09-03T12:00:05.000Z" }, weekly],
     });
   });
 
@@ -71,12 +73,12 @@ describe("applyUsageLimitsUpdate", () => {
     const next = applyUsageLimitsUpdate({
       previous: { ...published, resetCredits },
       checkedAt: "2026-09-03T12:00:05.000Z",
-      update: { windows: [{ ...session, usedPercent: 55 }] },
+      update: { windows: [{ ...session, checkedAt: "2026-09-03T12:00:05.000Z", usedPercent: 55 }] },
     });
 
     expect(next).toEqual({
       checkedAt: "2026-09-03T12:00:05.000Z",
-      windows: [{ ...session, usedPercent: 55 }, weekly],
+      windows: [{ ...session, usedPercent: 55, checkedAt: "2026-09-03T12:00:05.000Z" }, weekly],
       resetCredits,
     });
   });
@@ -108,8 +110,13 @@ describe("resolveUsageLimitsAfterProbe", () => {
 
     const sameTime = { ...probed, checkedAt: live.checkedAt };
     const newer = { ...probed, checkedAt: "2026-09-03T12:00:06.000Z" };
-    expect(resolveUsageLimitsAfterProbe({ published: live, probed: sameTime })).toEqual(sameTime);
-    expect(resolveUsageLimitsAfterProbe({ published: live, probed: newer })).toEqual(newer);
+    // Windows merge by id, so the weekly window this probe did not read stays.
+    for (const read of [sameTime, newer]) {
+      expect(resolveUsageLimitsAfterProbe({ published: live, probed: read })).toEqual({
+        ...read,
+        windows: [...read.windows, live.windows[1]],
+      });
+    }
   });
 
   it("keeps the last good windows through a failed probe but not an unsupported one", () => {
@@ -119,4 +126,204 @@ describe("resolveUsageLimitsAfterProbe", () => {
     expect(resolveUsageLimitsAfterProbe({ published, probed: unsupported })).toBe(unsupported);
     expect(resolveUsageLimitsAfterProbe({ published: undefined, probed: failed })).toBe(failed);
   });
+
+  it("rejects a cached probe whose reset already happened before the account reading", () => {
+    const accountCheckedAt = "2026-10-05T21:46:54.000Z";
+    const probeCheckedAt = "2026-10-05T21:48:57.000Z";
+    const merged = resolveUsageLimitsAfterProbe({
+      published: {
+        checkedAt: accountCheckedAt,
+        windows: [
+          {
+            id: "five_hour",
+            kind: "session",
+            label: "Session",
+            source: "account",
+            checkedAt: accountCheckedAt,
+            usedPercent: 1,
+            resetsAt: "2026-10-06T02:40:00.000Z",
+            windowDurationMins: 300,
+          },
+        ],
+      },
+      probed: {
+        checkedAt: probeCheckedAt,
+        windows: [
+          {
+            id: "five_hour",
+            kind: "session",
+            label: "Session",
+            source: "probe",
+            checkedAt: probeCheckedAt,
+            usedPercent: 63,
+            resetsAt: "2026-10-05T21:40:00.000Z",
+            windowDurationMins: 300,
+          },
+        ],
+      },
+    });
+
+    expect(merged?.windows).toEqual([
+      expect.objectContaining({
+        id: "five_hour",
+        source: "account",
+        usedPercent: 1,
+        resetsAt: "2026-10-06T02:40:00.000Z",
+      }),
+    ]);
+  });
+});
+
+describe("window fetch times", () => {
+  const newer = "2026-09-03T12:01:00.000Z";
+  const middle = "2026-09-03T12:00:30.000Z";
+
+  it("rejects a stale probe per window but accepts its newer weekly data", () => {
+    const live = applyUsageLimitsUpdate({
+      previous: published,
+      checkedAt: newer,
+      update: {
+        windows: [{ id: session.id, kind: session.kind, label: session.label, usedPercent: 60 }],
+      },
+    });
+    const merged = resolveUsageLimitsAfterProbe({
+      published: live,
+      probed: {
+        checkedAt: middle,
+        windows: [
+          { ...session, checkedAt: middle, usedPercent: 51 },
+          { ...weekly, checkedAt: middle, usedPercent: 25 },
+        ],
+      },
+    });
+    expect(merged?.checkedAt).toBe(newer);
+    expect(merged?.windows).toEqual([
+      { ...session, checkedAt: newer, usedPercent: 60 },
+      { ...weekly, checkedAt: middle, usedPercent: 25 },
+    ]);
+  });
+
+  it("rejects old turn events and refreshes timestamps even when numbers stay the same", () => {
+    const fresh = applyUsageLimitsUpdate({
+      previous: published,
+      checkedAt: newer,
+      update: {
+        windows: [{ id: session.id, kind: session.kind, label: session.label, usedPercent: 40 }],
+      },
+    });
+    expect(fresh?.windows[0]?.checkedAt).toBe(newer);
+    expect(fresh?.windows[1]?.checkedAt).toBe(checkedAt);
+    expect(
+      applyUsageLimitsUpdate({
+        previous: fresh,
+        checkedAt: middle,
+        update: {
+          windows: [{ id: session.id, kind: session.kind, label: session.label, usedPercent: 51 }],
+        },
+      }),
+    ).toBe(fresh);
+    expect(
+      resolveUsageLimitsAfterProbe({
+        published: fresh,
+        probed: {
+          checkedAt: middle,
+          windows: [],
+          unavailable: { reason: "probeFailed" },
+        },
+      }),
+    ).toBe(fresh);
+  });
+
+  it("keeps fresher reset credits when a cached SDK snapshot lands", () => {
+    const merged = resolveUsageLimitsAfterProbe({
+      published: {
+        checkedAt: newer,
+        windows: [{ ...session, checkedAt: newer, usedPercent: 60 }],
+        resetCredits: { availableCount: 2 },
+      },
+      probed: { ...published, resetCredits: { availableCount: 1 } },
+    });
+    expect(merged?.resetCredits?.availableCount).toBe(2);
+    expect(merged?.windows[0]?.usedPercent).toBe(60);
+  });
+
+  it("never lets a probe replace a recent account or turn reading", () => {
+    const newer = "2026-09-03T12:05:00.000Z";
+    for (const source of ["account", "turn"] as const) {
+      const merged = applyUsageLimitsUpdate({
+        previous: {
+          checkedAt,
+          windows: [{ ...session, source, usedPercent: 8 }],
+        },
+        checkedAt: newer,
+        update: {
+          windows: [
+            {
+              ...session,
+              source: "probe",
+              checkedAt: newer,
+              usedPercent: 63,
+            },
+          ],
+        },
+      });
+      expect(merged?.windows[0]).toMatchObject({ source, usedPercent: 8 });
+    }
+  });
+});
+
+describe("reset expiry", () => {
+  it("zeroes a window after its reset and clears the pending state on a new reading", () => {
+    const resetAt = "2026-09-03T12:30:00.000Z";
+    const expired = applyUsageLimitsUpdate({
+      previous: {
+        checkedAt,
+        windows: [{ ...session, source: "account", resetsAt: resetAt, usedPercent: 63 }],
+      },
+      update: { windows: [] },
+      checkedAt: "2026-09-03T12:31:00.000Z",
+    });
+    expect(expired?.windows[0]).toMatchObject({
+      usedPercent: 0,
+      resetPending: true,
+      resetsAt: resetAt,
+    });
+
+    const refreshed = applyUsageLimitsUpdate({
+      previous: expired,
+      update: {
+        windows: [
+          {
+            ...session,
+            source: "account",
+            checkedAt: "2026-09-03T12:32:00.000Z",
+            resetsAt: "2026-09-03T17:30:00.000Z",
+            usedPercent: 4,
+          },
+        ],
+      },
+      checkedAt: "2026-09-03T12:32:00.000Z",
+    });
+    expect(refreshed?.windows[0]).toMatchObject({ usedPercent: 4 });
+    expect(refreshed?.windows[0]?.resetPending).toBeUndefined();
+  });
+});
+
+it("records unchanged fetches so delayed events cannot revert newer observations", () => {
+  const update = {
+    windows: [{ id: session.id, kind: session.kind, label: session.label, usedPercent: 40 }],
+  };
+  const observed = applyUsageLimitsUpdate({
+    previous: published,
+    update,
+    checkedAt: "2026-09-03T12:00:15.000Z",
+  });
+  expect(observed?.windows[0]?.checkedAt).toBe("2026-09-03T12:00:15.000Z");
+  expect(
+    applyUsageLimitsUpdate({
+      previous: observed,
+      update: { windows: [{ ...update.windows[0]!, usedPercent: 51 }] },
+      checkedAt: "2026-09-03T12:00:10.000Z",
+    }),
+  ).toBe(observed);
 });

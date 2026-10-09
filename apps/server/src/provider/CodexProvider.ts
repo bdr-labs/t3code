@@ -59,6 +59,7 @@ const RATE_LIMITS_PROBE_TIMEOUT_MS = 3_000;
 
 type CodexRateLimitsProbe =
   | {
+      readonly checkedAt: string;
       readonly snapshot: CodexRateLimitSnapshot;
       readonly rateLimitsByLimitId?:
         | Readonly<Record<string, CodexRateLimitSnapshot>>
@@ -580,15 +581,20 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
             deadlineMs,
             RATE_LIMITS_PROBE_TIMEOUT_MS,
           ).pipe(
-            Effect.map((response): CodexRateLimitsProbe =>
-              response
-                ? {
-                    snapshot: response.rateLimits,
-                    rateLimitsByLimitId: response.rateLimitsByLimitId,
-                    resetCredits: response.rateLimitResetCredits,
-                    accountId: response.accountId,
-                  }
-                : { failure: "Codex did not answer the usage request." },
+            Effect.flatMap((response) =>
+              Effect.map(
+                DateTime.now,
+                (now): CodexRateLimitsProbe =>
+                  response
+                    ? {
+                        checkedAt: DateTime.formatIso(now),
+                        snapshot: response.rateLimits,
+                        rateLimitsByLimitId: response.rateLimitsByLimitId,
+                        resetCredits: response.rateLimitResetCredits,
+                        accountId: response.accountId,
+                      }
+                    : { failure: "Codex did not answer the usage request." },
+              ),
             ),
             Effect.catch((error) =>
               Effect.logDebug("Codex rate-limit read failed.", { cause: error }).pipe(
@@ -855,7 +861,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
             snapshot: snapshot.rateLimits.snapshot,
             rateLimitsByLimitId: snapshot.rateLimits.rateLimitsByLimitId,
             resetCredits: snapshot.rateLimits.resetCredits,
-            checkedAt,
+            checkedAt: snapshot.rateLimits.checkedAt,
           });
 
   return buildServerProvider({

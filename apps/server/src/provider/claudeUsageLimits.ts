@@ -18,6 +18,7 @@ import {
 
 const SESSION_MINS = 5 * 60;
 const WEEK_MINS = 7 * 24 * 60;
+type UsageSource = NonNullable<ServerProviderUsageWindow["source"]>;
 
 const WINDOWS: Readonly<
   Record<string, Pick<ServerProviderUsageWindow, "kind" | "label" | "windowDurationMins">>
@@ -55,11 +56,13 @@ function scopedWindow(
   displayName: string,
   usedPercent: number,
   resetsAt: string | undefined,
+  source: UsageSource,
 ): ServerProviderUsageWindow {
   return {
     id: scopedWindowId(displayName),
     kind: "weekly",
     label: `Weekly · ${displayName}`,
+    source,
     windowDurationMins: WEEK_MINS,
     usedPercent: clampPercent(usedPercent),
     ...(resetsAt ? { resetsAt } : {}),
@@ -141,13 +144,51 @@ function makeWindow(
   id: keyof typeof WINDOWS & string,
   usedPercent: number,
   resetsAt: string | undefined,
+  source: UsageSource,
 ): ServerProviderUsageWindow {
   const window = WINDOWS[id]!;
   return {
     id,
     ...window,
+    source,
     usedPercent: clampPercent(usedPercent),
     ...(resetsAt ? { resetsAt } : {}),
+  };
+}
+
+interface UnifiedRateLimitWindow {
+  readonly utilization?: unknown;
+  readonly resetsAt?: unknown;
+}
+
+function readUnifiedWindows(info: SDKRateLimitInfo): Readonly<Record<string, unknown>> {
+  const unified = (info as SDKRateLimitInfo & { readonly unifiedWindows?: unknown }).unifiedWindows;
+  return typeof unified === "object" && unified !== null && !Array.isArray(unified)
+    ? (unified as Readonly<Record<string, unknown>>)
+    : {};
+}
+
+function readEventReading(
+  info: SDKRateLimitInfo,
+  unifiedWindows: Readonly<Record<string, unknown>>,
+  type: string,
+): { readonly usedPercent: number; readonly resetsAt: string | undefined } | undefined {
+  const unified = unifiedWindows[type];
+  if (typeof unified === "object" && unified !== null) {
+    const { utilization, resetsAt } = unified as UnifiedRateLimitWindow;
+    if (typeof utilization === "number" && Number.isFinite(utilization)) {
+      return {
+        usedPercent: utilization * 100,
+        resetsAt: isoFromEpochSeconds(
+          typeof resetsAt === "number" && Number.isFinite(resetsAt) ? resetsAt : undefined,
+        ),
+      };
+    }
+  }
+  if (info.rateLimitType !== type || typeof info.utilization !== "number") return undefined;
+  return {
+    usedPercent: info.utilization * 100,
+    resetsAt: isoFromEpochSeconds(info.resetsAt),
   };
 }
 
@@ -156,27 +197,31 @@ export function claudeRateLimitEventToUpdate(
   info: SDKRateLimitInfo,
   names: ClaudeScopedLimitNames,
 ): ProviderUsageLimitsUpdate | undefined {
-  const type: string | undefined = info.rateLimitType;
-  if (!type || typeof info.utilization !== "number") {
-    return undefined;
+  const unifiedWindows = readUnifiedWindows(info);
+  const windows: ServerProviderUsageWindow[] = [];
+  for (const type of Object.keys(WINDOWS)) {
+    const reading = readEventReading(info, unifiedWindows, type);
+    if (reading) {
+      windows.push(makeWindow(type, reading.usedPercent, reading.resetsAt, "turn"));
+    }
   }
-  const usedPercent = info.utilization * 100;
-  const resetsAt = isoFromEpochSeconds(info.resetsAt);
-  if (type in WINDOWS) {
-    return { windows: [makeWindow(type, usedPercent, resetsAt)] };
+  const overage = readEventReading(info, unifiedWindows, OVERAGE_INCLUDED_EVENT_TYPE);
+  if (overage && names.overageIncluded) {
+    windows.push(
+      scopedWindow(names.overageIncluded, overage.usedPercent, overage.resetsAt, "turn"),
+    );
   }
-  if (type === OVERAGE_INCLUDED_EVENT_TYPE && names.overageIncluded) {
-    return { windows: [scopedWindow(names.overageIncluded, usedPercent, resetsAt)] };
-  }
-  return undefined;
+  return windows.length > 0 ? { windows } : undefined;
 }
 
 /** get_usage percentages are already 0-100. */
 export function claudeUsageResponseToLimits(input: {
   readonly response: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits">;
   readonly checkedAt: string;
+  readonly source?: UsageSource;
 }): { readonly limits: ServerProviderUsageLimits; readonly names: ClaudeScopedLimitNames } {
   const { response, checkedAt } = input;
+  const source = input.source ?? "probe";
   if (!response.rate_limits_available || !response.rate_limits) {
     return {
       limits: makeUnavailableUsageLimits({
@@ -190,14 +235,14 @@ export function claudeUsageResponseToLimits(input: {
   for (const id of Object.keys(WINDOWS)) {
     const window = response.rate_limits[id as "five_hour" | "seven_day"];
     if (!window || typeof window.utilization !== "number") continue;
-    windows.push(makeWindow(id, window.utilization, isoFromString(window.resets_at)));
+    windows.push(makeWindow(id, window.utilization, isoFromString(window.resets_at), source));
   }
   // The CLI's overage allowlist currently has one model; events refer to its first entry.
   let overageIncluded: string | undefined;
   for (const entry of readModelScoped(response.rate_limits)) {
     if (typeof entry.utilization !== "number") continue;
     windows.push(
-      scopedWindow(entry.display_name, entry.utilization, isoFromString(entry.resets_at)),
+      scopedWindow(entry.display_name, entry.utilization, isoFromString(entry.resets_at), source),
     );
     overageIncluded ??= entry.display_name;
   }
@@ -223,3 +268,72 @@ export const recordClaudeUsageResponse = (
   const { limits, names } = claudeUsageResponseToLimits(input);
   return Ref.set(namesRef, names).pipe(Effect.as(limits));
 };
+
+const OAuthWindow = Schema.Struct({
+  utilization: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
+  resets_at: Schema.NullOr(Schema.String),
+});
+const decodeOAuthWindow = Schema.decodeUnknownOption(OAuthWindow);
+
+/** The OAuth endpoint, like get_usage, reports percentages rather than fractions. */
+export function claudeOAuthUsageToLimits(input: {
+  readonly response: unknown;
+  readonly checkedAt: string;
+  readonly names: ClaudeScopedLimitNames;
+}): ServerProviderUsageLimits | undefined {
+  if (typeof input.response !== "object" || input.response === null) return undefined;
+  const response = input.response as Record<string, unknown>;
+  const windows: ServerProviderUsageWindow[] = [];
+  for (const id of Object.keys(WINDOWS)) {
+    const parsed = decodeOAuthWindow(response[id]);
+    if (Option.isSome(parsed)) {
+      windows.push(
+        makeWindow(id, parsed.value.utilization, isoFromString(parsed.value.resets_at), "account"),
+      );
+    }
+  }
+  // Use the same normalized ids and display labels as the SDK's model_scoped rows.
+  const names = new Set([
+    "Opus",
+    "Sonnet",
+    ...(input.names.overageIncluded ? [input.names.overageIncluded] : []),
+  ]);
+  for (const name of names) {
+    const raw =
+      response[scopedWindowId(name)] ??
+      (name === input.names.overageIncluded ? response.seven_day_overage_included : undefined);
+    const parsed = decodeOAuthWindow(raw);
+    if (Option.isSome(parsed)) {
+      windows.push(
+        scopedWindow(
+          name,
+          parsed.value.utilization,
+          isoFromString(parsed.value.resets_at),
+          "account",
+        ),
+      );
+    }
+  }
+  for (const entry of readModelScoped(response)) {
+    const parsed = decodeOAuthWindow(entry);
+    if (
+      Option.isSome(parsed) &&
+      !windows.some((window) => window.id === scopedWindowId(entry.display_name))
+    ) {
+      windows.push(
+        scopedWindow(
+          entry.display_name,
+          parsed.value.utilization,
+          isoFromString(parsed.value.resets_at),
+          "account",
+        ),
+      );
+    }
+  }
+  return windows.length > 0
+    ? makeUsageLimits({
+        checkedAt: input.checkedAt,
+        windows: windows.map((window) => ({ ...window, checkedAt: input.checkedAt })),
+      })
+    : undefined;
+}
