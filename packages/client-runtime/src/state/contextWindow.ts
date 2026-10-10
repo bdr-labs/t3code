@@ -105,8 +105,11 @@ export function deriveLatestContextWindowSnapshot(
       lastReasoningOutputTokens: null,
       toolUses: null,
       durationMs: null,
-      compactsAutomatically: true,
-      autoCompactThreshold: liveUsage.autoCompactThreshold ?? null,
+      compactsAutomatically: providerThread?.contextUsage?.compactsAutomatically ?? null,
+      autoCompactThreshold:
+        liveUsage.autoCompactThreshold ??
+        providerThread?.contextUsage?.autoCompactThreshold ??
+        null,
       cost: null,
       updatedAt: liveUsage.updatedAt,
     };
@@ -148,7 +151,7 @@ export function deriveLatestContextWindowSnapshot(
   }
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
-    if (!entry || entry.item.type !== "compaction") {
+    if (!entry || entry.item.type !== "compaction" || entry.item.status !== "completed") {
       continue;
     }
     const payload = entry.item;
@@ -166,7 +169,7 @@ export function deriveLatestContextWindowSnapshot(
 
     return {
       usedTokens,
-      totalProcessedTokens: asFiniteNumber(payload.beforeTokenCount),
+      totalProcessedTokens: null,
       maxTokens,
       remainingTokens,
       usedPercentage,
@@ -182,10 +185,10 @@ export function deriveLatestContextWindowSnapshot(
       lastReasoningOutputTokens: null,
       toolUses: null,
       durationMs: null,
-      compactsAutomatically: true,
+      compactsAutomatically: null,
       autoCompactThreshold: null,
       cost: null,
-      updatedAt: DateTime.formatIso(payload.startedAt ?? payload.updatedAt),
+      updatedAt: DateTime.formatIso(payload.completedAt ?? payload.updatedAt),
     };
   }
 

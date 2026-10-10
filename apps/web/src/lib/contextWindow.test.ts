@@ -21,7 +21,7 @@ const decodeTokenUsage = Schema.decodeSync(OrchestrationV2ProviderTurnTokenUsage
 
 describe("V2 context window presentation", () => {
   it("uses retained compaction token data when available", () => {
-    const snapshot = deriveLatestContextWindowSnapshot([
+    const entries = [
       {
         item: {
           id: "compaction-1" as never,
@@ -35,8 +35,8 @@ describe("V2 context window presentation", () => {
           ordinal: 1,
           status: "completed",
           title: null,
-          startedAt: null,
-          completedAt: null,
+          startedAt: DateTime.makeUnsafe("2026-06-19T23:59:00.000Z"),
+          completedAt: DateTime.makeUnsafe("2026-06-20T00:00:00.000Z"),
           updatedAt: DateTime.makeUnsafe("2026-06-20T00:00:00.000Z"),
           type: "compaction",
           driver: null,
@@ -44,9 +44,19 @@ describe("V2 context window presentation", () => {
           afterTokenCount: 2_000,
         },
       },
-    ]);
+    ] as const;
+    const snapshot = deriveLatestContextWindowSnapshot(entries);
+    expect(snapshot?.updatedAt).toBe("2026-06-20T00:00:00.000Z");
+    for (const status of ["running", "failed"] as const) {
+      expect(
+        deriveLatestContextWindowSnapshot(
+          entries.map((entry) => ({ item: { ...entry.item, status } })),
+        ),
+      ).toBeNull();
+    }
     expect(snapshot?.usedTokens).toBe(2_000);
-    expect(snapshot?.totalProcessedTokens).toBe(10_000);
+    expect(snapshot?.totalProcessedTokens).toBeNull();
+    expect(snapshot?.compactsAutomatically).toBeNull();
   });
 });
 
@@ -205,5 +215,41 @@ describe("latestProviderTurnTokenUsage", () => {
     ]) {
       expect(latestProviderTurnTokenUsage([], { ...projection, contextTransfers })).toBeNull();
     }
+  });
+});
+
+describe("compaction policy metadata", () => {
+  it("preserves reported policy alongside newer turn occupancy", () => {
+    const snapshot = deriveLatestContextWindowSnapshot(
+      [],
+      {
+        usedTokens: 360_000,
+        maxTokens: 1_000_000,
+        updatedAt: "2026-10-10T12:00:00.000Z",
+      },
+      {
+        contextUsage: {
+          usedTokens: 300_000,
+          autoCompactThreshold: 400_000,
+          compactsAutomatically: true,
+        },
+        updatedAt: DateTime.makeUnsafe("2026-10-10T11:00:00.000Z"),
+      },
+    );
+    expect(snapshot).toMatchObject({
+      usedTokens: 360_000,
+      usedPercentage: 36,
+      autoCompactThreshold: 400_000,
+      compactsAutomatically: true,
+    });
+  });
+
+  it("does not assume automatic compaction from a usage report", () => {
+    expect(
+      deriveLatestContextWindowSnapshot([], {
+        usedTokens: 42_000,
+        updatedAt: "2026-10-10T12:00:00.000Z",
+      }),
+    ).toMatchObject({ compactsAutomatically: null, autoCompactThreshold: null });
   });
 });

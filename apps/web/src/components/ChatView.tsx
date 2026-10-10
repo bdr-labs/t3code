@@ -1465,20 +1465,40 @@ export default function ChatView(props: ChatViewProps) {
     const usageLimits = activeUsageLimits
       ? { limits: activeUsageLimits, providerName: activeProviderName }
       : null;
-    if (!serverProjection) return { turn: null, compactions: [], context: null, usageLimits };
+    if (!serverProjection)
+      return {
+        turn: null,
+        compactions: [],
+        context: null,
+        usageLimits,
+        contextDriver: undefined,
+        configuredClaudeThreshold: undefined,
+      };
     const turns = selectComposerStatsTurns(serverProjection);
     const contextUsage = turns.findLast((turn) => turn.tokenUsage !== undefined)?.tokenUsage;
+    const providerThread = serverProjection.providerThreads.find(
+      (thread) => thread.id === serverProjection.thread.activeProviderThreadId,
+    );
+    const providerConfig = providerThread
+      ? settings.providerInstances[providerThread.providerInstanceId]?.config
+      : undefined;
+    const configuredClaudeThreshold =
+      providerConfig !== null &&
+      typeof providerConfig === "object" &&
+      "autoCompactWindow" in providerConfig
+        ? providerConfig.autoCompactWindow
+        : undefined;
     const compactions = selectRecordedCompactions(serverProjection.turnItems, turns);
     return {
       turn: turns.at(-1) ?? null,
       compactions,
       usageLimits,
+      contextDriver: providerThread?.driver,
+      configuredClaudeThreshold,
       context: deriveLatestContextWindowSnapshot(
         compactions.map((item) => ({ item })),
         contextUsage,
-        serverProjection.providerThreads.find(
-          (thread) => thread.id === serverProjection.thread.activeProviderThreadId,
-        ),
+        providerThread,
       ),
     };
   })();
@@ -3839,7 +3859,23 @@ export default function ChatView(props: ChatViewProps) {
                     </ComposerSurface.Shell>
                     {/* Opaque so timeline content scrolling under the overlay can't show through the stats line. */}
                     <div className={composerStats !== null ? "bg-background" : undefined}>
-                      {composerStats !== null && <ComposerStats {...composerStats} />}
+                      {composerStats !== null && (
+                        <ComposerStats
+                          {...composerStats}
+                          onCompact={() => composerRef.current?.compactContext()}
+                          compactDisabled={compactDisabled}
+                          compactDisabledReason={
+                            pendingApprovals.length > 0
+                              ? "Resolve the pending approval first."
+                              : pendingUserInputs.length > 0
+                                ? "Answer the pending question first."
+                                : isWorking
+                                  ? "Wait for the current turn to finish."
+                                  : compactDisabledReason
+                          }
+                          isCompacting={isCompacting}
+                        />
+                      )}
                       <div
                         aria-hidden
                         className="h-[calc(env(safe-area-inset-bottom)+1rem)] sm:h-[calc(env(safe-area-inset-bottom)+1.25rem)]"

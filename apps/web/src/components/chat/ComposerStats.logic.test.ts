@@ -14,6 +14,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   composerLimitDisplay,
   composerLimitsFreshness,
+  deriveContextCompaction,
   deriveResponseRate,
   deriveTurnCachePercentage,
   formatCachePercentage,
@@ -435,5 +436,100 @@ describe("composer limit display", () => {
     expect(display.displayPercent).toBeNull();
     expect(display.percentText).toBe("–");
     expect(display.dimmed).toBe(true);
+  });
+});
+
+describe("context compaction pressure", () => {
+  const context = {
+    usedTokens: 360_000,
+    usedPercentage: 36,
+    autoCompactThreshold: null,
+    compactsAutomatically: null,
+  };
+
+  it("keeps window fullness separate from Claude's configured 400k limit", () => {
+    expect(deriveContextCompaction(context, "claudeAgent", "400000")).toMatchObject({
+      threshold: 400_000,
+      source: "configured",
+      remainingTokens: 40_000,
+      thresholdPercentage: 90,
+      pressurePercentage: 90,
+      status: "Claude setting",
+    });
+    expect(context.usedPercentage).toBe(36);
+  });
+
+  it("prefers an actual provider threshold over a newly configured limit", () => {
+    expect(
+      deriveContextCompaction(
+        { ...context, autoCompactThreshold: 500_000 },
+        "claudeAgent",
+        "400000",
+      ),
+    ).toMatchObject({ threshold: 500_000, source: "reported", remainingTokens: 140_000 });
+  });
+
+  it("does not apply Claude's configuration to Codex or another driver", () => {
+    for (const driver of ["codex", "opencode", undefined]) {
+      expect(deriveContextCompaction(context, driver, "400000")).toMatchObject({
+        threshold: null,
+        source: null,
+        remainingTokens: null,
+        pressurePercentage: 36,
+      });
+    }
+    expect(deriveContextCompaction(context, "codex", "400000").status).toContain(
+      "Managed by Codex",
+    );
+  });
+
+  it("does not invent a default threshold or accept invalid settings", () => {
+    for (const value of [
+      undefined,
+      "",
+      "NaN",
+      "Infinity",
+      "99999",
+      "1000001",
+      "400000oops",
+      400000,
+    ]) {
+      expect(deriveContextCompaction(context, "claudeAgent", value)).toMatchObject({
+        threshold: null,
+        source: null,
+      });
+    }
+  });
+
+  it("honors a provider report that automatic compaction is off", () => {
+    expect(
+      deriveContextCompaction(
+        { ...context, compactsAutomatically: false, autoCompactThreshold: 300_000 },
+        "claudeAgent",
+        "400000",
+      ),
+    ).toMatchObject({ status: "Reported off", threshold: null, pressurePercentage: 36 });
+  });
+
+  it("shows a setting without inventing occupancy", () => {
+    expect(deriveContextCompaction(null, "claudeAgent", "400000")).toMatchObject({
+      threshold: 400_000,
+      source: "configured",
+      remainingTokens: null,
+      thresholdPercentage: null,
+    });
+  });
+
+  it("clamps remaining tokens and warns at the smaller window limit", () => {
+    expect(
+      deriveContextCompaction({ ...context, usedTokens: 420_000 }, "claudeAgent", "400000"),
+    ).toMatchObject({ remainingTokens: 0, pressurePercentage: 105 });
+    expect(
+      deriveContextCompaction(
+        { ...context, usedTokens: 180_000, usedPercentage: 90 },
+        "claudeAgent",
+        "400000",
+      ),
+    ).toMatchObject({ remainingTokens: 220_000, pressurePercentage: 90 });
   });
 });

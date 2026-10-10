@@ -7,6 +7,7 @@ import type {
   TurnTokenUsage,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
 
 /** Provider turn ordinals are scoped to a provider thread; children have their own nodes. */
 export function selectComposerStatsTurns(projection: {
@@ -251,4 +252,55 @@ export function composerLimitDisplay(
     percentText: `${Math.round(window.usedPercent)}%${age}`,
     dimmed: freshness.status !== "fresh",
   };
+}
+
+/** A configured limit is a launch setting, not proof of the running query's limit. */
+export function deriveContextCompaction(
+  context: Pick<
+    ContextWindowSnapshot,
+    "usedTokens" | "usedPercentage" | "autoCompactThreshold" | "compactsAutomatically"
+  > | null,
+  driver: string | undefined,
+  configuredClaudeThreshold: unknown,
+) {
+  const configured =
+    driver === "claudeAgent" &&
+    typeof configuredClaudeThreshold === "string" &&
+    /^\d+$/.test(configuredClaudeThreshold.trim())
+      ? Number(configuredClaudeThreshold)
+      : null;
+  const validConfigured =
+    configured !== null && configured >= 100_000 && configured <= 1_000_000 ? configured : null;
+  const reported = context?.autoCompactThreshold;
+  const validReported =
+    context?.compactsAutomatically !== false &&
+    typeof reported === "number" &&
+    Number.isFinite(reported) &&
+    reported > 0
+      ? reported
+      : null;
+  const threshold =
+    context?.compactsAutomatically === false ? null : (validReported ?? validConfigured);
+  const source = threshold === null ? null : validReported !== null ? "reported" : "configured";
+  const usedTokens = context?.usedTokens;
+  const remainingTokens =
+    threshold !== null && usedTokens !== undefined ? Math.max(0, threshold - usedTokens) : null;
+  const thresholdPercentage =
+    threshold !== null && usedTokens !== undefined ? (usedTokens / threshold) * 100 : null;
+  const pressurePercentage = Math.max(context?.usedPercentage ?? 0, thresholdPercentage ?? 0);
+  const status =
+    context?.compactsAutomatically === false
+      ? "Reported off"
+      : threshold !== null
+        ? source === "reported"
+          ? "Provider reported"
+          : "Claude setting"
+        : driver === "claudeAgent"
+          ? "Claude default (threshold not reported)"
+          : driver === "codex"
+            ? "Managed by Codex (threshold not reported)"
+            : context?.compactsAutomatically === true
+              ? "On (threshold not reported)"
+              : "Not reported";
+  return { threshold, source, remainingTokens, thresholdPercentage, pressurePercentage, status };
 }

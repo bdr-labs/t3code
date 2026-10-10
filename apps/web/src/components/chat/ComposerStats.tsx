@@ -11,6 +11,7 @@ import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 
 import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
 import { formatContextWindowTokens } from "~/lib/contextWindow";
+import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { composerFloatingLayerProps } from "./composerEventScope";
@@ -19,6 +20,7 @@ import {
   composerLimitDisplay,
   composerLimitSourceLabel,
   composerLimitsFreshness,
+  deriveContextCompaction,
   deriveResponseRate,
   deriveTurnCachePercentage,
   formatCachePercentage,
@@ -237,7 +239,7 @@ function UsageLimitsSummary({
           <button
             type="button"
             aria-label="Usage limit details"
-            className="inline-flex flex-wrap items-center gap-x-4 rounded-sm text-left outline-offset-2"
+            className="inline-flex flex-wrap items-center gap-x-4 rounded-sm text-left -outline-offset-2"
           />
         }
       >
@@ -281,12 +283,25 @@ export function ComposerStats({
   turn,
   compactions,
   usageLimits,
+  contextDriver,
+  configuredClaudeThreshold,
+  onCompact,
+  compactDisabled,
+  compactDisabledReason,
+  isCompacting,
 }: {
   context: ContextWindowSnapshot | null;
   turn: OrchestrationV2ProviderTurn | null;
   compactions: ReadonlyArray<Extract<OrchestrationV2TurnItem, { type: "compaction" }>>;
   usageLimits: { limits: ServerProviderUsageLimits; providerName: string } | null;
+  contextDriver: string | undefined;
+  configuredClaudeThreshold: unknown;
+  onCompact: () => void;
+  compactDisabled: boolean;
+  compactDisabledReason: string | null;
+  isCompacting: boolean;
 }) {
+  const compaction = deriveContextCompaction(context, contextDriver, configuredClaudeThreshold);
   const responseRate = deriveResponseRate(turn);
   const estimated = turn?.responseThroughput?.basis === "codex_active_windows_estimate";
   const usage = turn?.turnTokenUsage;
@@ -304,7 +319,8 @@ export function ComposerStats({
     !hasTokens &&
     responseRate === null &&
     compactions.length === 0 &&
-    selectComposerLimitWindows(usageLimits?.limits).length === 0
+    selectComposerLimitWindows(usageLimits?.limits).length === 0 &&
+    compactDisabled
   )
     return null;
   const count = (value: number | undefined) =>
@@ -330,7 +346,7 @@ export function ComposerStats({
               <button
                 type="button"
                 aria-label="Turn token details"
-                className="inline-flex items-center gap-1 rounded-sm text-left outline-offset-2"
+                className="inline-flex items-center gap-1 rounded-sm text-left -outline-offset-2"
               />
             }
           >
@@ -395,7 +411,7 @@ export function ComposerStats({
             render={
               <span
                 tabIndex={0}
-                className="inline-flex items-center gap-1 rounded-sm outline-offset-2"
+                className="inline-flex items-center gap-1 rounded-sm -outline-offset-2"
               />
             }
           >
@@ -413,7 +429,7 @@ export function ComposerStats({
   }
 
   // Context is per thread, so it sits with the turn stats; the left side is account limits.
-  if (context !== null || compactions.length > 0) {
+  if (context !== null || compactions.length > 0 || !compactDisabled || isCompacting) {
     stats.unshift({
       key: "context",
       node: (
@@ -426,13 +442,13 @@ export function ComposerStats({
               <button
                 type="button"
                 aria-label="Context usage details"
-                className="inline-flex items-center rounded-sm text-left outline-offset-2"
+                className="inline-flex items-center rounded-sm text-left -outline-offset-2"
               />
             }
           >
             <span className="inline-flex items-center gap-1">
               {context?.usedPercentage != null ? (
-                <span className={TONE_TEXT[toneOf(context.usedPercentage)]}>
+                <span className={TONE_TEXT[toneOf(compaction.pressurePercentage)]}>
                   {Math.round(context.usedPercentage)}%
                 </span>
               ) : (
@@ -447,7 +463,7 @@ export function ComposerStats({
                 <h3 className="font-medium">Context usage</h3>
                 <span className="text-muted-foreground tabular-nums">
                   {context?.usedPercentage != null
-                    ? `${Math.round(context.usedPercentage)}% full`
+                    ? `${Math.round(context.usedPercentage)}% of window`
                     : "Not reported"}
                 </span>
               </div>
@@ -459,11 +475,37 @@ export function ComposerStats({
                   {context ? count(context.usedTokens) : "Not reported"}
                 </Detail>
                 <Detail label="Window size">{count(context?.maxTokens ?? undefined)}</Detail>
-                <Detail label="Remaining tokens">
+                <Detail label="Window remaining">
                   {count(context?.remainingTokens ?? undefined)}
                 </Detail>
+                <Detail label="Auto-compact">{compaction.status}</Detail>
+                {compaction.threshold !== null && (
+                  <>
+                    <Detail
+                      label={
+                        compaction.source === "configured"
+                          ? "Configured threshold"
+                          : "Reported threshold"
+                      }
+                    >
+                      {count(compaction.threshold)} tokens
+                    </Detail>
+                    <Detail label="Tokens to threshold">
+                      {compaction.remainingTokens === null
+                        ? "Not reported"
+                        : count(compaction.remainingTokens)}
+                    </Detail>
+                  </>
+                )}
                 <Detail label="Recorded compactions">{compactions.length}</Detail>
               </dl>
+              {compaction.source === "configured" && (
+                <p className="text-muted-foreground">
+                  Claude's current setting applies when a query starts. A running query may use an
+                  earlier setting. Tokens to threshold use the latest context report, not a
+                  countdown.
+                </p>
+              )}
               {compactions.length > 0 && (
                 <div className="space-y-1.5">
                   <p className="font-medium">Recent compactions</p>
@@ -501,6 +543,19 @@ export function ComposerStats({
                 Compactions count completed events in the loaded main-agent history for this
                 provider session.
               </p>
+              <div className="flex flex-col gap-1.5">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={compactDisabled || isCompacting}
+                  onClick={onCompact}
+                >
+                  {isCompacting ? "Compacting…" : "Compact now"}
+                </Button>
+                {compactDisabled && !isCompacting && compactDisabledReason && (
+                  <p className="text-muted-foreground">{compactDisabledReason}</p>
+                )}
+              </div>
               {context && (
                 <p className="text-muted-foreground">
                   Reported{" "}
