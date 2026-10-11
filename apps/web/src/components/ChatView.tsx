@@ -220,6 +220,8 @@ import {
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
   useComposerDraftStore,
+  deriveEffectiveComposerModelState,
+  useComposerDraftModelState,
   DraftId,
 } from "../composerDraftStore";
 import { type TerminalContextDraft } from "../lib/terminalContext";
@@ -1458,6 +1460,17 @@ export default function ChatView(props: ChatViewProps) {
     activeProviderThread,
   );
   const activeUsageLimits = activeProviderStatus?.usageLimits;
+  // The model the composer shows, so the switch keeps it while changing subscription.
+  const subscriptionSwitchDraft = useComposerDraftModelState(composerDraftTarget);
+  const { selectedModel: subscriptionSwitchModel } = deriveEffectiveComposerModelState({
+    draft: subscriptionSwitchDraft,
+    providers: providerStatuses,
+    selectedProvider,
+    selectedInstanceId: activeProviderInstanceId,
+    threadModelSelection: activeThread?.modelSelection,
+    projectModelSelection: activeProjectDefaultModelSelection,
+    settings,
+  });
   const activeProviderName =
     activeProviderStatus?.displayName?.trim() || activeProviderStatus?.instanceId || "";
   const composerStats = (() => {
@@ -3874,6 +3887,13 @@ export default function ChatView(props: ChatViewProps) {
                                   : compactDisabledReason
                           }
                           isCompacting={isCompacting}
+                          subscriptionSwitch={{
+                            providers: providerStatuses,
+                            instanceId: activeProviderInstanceId,
+                            model: subscriptionSwitchModel,
+                            getDisabledReason: getModelDisabledReason,
+                            onSwitch: onProviderModelSelectStable,
+                          }}
                         />
                       )}
                       <div

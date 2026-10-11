@@ -1,6 +1,8 @@
 import type {
   OrchestrationV2ProviderTurn,
   OrchestrationV2TurnItem,
+  ProviderInstanceId,
+  ServerProvider,
   ServerProviderUsageLimits,
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
@@ -27,6 +29,7 @@ import {
   deriveTurnElapsedMs,
   selectComposerLimitWindows,
 } from "./ComposerStats.logic";
+import { recommendSubscriptionSwitch } from "./SubscriptionSwitch.logic";
 
 function ElapsedTime({ turn }: { turn: OrchestrationV2ProviderTurn }) {
   const textRef = useRef<HTMLSpanElement>(null);
@@ -278,6 +281,69 @@ function UsageLimitsSummary({
   );
 }
 
+export interface SubscriptionSwitchInput {
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly instanceId: ProviderInstanceId | null;
+  readonly model: string | null;
+  /** Why the thread cannot move to this selection right now, if it cannot. */
+  readonly getDisabledReason: (instanceId: ProviderInstanceId, model: string) => string | null;
+  readonly onSwitch: (instanceId: ProviderInstanceId, model: string) => void;
+}
+
+/** "Opus 5.5 on Claude Personal": the same model on a subscription with more room. */
+function SubscriptionSwitchChip({
+  providers,
+  instanceId,
+  model,
+  getDisabledReason,
+  onSwitch,
+}: SubscriptionSwitchInput) {
+  const [now, setNow] = useState(Date.now);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a wall clock so limit freshness and resets stay current.
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), COMPOSER_STATS_CLOCK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+  const suggestion = recommendSubscriptionSwitch({ instanceId, model, providers, nowMs: now });
+  if (!suggestion) return null;
+  const disabledReason = getDisabledReason(suggestion.instanceId, suggestion.model);
+  const tone =
+    suggestion.kind === "pressure"
+      ? "border-warning/40 text-warning hover:bg-warning/10"
+      : "border-foreground/15 text-foreground/80 hover:bg-foreground/5";
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            data-subscription-switch={suggestion.kind}
+            aria-disabled={disabledReason !== null}
+            onClick={() => {
+              if (disabledReason === null) onSwitch(suggestion.instanceId, suggestion.model);
+            }}
+            className={`inline-flex items-center gap-1 rounded-sm border px-1.5 -outline-offset-2 ${tone} ${
+              disabledReason !== null ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+            }`}
+          />
+        }
+      >
+        <span>
+          {suggestion.modelName} on {suggestion.providerName}
+        </span>
+        <span aria-hidden="true">→</span>
+      </TooltipTrigger>
+      <TooltipPopup className="max-w-80">
+        <p>{suggestion.reason}</p>
+        <p className="mt-1 text-muted-foreground">
+          {disabledReason ??
+            `Switch this thread to ${suggestion.modelName} on ${suggestion.providerName}.`}
+        </p>
+      </TooltipPopup>
+    </Tooltip>
+  );
+}
+
 export function ComposerStats({
   context,
   turn,
@@ -289,6 +355,7 @@ export function ComposerStats({
   compactDisabled,
   compactDisabledReason,
   isCompacting,
+  subscriptionSwitch = null,
 }: {
   context: ContextWindowSnapshot | null;
   turn: OrchestrationV2ProviderTurn | null;
@@ -300,6 +367,7 @@ export function ComposerStats({
   compactDisabled: boolean;
   compactDisabledReason: string | null;
   isCompacting: boolean;
+  subscriptionSwitch?: SubscriptionSwitchInput | null;
 }) {
   const compaction = deriveContextCompaction(context, contextDriver, configuredClaudeThreshold);
   const responseRate = deriveResponseRate(turn);
@@ -320,6 +388,7 @@ export function ComposerStats({
     responseRate === null &&
     compactions.length === 0 &&
     selectComposerLimitWindows(usageLimits?.limits).length === 0 &&
+    subscriptionSwitch === null &&
     compactDisabled
   )
     return null;
@@ -580,6 +649,7 @@ export function ComposerStats({
       {usageLimits && (
         <UsageLimitsSummary limits={usageLimits.limits} providerName={usageLimits.providerName} />
       )}
+      {subscriptionSwitch && <SubscriptionSwitchChip {...subscriptionSwitch} />}
       {stats.length > 0 && (
         <span className="ms-auto inline-flex flex-wrap items-center gap-x-2.5">
           {stats.map(({ key, node }, index) => (
