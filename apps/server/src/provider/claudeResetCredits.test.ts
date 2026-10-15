@@ -31,6 +31,10 @@ const decodeJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
 const httpDate = (ms: number) => DateTime.toDateUtc(DateTime.makeUnsafe(ms)).toUTCString();
 
 const NOW = Date.parse("2026-09-22T12:00:00.000Z");
+// Windows reports read/write bits for every class; POSIX enforces owner-only mode.
+const privateFileMode = HostProcess.Platform.pipe(
+  Effect.map((platform) => (platform === "win32" ? 0o666 : 0o600)),
+);
 const grant = (overrides: Record<string, unknown>) => ({
   id: "grant_a",
   resets_left: 1,
@@ -529,7 +533,7 @@ effectIt.layer(NodeServices.layer)("Claude limits-only OAuth reader", (it) => {
           status: "rate_limited",
           nextAttemptAtMs: attemptedAtMs + delay,
         });
-        expect((yield* fs.stat(poll)).mode & 0o777).toBe(0o600);
+        expect((yield* fs.stat(poll)).mode & 0o777).toBe(yield* privateFileMode);
         expect(yield* fs.exists(reading)).toBe(false);
         yield* TestClock.adjust(delay - 1);
         expect(yield* reader("2.1.0")).toBeUndefined();
@@ -719,7 +723,7 @@ effectIt.layer(NodeServices.layer)("Claude limits-only OAuth reader", (it) => {
         fetchedAtMs: Date.parse(limits!.checkedAt),
         usage,
       });
-      expect((yield* fs.stat(shared)).mode & 0o777).toBe(0o600);
+      expect((yield* fs.stat(shared)).mode & 0o777).toBe(yield* privateFileMode);
       const poll = shared.replace(/\.json$/, ".poll.json");
       expect(yield* decodeJson(yield* fs.readFileString(poll))).toEqual({
         configDir,
@@ -727,7 +731,7 @@ effectIt.layer(NodeServices.layer)("Claude limits-only OAuth reader", (it) => {
         status: "ok",
         nextAttemptAtMs: Date.parse(limits!.checkedAt) + 55_000,
       });
-      expect((yield* fs.stat(poll)).mode & 0o777).toBe(0o600);
+      expect((yield* fs.stat(poll)).mode & 0o777).toBe(yield* privateFileMode);
       expect((yield* fs.readDirectory(shareDirectory)).sort()).toEqual(
         [path.basename(shared), path.basename(poll)].sort(),
       );
