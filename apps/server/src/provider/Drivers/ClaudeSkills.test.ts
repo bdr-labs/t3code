@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-import { discoverClaudeSkills } from "./ClaudeSkills.ts";
+import { discoverClaudeSkills, readClaudeAutoCompactWindow } from "./ClaudeSkills.ts";
 import { planClaudeSkillDispatch } from "./ClaudeSkillDispatch.ts";
 
 const writeSkill = Effect.fn(function* (
@@ -932,6 +932,51 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
           ["plain-off", false, false],
           ["user-only-yes", true, false],
         ],
+      );
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("readClaudeAutoCompactWindow", (it) => {
+  it.effect("reads autoCompactWindow with project settings over user settings", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-window-" });
+      const configDir = path.join(tempDir, "claude-home");
+      const workspace = path.join(tempDir, "workspace");
+      yield* fs.makeDirectory(configDir, { recursive: true });
+      yield* fs.makeDirectory(path.join(workspace, ".claude"), { recursive: true });
+
+      assert.isUndefined(yield* readClaudeAutoCompactWindow({ homePath: configDir }, workspace, {}));
+
+      // Hand-edited files may carry comments; Claude Code tolerates them.
+      yield* fs.writeFileString(
+        path.join(configDir, "settings.json"),
+        '{\n  // compact early\n  "autoCompactWindow": 300000,\n}',
+      );
+      assert.strictEqual(
+        yield* readClaudeAutoCompactWindow({ homePath: configDir }, workspace, {}),
+        300_000,
+      );
+
+      yield* fs.writeFileString(
+        path.join(workspace, ".claude", "settings.local.json"),
+        JSON.stringify({ autoCompactWindow: 500_000 }),
+      );
+      assert.strictEqual(
+        yield* readClaudeAutoCompactWindow({ homePath: configDir }, workspace, {}),
+        500_000,
+      );
+
+      // Out of the CLI's range: ignored, so the user value stands.
+      yield* fs.writeFileString(
+        path.join(workspace, ".claude", "settings.local.json"),
+        JSON.stringify({ autoCompactWindow: 5_000 }),
+      );
+      assert.strictEqual(
+        yield* readClaudeAutoCompactWindow({ homePath: configDir }, workspace, {}),
+        300_000,
       );
     }),
   );

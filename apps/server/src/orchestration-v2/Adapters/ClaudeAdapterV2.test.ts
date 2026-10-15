@@ -748,6 +748,27 @@ describe("ClaudeAdapterV2 context usage", () => {
     );
     assert.strictEqual(usage.promptCacheExpiresAt, "2026-08-29T00:05:00.000Z");
   });
+
+  it("measures context against autoCompactWindow, as Claude Code does", () => {
+    const usage = ClaudeAdapterV2.claudeProviderTurnTokenUsage(
+      { input_tokens: 129_000, output_tokens: 1_000 },
+      1_000_000,
+      "2026-08-29T00:00:00.000Z",
+      "",
+      undefined,
+      ClaudeAdapterV2.claudeEffectiveContextWindow(1_000_000, "", 300_000),
+    );
+    assert.strictEqual(usage.maxTokens, 300_000);
+
+    const effective = ClaudeAdapterV2.claudeEffectiveContextWindow;
+    // No setting anywhere: the model's window.
+    assert.strictEqual(effective(1_000_000, "", undefined), 1_000_000);
+    // T3's own setting reaches the CLI as flag settings and outranks the files.
+    assert.strictEqual(effective(1_000_000, "400000", 300_000), 400_000);
+    // A setting never raises the window past the model's.
+    assert.strictEqual(effective(200_000, "", 300_000), 200_000);
+    assert.strictEqual(effective(null, "", 300_000), 300_000);
+  });
 });
 
 describe("ClaudeAdapterV2 approval presentation", () => {

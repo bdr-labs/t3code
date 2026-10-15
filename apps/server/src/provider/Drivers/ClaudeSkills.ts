@@ -492,6 +492,51 @@ export function claudeLaunchArgDirectories(launchArgs?: string): ReadonlyArray<s
   return directories;
 }
 
+const AutoCompactWindowSettings = fromLenientJson(
+  Schema.Struct({ autoCompactWindow: Schema.optional(Schema.Unknown) }),
+);
+const decodeAutoCompactWindowSettings = Schema.decodeUnknownEffect(AutoCompactWindowSettings);
+
+/**
+ * Claude Code's `autoCompactWindow`, read like `skillOverrides` (last file wins). The CLI
+ * measures `/context` and auto-compaction against it and ignores values outside 100k-1M.
+ */
+export const readClaudeAutoCompactWindow = Effect.fn("readClaudeAutoCompactWindow")(function* (
+  config: Pick<ClaudeSettings, "homePath">,
+  cwd: string | undefined,
+  environment: NodeJS.ProcessEnv,
+): Effect.fn.Return<number | undefined, never, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const platform = yield* HostProcess.Platform;
+  const configDirPath = yield* resolveClaudeConfigDirPath(config, environment, cwd);
+  const repositoryRoot = cwd === undefined ? undefined : yield* findRepositoryRoot(cwd);
+  let window: number | undefined;
+  for (const settingsPath of claudeSettingsPaths(
+    path,
+    configDirPath,
+    cwd,
+    platform,
+    environment,
+    repositoryRoot,
+  )) {
+    const contents = yield* fileSystem
+      .readFileString(settingsPath)
+      .pipe(Effect.orElseSucceed(() => undefined));
+    if (contents === undefined) {
+      continue;
+    }
+    const parsed = yield* decodeAutoCompactWindowSettings(contents).pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
+    const value = parsed?.autoCompactWindow;
+    if (typeof value === "number" && Number.isInteger(value) && value >= 100_000 && value <= 1_000_000) {
+      window = value;
+    }
+  }
+  return window;
+});
+
 /** First name wins, matching Claude Code's precedence of user skills over project skills. */
 export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* (
   config: Pick<ClaudeSettings, "homePath"> & Partial<Pick<ClaudeSettings, "launchArgs">>,

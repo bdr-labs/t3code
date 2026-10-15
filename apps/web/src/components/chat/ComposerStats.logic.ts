@@ -296,7 +296,7 @@ export function deriveContextCompaction(
           ? "Provider reported"
           : "Claude setting"
         : driver === "claudeAgent"
-          ? "Claude default (threshold not reported)"
+          ? "Managed by Claude (threshold not reported)"
           : driver === "codex"
             ? "Managed by Codex (threshold not reported)"
             : context?.compactsAutomatically === true

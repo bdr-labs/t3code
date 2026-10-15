@@ -166,6 +166,7 @@ import {
 import {
   claudeLaunchArgDirectories,
   discoverClaudeSkills,
+  readClaudeAutoCompactWindow,
 } from "../../provider/Drivers/ClaudeSkills.ts";
 import {
   compileClaudeModelSelection,
@@ -238,6 +239,23 @@ import {
 export const CLAUDE_PROVIDER = ProviderDriverKind.make("claudeAgent");
 const CLAUDE_AGENT_SDK_QUERY_PROTOCOL = "claude-agent-sdk.query" as const;
 
+/**
+ * The window Claude Code measures context against: the model's window, capped
+ * by `autoCompactWindow` when one is set. T3's own setting reaches the CLI as
+ * flag settings, which outrank the settings files.
+ */
+export function claudeEffectiveContextWindow(
+  modelWindow: number | null,
+  t3AutoCompactWindow: string | undefined,
+  fileAutoCompactWindow: number | undefined,
+): number | null {
+  const t3Value = t3AutoCompactWindow?.trim() ? Number(t3AutoCompactWindow) : undefined;
+  const configured =
+    t3Value !== undefined && Number.isFinite(t3Value) ? t3Value : fileAutoCompactWindow;
+  if (configured === undefined) return modelWindow;
+  return modelWindow === null ? configured : Math.min(modelWindow, configured);
+}
+
 interface ClaudeCacheCreation {
   readonly ephemeral_1h_input_tokens: number;
   readonly ephemeral_5m_input_tokens: number;
@@ -288,6 +306,7 @@ export function claudeProviderTurnTokenUsage(
   updatedAt: string,
   autoCompactWindow = "",
   requestedAt?: DateTime.Utc,
+  contextWindow: number | null = maxTokens,
 ) {
   const inputTokens = claudeMessageInputTokens(usage);
   const outputTokens = usage.output_tokens;
@@ -299,12 +318,13 @@ export function claudeProviderTurnTokenUsage(
       : DateTime.formatIso(DateTime.add(requestedAt, { milliseconds: promptCacheTtlMs }));
   return {
     usedTokens: inputTokens + outputTokens,
-    maxTokens,
+    maxTokens: contextWindow,
     inputTokens,
     cachedInputTokens: usage.cache_read_input_tokens ?? 0,
     outputTokens,
     reasoningOutputTokens: 0,
     ...(promptCacheTtlMs === undefined ? {} : { promptCacheTtlMs }),
+    // The threshold is relative to the model's window, not the capped context window.
     ...claudeAutoCompactThreshold(autoCompactWindow, maxTokens),
     ...(promptCacheExpiresAt === undefined ? {} : { promptCacheExpiresAt }),
     updatedAt,
@@ -5046,6 +5066,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           model: input.modelSelection.model,
           now,
         });
+        // The CLI reads its settings files when it starts, so read them once here
+        // rather than on the turn-start path.
+        const fileAutoCompactWindow = yield* readClaudeAutoCompactWindow(
+          adapterOptions.settings,
+          input.runtimePolicy.cwd ?? undefined,
+          adapterOptions.environment,
+        ).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        );
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
         const taskOutputTails = new Map<
@@ -5391,11 +5421,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           // arrives after generation, so it leaves the cache expiry unknown.
           if (requestStarted && context.streamUsage !== null) context.streamUsage.requestedAt = now;
           const maxTokens = claudeContextWindow(context.input.modelSelection);
+          const contextWindow = claudeEffectiveContextWindow(
+            maxTokens,
+            adapterOptions.settings.autoCompactWindow,
+            fileAutoCompactWindow,
+          );
           const tokenUsage =
             typeof usage === "number"
               ? {
                   usedTokens: usage,
-                  maxTokens,
+                  maxTokens: contextWindow,
                   ...claudeAutoCompactThreshold(
                     adapterOptions.settings.autoCompactWindow,
                     maxTokens,
@@ -5408,6 +5443,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   DateTime.formatIso(now),
                   adapterOptions.settings.autoCompactWindow,
                   context.streamUsage?.requestedAt,
+                  contextWindow,
                 );
           if (typeof usage !== "number") {
             if (claudeMessageInputTokens(usage) <= 0) return;
