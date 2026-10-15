@@ -36,6 +36,7 @@ import {
   RELAY_ISSUER_SECRET,
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
+import * as DirectPush from "../directPush/DirectPush.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -146,6 +147,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
     readonly readShell?: (threadId: ThreadId) => Effect.Effect<OrchestrationV2ThreadShell | null>;
     readonly domainEvents?: Stream.Stream<OrchestrationV2DomainEvent>;
     readonly catchUpThreads?: ReadonlyArray<OrchestrationV2ThreadShell>;
+    readonly directPush?: DirectPush.DirectPush["Service"];
   } = {},
 ) {
   const values = new Map<string, Uint8Array>(
@@ -299,6 +301,10 @@ const makeTestRelay = Effect.fnUntraced(function* (
     }),
     Effect.provideService(FetchHttpClient.Fetch, fetch),
     Effect.provide(NodeCrypto.layer),
+    (effect) =>
+      options.directPush === undefined
+        ? effect
+        : Effect.provideService(effect, DirectPush.DirectPush, options.directPush),
   );
   return { relay, secrets, secretReads, currentShell, shellReads, publications, catchUp };
 });
@@ -348,6 +354,67 @@ describe("AgentAwarenessRelay", () => {
         { threadId: SECOND_THREAD_ID, revision: 2 },
         { threadId: THREAD_ID, revision: 2 },
       ]);
+    }),
+  );
+
+  it.effect("publishes to direct push without a relay link", () =>
+    Effect.gen(function* () {
+      const direct: Array<RelayAgentActivityState | null> = [];
+      const { relay, publications } = yield* makeTestRelay({
+        linked: false,
+        directPush: {
+          isEnabled: Effect.succeed(true),
+          registerDevice: () => Effect.die("unused"),
+          registerLiveActivity: () => Effect.die("unused"),
+          snapshot: Effect.die("unused"),
+          publish: ({ state }) => Effect.sync(() => void direct.push(state)),
+        },
+      });
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications.length, 0);
+      assert.equal(direct.length, 1);
+      assert.equal(direct[0]?.threadId, THREAD_ID);
+      assert.equal(direct[0]?.phase, "running");
+    }),
+  );
+
+  it.effect("tells direct push which threads an agent opened", () =>
+    Effect.gen(function* () {
+      const direct: Array<boolean | undefined> = [];
+      const { relay, currentShell } = yield* makeTestRelay({
+        linked: false,
+        directPush: {
+          isEnabled: Effect.succeed(true),
+          registerDevice: () => Effect.die("unused"),
+          registerLiveActivity: () => Effect.die("unused"),
+          snapshot: Effect.die("unused"),
+          publish: ({ openedByThread }) => Effect.sync(() => void direct.push(openedByThread)),
+        },
+      });
+      yield* relay.publishThread(THREAD_ID);
+      yield* Ref.set(currentShell, shell({ title: "Child", openedByThreadId: SECOND_THREAD_ID }));
+      yield* relay.publishThread(THREAD_ID);
+      assert.deepEqual(direct, [false, true]);
+    }),
+  );
+
+  it.effect("stays quiet without a relay link when direct push has no key", () =>
+    Effect.gen(function* () {
+      const direct: Array<RelayAgentActivityState | null> = [];
+      const { relay, publications, shellReads } = yield* makeTestRelay({
+        linked: false,
+        directPush: {
+          isEnabled: Effect.succeed(false),
+          registerDevice: () => Effect.die("unused"),
+          registerLiveActivity: () => Effect.die("unused"),
+          snapshot: Effect.die("unused"),
+          publish: ({ state }) => Effect.sync(() => void direct.push(state)),
+        },
+      });
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications.length, 0);
+      assert.equal(direct.length, 0);
+      assert.equal(shellReads.length, 0);
     }),
   );
 

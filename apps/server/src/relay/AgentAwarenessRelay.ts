@@ -43,6 +43,7 @@ import {
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
 import { EnvironmentSigningKey } from "../cloud/environmentKeys.ts";
+import * as DirectPush from "../directPush/DirectPush.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -368,6 +369,12 @@ export const make = Effect.gen(function* () {
   const startedAt = (yield* DateTime.now).epochMilliseconds;
   const catchUpRequests = yield* Queue.dropping<void>(1);
   const publishedStateByThreadRef = yield* Ref.make(new Map<ThreadId, string>());
+  // Direct push (an APNs key in the secret store) publishes without the relay.
+  const directPush = yield* Effect.serviceOption(DirectPush.DirectPush);
+  const readDirectPushEnabled = Option.match(directPush, {
+    onNone: () => Effect.succeed(false),
+    onSome: (service) => service.isEnabled,
+  });
 
   const readSecretString = (name: string) =>
     secrets
@@ -432,8 +439,9 @@ export const make = Effect.gen(function* () {
   });
 
   const publishThreadUnsafe = Effect.fn("publishThreadUnsafe")(function* (threadId: ThreadId) {
+    const directPushEnabled = yield* readDirectPushEnabled;
     const publishAgentActivity = yield* readPublishAgentActivityEnabled;
-    if (!publishAgentActivity) {
+    if (!publishAgentActivity && !directPushEnabled) {
       yield* cancelPublishRetries;
       yield* resetPublishedConnection;
       yield* Effect.logDebug("agent activity publish skipped; publication disabled", {
@@ -441,8 +449,8 @@ export const make = Effect.gen(function* () {
       });
       return;
     }
-    const relayConfig = yield* readRelayConfig;
-    if (!relayConfig) {
+    const relayConfig = publishAgentActivity ? yield* readRelayConfig : null;
+    if (!relayConfig && !directPushEnabled) {
       yield* cancelPublishRetries;
       yield* resetPublishedConnection;
       yield* Effect.logDebug("agent activity publish skipped; relay link credentials unavailable", {
@@ -451,9 +459,10 @@ export const make = Effect.gen(function* () {
       return;
     }
     if (
-      publishedRelayConfig?.url !== relayConfig.url ||
-      publishedRelayConfig.issuer !== relayConfig.issuer ||
-      publishedRelayConfig.environmentCredential !== relayConfig.environmentCredential
+      relayConfig &&
+      (publishedRelayConfig?.url !== relayConfig.url ||
+        publishedRelayConfig.issuer !== relayConfig.issuer ||
+        publishedRelayConfig.environmentCredential !== relayConfig.environmentCredential)
     ) {
       yield* resetPublishedConnection;
       publishedRelayConfig = relayConfig;
@@ -464,7 +473,16 @@ export const make = Effect.gen(function* () {
       readonly projectId: string | null;
       readonly state: RelayAgentActivityState | null;
       readonly reason: string;
+      readonly openedByThread: boolean;
     }) {
+      if (directPushEnabled && Option.isSome(directPush)) {
+        yield* directPush.value.publish({
+          threadId,
+          state: input.state,
+          openedByThread: input.openedByThread,
+        });
+      }
+      if (!relayConfig) return;
       if (cachedRelayClient === undefined) {
         cachedRelayClient = yield* makeRelayClient(relayConfig);
       }
@@ -602,6 +620,7 @@ export const make = Effect.gen(function* () {
           projectId: unsettled.projectId,
           state: completion,
           reason: unsettled.reason,
+          openedByThread: threadShell?.openedByThreadId !== undefined,
         }).pipe(withRelayClientTracing);
         heldCompletions.delete(threadId);
         publishConfirmDeadlines.set(threadId, nowMs + 5_000);
@@ -633,6 +652,7 @@ export const make = Effect.gen(function* () {
       projectId: snapshot.projectId,
       state: snapshot.state,
       reason: snapshot.reason,
+      openedByThread: threadShell?.openedByThreadId !== undefined,
     }).pipe(withRelayClientTracing);
     publishConfirmDeadlines.delete(threadId);
     heldCompletions.delete(threadId);
@@ -698,24 +718,33 @@ export const make = Effect.gen(function* () {
   });
 
   const publishActiveThreadsUnsafe = Effect.gen(function* () {
-    const relayUrl = yield* readSecretString(RELAY_URL_SECRET).pipe(
-      Effect.orElseSucceed(() => null),
-    );
-    if (!relayUrl) {
-      yield* Effect.logDebug("agent activity snapshot skipped; relay link credentials unavailable");
-      return "unlinked" as const;
-    }
-    const publishAgentActivity = yield* readPublishAgentActivityEnabled.pipe(
-      Effect.orElseSucceed(() => false),
-    );
-    if (!publishAgentActivity) {
-      yield* Effect.logDebug("agent activity snapshot skipped; publication disabled");
-      return "disabled" as const;
-    }
-    const relayConfig = yield* readRelayConfig.pipe(Effect.orElseSucceed(() => null));
-    if (!relayConfig) {
-      yield* Effect.logDebug("agent activity snapshot skipped; relay link credentials unavailable");
-      return "unlinked" as const;
+    // Direct push needs no relay link; otherwise one secret read settles the
+    // common never-linked case and the full link config is read only once
+    // publishing is on.
+    if (!(yield* readDirectPushEnabled)) {
+      const relayUrl = yield* readSecretString(RELAY_URL_SECRET).pipe(
+        Effect.orElseSucceed(() => null),
+      );
+      if (!relayUrl) {
+        yield* Effect.logDebug(
+          "agent activity snapshot skipped; relay link credentials unavailable",
+        );
+        return "unlinked" as const;
+      }
+      const publishAgentActivity = yield* readPublishAgentActivityEnabled.pipe(
+        Effect.orElseSucceed(() => false),
+      );
+      if (!publishAgentActivity) {
+        yield* Effect.logDebug("agent activity snapshot skipped; publication disabled");
+        return "disabled" as const;
+      }
+      const relayConfig = yield* readRelayConfig.pipe(Effect.orElseSucceed(() => null));
+      if (!relayConfig) {
+        yield* Effect.logDebug(
+          "agent activity snapshot skipped; relay link credentials unavailable",
+        );
+        return "unlinked" as const;
+      }
     }
     const environmentId = yield* serverEnvironment.getEnvironmentId;
     const projectSnapshot = yield* projects.snapshot;

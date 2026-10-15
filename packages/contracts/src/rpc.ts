@@ -39,6 +39,11 @@ import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
+  RelayAgentActivitySnapshotResponse,
+  RelayDeviceRegistrationRequest,
+  RelayLiveActivityRegistrationRequest,
+} from "./relay.ts";
+import {
   ProviderAuthCancelInput,
   ProviderAuthCompleteInput,
   ProviderAuthState,
@@ -535,6 +540,11 @@ export const WS_METHODS = {
   serverPrepareTriage: "server.prepareTriage",
   serverSignalProcess: "server.signalProcess",
   serverReportClientActivity: "server.reportClientActivity",
+  // Direct push: a client registers its APNs tokens with this server, which
+  // sends agent activity to APNs itself instead of through the T3 relay.
+  serverRegisterPushDevice: "server.registerPushDevice",
+  serverRegisterPushLiveActivity: "server.registerPushLiveActivity",
+  serverGetPushActivitySnapshot: "server.getPushActivitySnapshot",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
@@ -991,6 +1001,30 @@ const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRelayClient
 
 const WsServerReportClientActivityRpc = Rpc.make(WS_METHODS.serverReportClientActivity, {
   payload: ClientActivityReportInput,
+  error: EnvironmentAuthorizationError,
+});
+
+export const DirectPushRegistrationResult = Schema.Struct({
+  /** False when this server has no APNs key, so it will not push. */
+  enabled: Schema.Boolean,
+});
+export type DirectPushRegistrationResult = typeof DirectPushRegistrationResult.Type;
+
+const WsServerRegisterPushDeviceRpc = Rpc.make(WS_METHODS.serverRegisterPushDevice, {
+  payload: RelayDeviceRegistrationRequest,
+  success: DirectPushRegistrationResult,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsServerRegisterPushLiveActivityRpc = Rpc.make(WS_METHODS.serverRegisterPushLiveActivity, {
+  payload: RelayLiveActivityRegistrationRequest,
+  success: DirectPushRegistrationResult,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsServerGetPushActivitySnapshotRpc = Rpc.make(WS_METHODS.serverGetPushActivitySnapshot, {
+  payload: Schema.Struct({}),
+  success: RelayAgentActivitySnapshotResponse,
   error: EnvironmentAuthorizationError,
 });
 
@@ -2060,6 +2094,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsServerReportClientActivityRpc,
+  WsServerRegisterPushDeviceRpc,
+  WsServerRegisterPushLiveActivityRpc,
+  WsServerGetPushActivitySnapshotRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
   WsPullRequestsListRpc,

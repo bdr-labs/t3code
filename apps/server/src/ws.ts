@@ -228,6 +228,7 @@ import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as DefectReporter from "./observability/DefectReporter.ts";
 import * as EventLoopMonitor from "./observability/EventLoopMonitor.ts";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
+import * as DirectPush from "./directPush/DirectPush.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { requiredScopeForDeviceList, rpcAuthorizationError } from "./auth/RpcAuthorization.ts";
 import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
@@ -1479,6 +1480,7 @@ export const layerWsRpc = (
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
+      const directPush = yield* Effect.serviceOption(DirectPush.DirectPush);
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
       yield* Effect.addFinalizer(() =>
         Ref.get(rpcClientIds).pipe(
@@ -2691,6 +2693,18 @@ export const layerWsRpc = (
               ),
             ),
           ),
+        [WS_METHODS.serverRegisterPushDevice]: (input) =>
+          Option.isSome(directPush)
+            ? directPush.value.registerDevice(input)
+            : Effect.succeed({ enabled: false }),
+        [WS_METHODS.serverRegisterPushLiveActivity]: (input) =>
+          Option.isSome(directPush)
+            ? directPush.value.registerLiveActivity(input)
+            : Effect.succeed({ enabled: false }),
+        [WS_METHODS.serverGetPushActivitySnapshot]: (_input) =>
+          Option.isSome(directPush)
+            ? directPush.value.snapshot.pipe(Effect.map((aggregate) => ({ aggregate })))
+            : Effect.succeed({ aggregate: null }),
         [WS_METHODS.cloudGetRelayClientStatus]: (_input) => relayClient.resolve,
         [WS_METHODS.cloudInstallRelayClient]: (_input) =>
           Stream.callback<RelayClientInstallProgressEvent, RelayClientInstallFailedError>((queue) =>

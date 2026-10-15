@@ -1005,6 +1005,8 @@ export type AgentAwarenessThread = ProjectThreadAwarenessV2Input["thread"] &
   Pick<
     OrchestrationV2ThreadShell,
     | "projectId"
+    // Fork: direct push marks agent-opened threads (directPush/).
+    | "openedByThreadId"
     | "latestRunCompletedAt"
     | "archivedAt"
     | "activeRunId"
@@ -7118,6 +7120,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             Effect.map((state): AgentAwarenessThread => ({
               id: state.thread.id,
               projectId: state.thread.projectId,
+              ...(state.thread.openedByThreadId === undefined
+                ? {}
+                : { openedByThreadId: state.thread.openedByThreadId }),
               archivedAt: state.thread.archivedAt,
               activeRunId: state.activeRunId,
               latestRunId: state.latestRunId,
