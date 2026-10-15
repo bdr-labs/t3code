@@ -263,6 +263,10 @@
       "types": "./src/state/relayDiscovery.ts",
       "default": "./src/state/relayDiscovery.ts"
     },
+    "./state/thread-family-summary": {
+      "types": "./src/state/childThreadSummary.ts",
+      "default": "./src/state/childThreadSummary.ts"
+    },
     "./state/review": {
       "types": "./src/state/review.ts",
       "default": "./src/state/review.ts"

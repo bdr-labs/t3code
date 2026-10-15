@@ -112,6 +112,43 @@ describe("v2 thread shell lists", () => {
     registry.dispose();
   });
 
+  it("names the delegator of a delegate_task child, not of a provider-native subagent", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const root = v2ThreadShell;
+    const subagentLineage = {
+      ...root.lineage,
+      parentThreadId: root.id,
+      relationshipToParent: "subagent" as const,
+    };
+    const delegated = {
+      ...root,
+      id: ThreadId.make("delegated"),
+      creationSource: "mcp" as const,
+      lineage: subagentLineage,
+    };
+    const native = {
+      ...root,
+      id: ThreadId.make("native"),
+      creationSource: "provider" as const,
+      lineage: subagentLineage,
+    };
+    registry.set(snapshotAtom(environmentId), {
+      ...v2ShellSnapshot,
+      threads: [root, delegated, native],
+    });
+    const dispose = registry.mount(threads.threadShellsAtom);
+    const delegators = registry
+      .get(threads.threadShellsAtom)
+      .map((thread) => [thread.id, thread.delegatedByThreadId]);
+    expect(delegators).toEqual([
+      [root.id, undefined],
+      [delegated.id, root.id],
+      [native.id, undefined],
+    ]);
+    dispose();
+    registry.dispose();
+  });
+
   it("keeps a live subagent question inside the parent without flagging its thread", () => {
     const { registry, threads, snapshotAtom } = makeHarness();
     const root = v2ThreadShell;

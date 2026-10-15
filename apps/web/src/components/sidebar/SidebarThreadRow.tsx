@@ -102,6 +102,13 @@ import {
 import { pickSnoozePreset, resolveSnoozePresets, type SnoozePreset } from "../Sidebar.snooze";
 import { useThreadShell } from "../../state/entities";
 import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
+import {
+  SidebarChildThreadRoleIcon,
+  SidebarChildThreadStatus,
+  sidebarChildRowStatusOf,
+  sidebarChildThreadKindOf,
+} from "../Sidebar.childThreads";
+import { childThreadRoleOf } from "@t3tools/client-runtime/state/thread-family-summary";
 import { ThreadSearchMatchExcerpt } from "../ThreadSearchMatch";
 import { makeWorkspaceFileDropHandlers } from "../chat/workspaceFileDrop";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
@@ -482,6 +489,14 @@ export function SortableThreadRow(
   // Keyed by variant so a card/slim switch remounts the row.
   return <SidebarThreadRow key={rowProps.variant} {...rowProps} thread={thread} sortable={bag} />;
 }
+
+// A child thread under its opener: not sortable, but like SortableThreadRow it
+// reads the live shell so its status icon follows the stream.
+export function NestedThreadRow(props: Omit<SidebarThreadRowProps, "sortable">) {
+  const thread =
+    useThreadShell(scopeThreadRef(props.thread.environmentId, props.thread.id)) ?? props.thread;
+  return <SidebarThreadRow {...props} thread={thread} />;
+}
 export type SidebarSweepAction = "settle" | "unsettle" | "unsnooze";
 const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
   pin: (
@@ -538,6 +553,8 @@ type SidebarThreadRowProps = {
   // "folder-multiline" adds the card's branch and PR line under it.
   variant: "card" | "slim" | "folder" | "folder-multiline";
   navigationParent?: string | undefined;
+  // A child thread under its head: indented past the family line, no favicon.
+  nested?: boolean;
   variantAction: SidebarSweepAction;
   settlementSupported: boolean;
   snoozeSupported: boolean;
@@ -783,6 +800,26 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                         }
                       : null;
   const isWokeStatus = topStatus?.icon === "woke";
+  // A child row leads with its status and the role its opener gave it.
+  const childKind = props.nested
+    ? sidebarChildThreadKindOf(
+        thread,
+        variantAction === "unsettle" ? "settled" : "active",
+        isUnread,
+      )
+    : null;
+  const childLead =
+    childKind === null ? null : (
+      <>
+        <SidebarChildThreadStatus
+          status={sidebarChildRowStatusOf({ kind: childKind, topStatus })}
+        />
+        <SidebarChildThreadRoleIcon
+          role={childThreadRoleOf(thread.title)}
+          muted={childKind === "settled"}
+        />
+      </>
+    );
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
     effectiveEnvMode: thread.worktreePath === null ? "local" : "worktree",
@@ -1228,6 +1265,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     : "flex h-9 items-center gap-2.5 px-2.5",
                   // Lines titles up with the folder name, past its chevron and icon.
                   inFolder && "ps-9",
+                  props.nested && "gap-1.5 ps-6",
                 )}
                 onClick={handleClick}
                 onDoubleClick={handleDoubleClick}
@@ -1239,7 +1277,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             {/* `contents` keeps one-line rows a single flex row. */}
             <div className={multiline ? "flex h-6 min-w-0 items-center gap-2.5" : "contents"}>
               {accessibleTitle}
-              {inFolder ? null : (
+              {inFolder || props.nested ? null : (
                 <span
                   className={cn(
                     "flex shrink-0 items-center transition-opacity",
@@ -1252,6 +1290,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   ) : null}
                 </span>
               )}
+              {childLead}
               {draftIndicator}
               {title}
               {multiline ? titleLineIcons : null}

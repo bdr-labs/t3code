@@ -2878,6 +2878,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         relationshipToParent: null,
         rootThreadId: command.threadId,
       },
+      ...(command.openedByThreadId === undefined
+        ? {}
+        : { openedByThreadId: command.openedByThreadId }),
       forkedFrom: null,
       createdAt: now,
       updatedAt: now,
@@ -3613,8 +3616,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           const wasPinned = thread.pinnedAt != null;
           const alreadySettled =
             thread.settledOverride === "settled" && thread.settledAt !== null && !wasPinned;
+          // A repeat settle keeps who settled first.
+          const { settledBy: previousSettledBy, ...unsettledThread } = thread;
+          const settledBy = alreadySettled ? previousSettledBy : command.settledBy;
           return {
-            ...thread,
+            ...unsettledThread,
+            ...(settledBy === undefined ? {} : { settledBy }),
             settledOverride: "settled",
             settledAt: alreadySettled ? thread.settledAt : (command.settledAt ?? now),
             pullRequests: thread.pullRequests?.map((link) => withPullRequestWatch(link, undefined)),
@@ -13207,6 +13214,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             type: "thread.settle",
             commandId: command.commandId,
             threadId: command.threadId,
+            settledBy: "auto",
             ...(command.settledAt === undefined ? {} : { settledAt: command.settledAt }),
           },
           events,

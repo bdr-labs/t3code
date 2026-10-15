@@ -2618,6 +2618,12 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const autoSettledProjection = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(autoSettledProjection.thread.settledOverride, "settled");
       assert.isNull(autoSettledProjection.thread.activeOrderKey);
+      assert.equal(autoSettledProjection.thread.settledBy, "auto");
+      assert.equal(
+        (yield* orchestrator.getShellSnapshot()).threads.find((thread) => thread.id === threadId)
+          ?.settledBy,
+        "auto",
+      );
       yield* orchestrator.dispatch({
         type: "thread.unsettle",
         commandId: CommandId.make("runtime-layer-lifecycle-auto-unsettle"),
@@ -2643,6 +2649,15 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const settledProjection = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(settledProjection.thread.settledOverride, "settled");
       assert.isNotNull(settledProjection.thread.settledAt);
+      // A user settle carries no settledBy, and a repeat settle keeps the first.
+      assert.isUndefined(settledProjection.thread.settledBy);
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("runtime-layer-lifecycle-settle-again-by-agent"),
+        threadId,
+        settledBy: "agent",
+      });
+      assert.isUndefined((yield* orchestrator.getThreadProjection(threadId)).thread.settledBy);
 
       yield* orchestrator.dispatch({
         type: "thread.unsettle",
@@ -7248,6 +7263,11 @@ it.layer(layerSharedApplicationDataPlaneTest)("snooze projection", (it) => {
       );
       const [candidate] = yield* projections.getSettlementCandidates(threadId);
       assert.deepEqual(candidate?.lastSnoozeWakeAt, yield* DateTime.now);
+      // Clients tell a Settled stay apart by the wake, so the shell carries it.
+      const wokenShell = (yield* orchestrator.getShellSnapshot()).threads.find(
+        (candidate) => candidate.id === threadId,
+      );
+      assert.deepEqual(wokenShell?.lastSnoozeWakeAt, yield* DateTime.now);
       yield* orchestrator.dispatch({
         type: "thread.settle",
         commandId: CommandId.make("runtime-layer-snoozed-thread-settle"),

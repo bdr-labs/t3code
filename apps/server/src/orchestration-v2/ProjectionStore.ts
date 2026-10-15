@@ -1620,6 +1620,12 @@ export function threadShellFromProjection(
       ? {}
       : { activeOrderKey: projection.thread.activeOrderKey }),
     lineage: projection.thread.lineage,
+    ...(projection.thread.openedByThreadId === undefined
+      ? {}
+      : { openedByThreadId: projection.thread.openedByThreadId }),
+    ...(projection.thread.settledBy === undefined
+      ? {}
+      : { settledBy: projection.thread.settledBy }),
     forkedFrom: projection.thread.forkedFrom,
     activeProviderThreadId: projection.thread.activeProviderThreadId,
     ...(projection.thread.historyOrigin === undefined
@@ -1679,6 +1685,7 @@ export function threadShellFromProjection(
     unsettledAt: projection.thread.unsettledAt ?? null,
     snoozedUntil: projection.thread.snoozedUntil ?? null,
     snoozedAt: projection.thread.snoozedAt ?? null,
+    lastSnoozeWakeAt: projection.thread.lastSnoozeWakeAt ?? null,
     pinnedAt: projection.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
@@ -1901,6 +1908,12 @@ function shellFromState(input: {
       ? {}
       : { activeOrderKey: input.state.thread.activeOrderKey }),
     lineage: input.state.thread.lineage,
+    ...(input.state.thread.openedByThreadId === undefined
+      ? {}
+      : { openedByThreadId: input.state.thread.openedByThreadId }),
+    ...(input.state.thread.settledBy === undefined
+      ? {}
+      : { settledBy: input.state.thread.settledBy }),
     forkedFrom: input.state.thread.forkedFrom,
     activeProviderThreadId: input.state.thread.activeProviderThreadId,
     ...(input.state.thread.historyOrigin === undefined
@@ -1945,6 +1958,7 @@ function shellFromState(input: {
     unsettledAt: input.state.thread.unsettledAt ?? null,
     snoozedUntil: input.state.thread.snoozedUntil ?? null,
     snoozedAt: input.state.thread.snoozedAt ?? null,
+    lastSnoozeWakeAt: input.state.thread.lastSnoozeWakeAt ?? null,
     pinnedAt: input.state.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
@@ -6598,6 +6612,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   autoSettleDisabledAt: thread.autoSettleDisabledAt ?? null,
                   snoozedUntil: thread.snoozedUntil ?? null,
                   snoozedAt: thread.snoozedAt ?? null,
+                  lastSnoozeWakeAt: thread.lastSnoozeWakeAt ?? null,
                   status,
                   latestRunId,
                   latestRunRequestedAt:

@@ -18,6 +18,8 @@ import type { ChatMessage, Thread } from "./types";
 const DEFAULT_TIMESTAMP = "2026-01-01T00:00:00.000Z";
 
 export type ThreadFixtureOverrides = Partial<Thread> & {
+  // "provider" makes a subagent fixture provider-native (no delegatedByThreadId).
+  readonly creationSource?: "web" | "provider";
   readonly messages?: ReadonlyArray<ChatMessage>;
   readonly proposedPlans?: ReadonlyArray<unknown>;
 };
@@ -110,7 +112,7 @@ export function makeThreadFixture(overrides: ThreadFixtureOverrides = {}): Threa
     },
     forkedFrom: overrides.forkedFrom ?? null,
     createdBy: "user",
-    creationSource: "web",
+    creationSource: overrides.creationSource ?? "web",
     latestRunId: overrides.latestRun?.runId ?? null,
     activeRunId: overrides.runtime?.activeRunId ?? null,
     status: overrides.runtime?.status ?? "idle",

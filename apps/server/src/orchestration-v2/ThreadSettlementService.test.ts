@@ -466,6 +466,7 @@ describe("autoSettlementSettingsKey", () => {
 });
 
 type AutoSettleCommand = Extract<OrchestrationV2Command, { readonly type: "thread.auto-settle" }>;
+type SettleCommand = Extract<OrchestrationV2Command, { readonly type: "thread.settle" }>;
 
 const testCrypto = SecureRandom.make((size) => new Uint8Array(size).fill(1));
 
@@ -562,6 +563,8 @@ interface HarnessOptions {
   ) => Effect.Effect<void>;
   readonly onCloseIdle?: () => Effect.Effect<void>;
   readonly currentThreads?: ReadonlyArray<OrchestrationV2AppThread>;
+  /** Shells `getThreadShell` returns instead of the snapshot's. */
+  readonly currentShells?: ReadonlyArray<SettlementShell>;
 }
 
 const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options: HarnessOptions) {
@@ -575,6 +578,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
   const settingsChanges = yield* PubSub.unbounded<ContractServerSettings>();
   const mergedPullRequests = yield* PubSub.unbounded<PullRequestService.PullRequestMergeEvent>();
   const commands = yield* Ref.make<ReadonlyArray<AutoSettleCommand>>([]);
+  const settleCommands = yield* Ref.make<ReadonlyArray<SettleCommand>>([]);
   const branchCalls = yield* Ref.make<
     ReadonlyArray<{ readonly cwd: string; readonly branch: string }>
   >([]);
@@ -629,6 +633,11 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
     });
 
   const dispatch: Orchestrator.OrchestratorV2Shape["dispatch"] = (command) => {
+    if (command.type === "thread.settle") {
+      return Ref.update(settleCommands, (recorded) => [...recorded, command]).pipe(
+        Effect.as({ sequence: 1, storedEvents: [] }),
+      );
+    }
     if (command.type !== "thread.auto-settle") {
       return Effect.die(new Error(`Unexpected command: ${command.type}`));
     }
@@ -667,6 +676,24 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
             threadId === undefined
               ? snapshot.threads
               : snapshot.threads.filter((thread) => thread.id === threadId),
+          ),
+        ),
+      getShellSnapshot: () =>
+        Ref.get(snapshots).pipe(
+          Effect.map((snapshot) => ({
+            schemaVersion: snapshot.schemaVersion,
+            snapshotSequence: snapshot.snapshotSequence,
+            threads: snapshot.threads,
+            archivedThreads: [],
+          })),
+        ),
+      getThreadShell: (threadId) =>
+        Ref.get(snapshots).pipe(
+          Effect.map(
+            (snapshot) =>
+              [...(options.currentShells ?? []), ...snapshot.threads].find(
+                (thread) => thread.id === threadId,
+              ) ?? null,
           ),
         ),
       getThread: (threadId) => {
@@ -728,6 +755,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
     snapshotReads,
     candidateReads,
     commands,
+    settleCommands,
     branchCalls,
     summaryCalls,
     summaryRecovery,
@@ -1477,6 +1505,43 @@ describe("ThreadSettlementServiceV2 terminals", () => {
     ),
   );
 
+  it.effect("settles the idle threads its opener started along with it", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const opener = appThread("opener-thread", "settled");
+        const openerId = ThreadId.make("opener-thread");
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("opened-child", { openedByThreadId: openerId }),
+            makeThread("busy-child", { openedByThreadId: openerId, activityRunStatus: "running" }),
+            makeThread("pinned-since-snapshot", { openedByThreadId: openerId }),
+            makeThread("unrelated-thread"),
+          ]),
+          currentShells: [
+            makeThread("pinned-since-snapshot", {
+              openedByThreadId: openerId,
+              pinnedAt: DateTime.makeUnsafe(NOW),
+            }),
+          ],
+          currentThreads: [opener],
+        });
+
+        yield* Effect.gen(function* () {
+          const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+          yield* fixture.publishEvent(settledEvent(opener));
+          yield* Queue.take(fixture.closedIdle);
+          yield* service.drain;
+          const settled = yield* Ref.get(fixture.settleCommands);
+          assert.deepStrictEqual(
+            settled.map((command) => [command.threadId, command.settledBy]),
+            [[ThreadId.make("opened-child"), "auto"]],
+          );
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
   it.effect("runs the settle script in the thread's own worktree", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1607,5 +1672,58 @@ describe("isSnoozed", () => {
         autoSettleOnMerge: true,
       }),
     ).toBeNull();
+  });
+});
+
+describe("settlesWithOpener", () => {
+  const openerId = ThreadId.make("opener");
+  const opened = { openedByThreadId: openerId };
+  const settles = (overrides: Partial<SettlementShell>) =>
+    ThreadSettlementService.settlesWithOpener(shell(overrides), openerId, NOW_MS);
+
+  it("settles idle threads the opener launched or delegated", () => {
+    expect(settles(opened)).toBe(true);
+    expect(settles({ ...opened, status: "completed", settledOverride: "active" })).toBe(true);
+    expect(
+      settles({
+        lineage: {
+          rootThreadId: openerId,
+          parentThreadId: openerId,
+          relationshipToParent: "subagent",
+        },
+        createdBy: "agent",
+        creationSource: "server",
+      }),
+    ).toBe(true);
+  });
+
+  it("leaves other threads and provider-native subagents alone", () => {
+    expect(settles({})).toBe(false);
+    expect(settles({ openedByThreadId: ThreadId.make("someone-else") })).toBe(false);
+    expect(
+      settles({
+        lineage: {
+          rootThreadId: openerId,
+          parentThreadId: openerId,
+          relationshipToParent: "subagent",
+        },
+        creationSource: "provider",
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps children that still work, wait on the user, or were kept on purpose", () => {
+    expect(settles({ ...opened, settledOverride: "settled" })).toBe(false);
+    expect(settles({ ...opened, archivedAt: at(-1) })).toBe(false);
+    expect(settles({ ...opened, pinnedAt: at(-1) })).toBe(false);
+    expect(settles({ ...opened, autoSettleDisabledAt: at(-1) })).toBe(false);
+    expect(settles({ ...opened, activityRunStatus: "running" })).toBe(false);
+    expect(settles({ ...opened, pendingRuntimeRequest: { kind: "user_input" } as never })).toBe(
+      false,
+    );
+    expect(
+      settles({ ...opened, pendingBackgroundTasks: [{ taskId: "review", kind: "subagent" }] }),
+    ).toBe(false);
+    expect(settles({ ...opened, snoozedAt: at(-DAY_MS), snoozedUntil: at(DAY_MS) })).toBe(false);
   });
 });

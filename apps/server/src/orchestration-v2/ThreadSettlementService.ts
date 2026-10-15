@@ -7,6 +7,7 @@ import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
   CommandId,
   isOrchestrationV2WorkActive,
+  isProviderNativeSubagentThread,
   type ThreadId,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
@@ -156,6 +157,29 @@ export function isAutoSettlementCandidate(
   if (backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])) return false;
   if (threadHasQueuedTurnStart(thread, nowMs)) return false;
   // Interrupted runs must keep the same snooze protection the sidebar shows.
+  return !isSnoozed(thread, nowMs);
+}
+
+/**
+ * Settles with its opener when an agent launched it there or it is that thread's `delegate_task`
+ * worker, unless it still works, waits on the user, or the user kept it.
+ */
+export function settlesWithOpener(
+  thread: Omit<ProjectionStore.ProjectionSettlementCandidate, "latestUserAuthoredMessageAt"> &
+    Pick<OrchestrationV2ThreadShell, "openedByThreadId" | "lineage" | "creationSource">,
+  openerId: ThreadId,
+  nowMs: number,
+): boolean {
+  const delegated =
+    thread.lineage.relationshipToParent === "subagent" &&
+    thread.lineage.parentThreadId === openerId &&
+    !isProviderNativeSubagentThread(thread);
+  if (thread.openedByThreadId !== openerId && !delegated) return false;
+  if (thread.archivedAt !== null || thread.settledOverride === "settled") return false;
+  if (thread.pinnedAt != null || thread.autoSettleDisabledAt != null) return false;
+  if (thread.pendingRuntimeRequest !== null || thread.activityRunStatus != null) return false;
+  if (backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])) return false;
+  if (threadHasQueuedTurnStart(thread, nowMs)) return false;
   return !isSnoozed(thread, nowMs);
 }
 
@@ -625,10 +649,62 @@ export const make = Effect.gen(function* () {
       ),
   );
 
+  // Settling a thread settles the threads it opened. Each child's own
+  // thread.settled event then settles its children in turn.
+  const settleChildren = Effect.fn("ThreadSettlementServiceV2.settleChildren")(
+    function* (openerId: ThreadId) {
+      const opener = yield* projections.getThread(openerId);
+      if (opener.settledOverride !== "settled") return;
+      const settledAtMs = toMillis(opener.settledAt);
+      const { threads } = yield* projections.getShellSnapshot({ unsettledOnly: true });
+      const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+      for (const candidate of threads) {
+        if (!settlesWithOpener(candidate, openerId, nowMs)) continue;
+        // Settling clears a pin, so a child pinned or snoozed since the snapshot must stay.
+        const child = yield* projections.getThreadShell(candidate.id);
+        if (child === null || !settlesWithOpener(child, openerId, nowMs)) continue;
+        yield* orchestrator
+          .dispatch({
+            type: "thread.settle",
+            commandId: CommandId.make(
+              `server:settle-with-opener:${openerId}:${settledAtMs}:${child.id}`,
+            ),
+            threadId: child.id,
+            settledBy: "auto",
+          })
+          .pipe(
+            // A child that started work since the snapshot refuses; it stays active.
+            Effect.catchCauseIf(
+              (cause) => !Cause.hasInterruptsOnly(cause),
+              (cause) =>
+                Effect.logInfo("child thread kept active", {
+                  threadId: child.id,
+                  cause: Cause.pretty(cause),
+                }),
+            ),
+          );
+      }
+    },
+    (effect, openerId) =>
+      effect.pipe(
+        Effect.catchCauseIf(
+          (cause) => !Cause.hasInterruptsOnly(cause),
+          (cause) =>
+            Effect.logWarning("settling child threads failed", {
+              threadId: openerId,
+              cause: Cause.pretty(cause),
+            }),
+        ),
+      ),
+  );
+  const childWorker = yield* makeDrainableWorker(settleChildren);
+
   const processEvent = (event: OrchestrationV2DomainEvent) => {
     switch (event.type) {
       case "thread.settled":
-        return cleanUpSettledThread(event.threadId);
+        return cleanUpSettledThread(event.threadId).pipe(
+          Effect.andThen(childWorker.enqueue(event.threadId)),
+        );
       case "thread.pull-request-link-updated":
       case "thread.pull-request-synced":
       case "provider-session.detached":
@@ -709,6 +785,9 @@ export const make = Effect.gen(function* () {
 
   return {
     start,
-    drain: Effect.andThen(fullSweeps.drain, FiberSet.awaitEmpty(threadSweeps)),
+    drain: Effect.andThen(
+      Effect.andThen(fullSweeps.drain, FiberSet.awaitEmpty(threadSweeps)),
+      childWorker.drain,
+    ),
   } satisfies ThreadSettlementServiceV2["Service"];
 });

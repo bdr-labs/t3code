@@ -380,7 +380,9 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         yield* Ref.set(activeSubscriptionSession, session);
         const { omitIdleSubagents, omitOlderSettled } = yield* session.initialConfig.pipe(
           Effect.map((config) => ({
-            omitIdleSubagents: config.shellThreadFamilies === true,
+            // The sidebar and mobile list nest finished `delegate_task` workers under their opener, and
+            // only the open thread mounts its family, so idle subagent rows stay in the shell.
+            omitIdleSubagents: false,
             omitOlderSettled:
               config.shellOlderSettled === true && config.shellThreadFamilies === true,
           })),

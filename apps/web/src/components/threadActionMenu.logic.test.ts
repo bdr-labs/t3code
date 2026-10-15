@@ -25,7 +25,22 @@ const baseState: ThreadActionMenuState = {
   ],
 };
 
+function ids(state: ThreadActionMenuState): string[] {
+  return buildThreadActionMenuItems(state).map((item) => item.id);
+}
+
 describe("buildThreadActionMenuItems", () => {
+  it("offers hiding and showing child threads only on a family head", () => {
+    expect(ids(baseState)).not.toContain("hide-child-threads");
+    expect(ids({ ...baseState, childThreads: null })).not.toContain("hide-child-threads");
+    const hide = ids({ ...baseState, childThreads: { collapsed: false } });
+    expect(hide).toContain("hide-child-threads");
+    expect(hide.indexOf("hide-child-threads")).toBe(hide.indexOf("mark-unread") + 1);
+    expect(ids({ ...baseState, childThreads: { collapsed: true } })).toContain(
+      "show-child-threads",
+    );
+  });
+
   it.each([false, true])(
     "disables both lifecycle directions without permission (reversed: %s)",
     (reversed) => {

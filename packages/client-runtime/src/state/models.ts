@@ -1,5 +1,6 @@
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestsOf } from "../threadPullRequests.ts";
+import { isProviderNativeSubagentThread } from "@t3tools/contracts";
 import type {
   ThreadLinkedPullRequest,
   EnvironmentId,
@@ -150,6 +151,13 @@ export interface EnvironmentThreadShell {
   readonly linkOrigin: OrchestrationV2ThreadShell["linkOrigin"] | null;
   /** The thread in a linked environment that delegated this one, if one did. */
   readonly delegatedFrom: OrchestrationV2ThreadShell["delegatedFrom"] | null;
+  /** Thread whose agent opened this one through T3 tools; absent otherwise. */
+  readonly openedByThreadId?: ThreadId;
+  /** Set when an agent or automatic settlement settled the thread. */
+  readonly settledBy?: "agent" | "auto";
+  /** Thread that delegated this one through T3 `delegate_task`; absent for
+      provider-native subagents and every other thread. */
+  readonly delegatedByThreadId?: ThreadId;
   readonly activeProviderThreadId: OrchestrationV2ThreadShell["activeProviderThreadId"];
   readonly latestRun: ThreadRunSummary | null;
   readonly runtime: ThreadRuntimeSummary | null;
@@ -177,6 +185,8 @@ export interface EnvironmentThreadShell {
   readonly unsettledAt: string | null;
   readonly snoozedUntil: string | null;
   readonly snoozedAt: string | null;
+  /** Last wake by hand from a snooze; a new Settled stay for child-thread folds. */
+  readonly lastSnoozeWakeAt?: string | null;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecovery | null;
   readonly pinnedAt: string | null;
   readonly autoSettleDisabledAt?: string | null;
@@ -298,6 +308,13 @@ export function presentThreadShell(
     forkedFrom: thread.forkedFrom,
     linkOrigin: thread.linkOrigin ?? null,
     delegatedFrom: thread.delegatedFrom ?? null,
+    ...(thread.openedByThreadId === undefined ? {} : { openedByThreadId: thread.openedByThreadId }),
+    ...(thread.settledBy === undefined ? {} : { settledBy: thread.settledBy }),
+    ...(thread.lineage.relationshipToParent === "subagent" &&
+    thread.lineage.parentThreadId !== null &&
+    !isProviderNativeSubagentThread(thread)
+      ? { delegatedByThreadId: thread.lineage.parentThreadId }
+      : {}),
     activeProviderThreadId: thread.activeProviderThreadId,
     latestRun,
     runtime,
@@ -328,6 +345,7 @@ export function presentThreadShell(
     unsettledAt: nullableIso(thread.unsettledAt ?? null),
     snoozedUntil: nullableIso(thread.snoozedUntil ?? null),
     snoozedAt: nullableIso(thread.snoozedAt ?? null),
+    lastSnoozeWakeAt: nullableIso(thread.lastSnoozeWakeAt ?? null),
     limitRecovery: thread.limitRecovery ?? null,
     pinnedAt: nullableIso(thread.pinnedAt ?? null),
     autoSettleDisabledAt: nullableIso(thread.autoSettleDisabledAt ?? null),

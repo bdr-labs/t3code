@@ -870,14 +870,12 @@ describe("environment shell synchronization", () => {
       const stateWhere = (predicate: (state: EnvironmentShellState) => boolean) =>
         SubscriptionRef.changes(shellState).pipe(Stream.filter(predicate), Stream.runHead);
 
-      // Both transports must omit, or omitted children would come back through the socket.
-      expect(yield* Deferred.await(subscribeInput)).toMatchObject({
-        afterSequence: 1,
-        omitIdleSubagents: true,
-        omitOlderSettled: true,
-      });
+      // Both transports must agree. Idle subagents stay: the lists nest finished workers.
+      const subscribed = yield* Deferred.await(subscribeInput);
+      expect(subscribed).toMatchObject({ afterSequence: 1, omitOlderSettled: true });
+      expect(subscribed).not.toHaveProperty("omitIdleSubagents");
       expect(yield* Ref.get(loadOptions)).toEqual([
-        { omitIdleSubagents: true, omitOlderSettled: true },
+        { omitIdleSubagents: false, omitOlderSettled: true },
       ]);
       const loaded = Option.getOrThrow(yield* stateWhere((state) => state.generation > 0));
       expect(loaded.removedAt.size).toBe(0);

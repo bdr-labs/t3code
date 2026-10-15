@@ -460,6 +460,13 @@ export const OrchestrationV2AppThread = Schema.Struct({
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
   lineage: OrchestrationV2AppThreadLineage,
+  /** Thread whose agent opened this one through T3 tools; absent otherwise. */
+  openedByThreadId: Schema.optional(ThreadId),
+  /**
+   * Who settled the thread when it was not the user: an agent through T3
+   * tools, or automatic settlement. Absent after a user settle.
+   */
+  settledBy: Schema.optional(Schema.Literals(["agent", "auto"])),
   forkedFrom: Schema.NullOr(
     Schema.Union([
       Schema.Struct({ type: Schema.Literal("run"), threadId: ThreadId, runId: RunId }),
@@ -585,6 +592,17 @@ export function idleCompactionOf(
   return message.createdBy === "agent" && message.creationSource === "server"
     ? "beforeCacheExpires"
     : undefined;
+}
+
+/**
+ * A top-level thread an agent opened through T3 tools (t3_thread_launch,
+ * create_threads, or a task an agent scheduled). Subagents and forks are
+ * excluded because their lineage already names the parent.
+ */
+export function isAgentOpenedThread(
+  thread: Pick<OrchestrationV2AppThread, "createdBy" | "lineage">,
+): boolean {
+  return thread.createdBy === "agent" && thread.lineage.relationshipToParent === null;
 }
 
 export const OrchestrationV2RunStatus = Schema.Literals([
@@ -2094,6 +2112,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   lineage: OrchestrationV2AppThreadLineage,
+  openedByThreadId: OrchestrationV2AppThread.fields.openedByThreadId,
+  settledBy: OrchestrationV2AppThread.fields.settledBy,
   forkedFrom: Schema.NullOr(OrchestrationV2AppThread.fields.forkedFrom),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
@@ -2140,6 +2160,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /** Last wake by hand from a snooze; clients tell Settled stays apart by it. */
+  lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2930,6 +2952,7 @@ export const OrchestrationV2Command = Schema.Union([
     linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
     /** Only the server sets this, with `linkOrigin`, for a linked environment's delegated task. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+    openedByThreadId: Schema.optional(ThreadId),
     importedNativeThread: Schema.optional(
       Schema.Struct({
         ref: Schema.Struct({
@@ -2974,6 +2997,8 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     settledAt: Schema.optional(Schema.DateTimeUtc),
+    /** Set by server-side settles; clients leave it out. */
+    settledBy: OrchestrationV2AppThread.fields.settledBy,
   }),
   /** Rejects changes since snapshotAt or any explicit settled override to preserve user actions. */
   Schema.Struct({

@@ -141,10 +141,12 @@ describe("sidebar thread lineage helpers", () => {
   it("maps an open subagent to its nearest visible ancestor's sidebar row", () => {
     const environmentId = EnvironmentId.make("environment-row");
     const otherEnvironmentId = EnvironmentId.make("environment-other");
+    // Provider-native subagents (Claude's Agent tool): no row of their own.
     const subagentOf = (id: string, parentId: ThreadId, environment = environmentId) =>
       makeThreadFixture({
         id: ThreadId.make(id),
         environmentId: environment,
+        creationSource: "provider",
         lineage: {
           rootThreadId: parentId,
           parentThreadId: parentId,
@@ -176,6 +178,38 @@ describe("sidebar thread lineage helpers", () => {
     const loopA = subagentOf("thread-loop-a", ThreadId.make("thread-loop-b"));
     const loopB = subagentOf("thread-loop-b", loopA.id);
     expect(resolveSidebarRowThreadId(loopA.id, environmentId, [loopA, loopB])).toBe(loopA.id);
+  });
+
+  it("keeps an open delegated worker on its own row, which the sidebar lists under its delegator", () => {
+    const environmentId = EnvironmentId.make("environment-row");
+    const root = makeThreadFixture({ id: ThreadId.make("thread-root"), environmentId });
+    const worker = {
+      ...makeThreadFixture({
+        id: ThreadId.make("thread-worker"),
+        environmentId,
+        lineage: {
+          rootThreadId: root.id,
+          parentThreadId: root.id,
+          relationshipToParent: "subagent",
+        },
+      }),
+      delegatedByThreadId: root.id,
+    };
+    const workerSubagent = makeThreadFixture({
+      id: ThreadId.make("thread-worker-subagent"),
+      environmentId,
+      creationSource: "provider",
+      lineage: {
+        rootThreadId: root.id,
+        parentThreadId: worker.id,
+        relationshipToParent: "subagent",
+      },
+    });
+    const threads = [root, worker, workerSubagent];
+
+    expect(resolveSidebarRowThreadId(worker.id, environmentId, threads)).toBe(worker.id);
+    // The worker's own provider subagent has no row, so the worker's row stands in for it.
+    expect(resolveSidebarRowThreadId(workerSubagent.id, environmentId, threads)).toBe(worker.id);
   });
 });
 

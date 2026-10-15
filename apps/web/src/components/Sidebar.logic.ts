@@ -591,19 +591,25 @@ export function isSidebarHiddenThread(thread: Pick<SidebarThreadSummary, "lineag
   return !isListedThreadLineage(thread.lineage);
 }
 
-// Subagent and side-chat threads have no sidebar row, so an open one is represented by
-// its nearest listed ancestor. A broken chain (missing parent, cycle,
-// other environment) resolves to the thread itself, which then matches no row.
+// Subagent and side-chat threads have no row, so an open one maps to its nearest listed
+// ancestor; a delegated worker has its own row under its delegator, so the walk stops there.
+// A broken chain (missing parent, cycle, other environment) resolves to the thread itself.
 export function resolveSidebarRowThreadId(
   threadId: ThreadId,
   environmentId: EnvironmentId,
-  threads: readonly Pick<SidebarThreadSummary, "id" | "environmentId" | "lineage">[],
+  threads: readonly (Pick<SidebarThreadSummary, "id" | "environmentId" | "lineage"> & {
+    readonly delegatedByThreadId?: ThreadId | undefined;
+  })[],
 ): ThreadId {
   const findThread = (id: ThreadId) =>
     threads.find((thread) => thread.id === id && thread.environmentId === environmentId);
   const visited = new Set<ThreadId>();
   let thread = findThread(threadId);
-  while (thread !== undefined && isSidebarHiddenThread(thread)) {
+  while (
+    thread !== undefined &&
+    isSidebarHiddenThread(thread) &&
+    thread.delegatedByThreadId === undefined
+  ) {
     if (thread.lineage.parentThreadId === null || visited.has(thread.id)) return threadId;
     visited.add(thread.id);
     thread = findThread(thread.lineage.parentThreadId);

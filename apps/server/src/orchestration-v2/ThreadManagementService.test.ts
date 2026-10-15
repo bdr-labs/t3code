@@ -581,7 +581,11 @@ it.effect.each([
             } as unknown as OrchestrationV2ThreadProjection),
           dispatch: (command) =>
             Effect.sync(() => {
-              dispatched.push(command.type);
+              dispatched.push(
+                command.type === "thread.settle"
+                  ? `${command.type}:${command.settledBy ?? "user"}`
+                  : command.type,
+              );
               return { sequence: 1, storedEvents: [] } as never;
             }),
         }),
@@ -595,7 +599,8 @@ it.effect.each([
 
     yield* service.settleAfterRun({ projectId, threadId, runId });
 
-    expect(dispatched).toEqual(settles ? ["thread.settle"] : []);
+    // The agent asked, so the thread records it as an agent settle.
+    expect(dispatched).toEqual(settles ? ["thread.settle:agent"] : []);
   }),
 );
 

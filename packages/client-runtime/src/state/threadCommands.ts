@@ -68,6 +68,13 @@ export type LoadEarlierThreadHistoryInput = {
   readonly workAnchorId?: string;
 };
 
+function withoutSettledBy<T extends { readonly settledBy?: "agent" | "auto" | undefined }>(
+  thread: T,
+): Omit<T, "settledBy"> {
+  const { settledBy: _settledBy, ...rest } = thread;
+  return rest;
+}
+
 export function createThreadEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | SecureRandom.SecureRandom | R, E>,
   snapshotAtom: (environmentId: EnvironmentId) => Atom.Atom<OrchestrationV2ShellSnapshot | null>,
@@ -384,7 +391,8 @@ export function createThreadEnvironmentAtoms<R, E>(
         ["preparing", "queued", "starting", "running", "waiting"].includes(thread.status))
         ? thread
         : {
-            ...thread,
+            // The user settles here, so drop an earlier agent or auto mark.
+            ...withoutSettledBy(thread),
             pendingRuntimeRequest: null,
             settledOverride: "settled",
             settledAt: thread.settledOverride === "settled" ? (thread.settledAt ?? now) : now,
@@ -415,10 +423,12 @@ export function createThreadEnvironmentAtoms<R, E>(
             snoozedAt: now,
           },
     ),
-    unsnooze: optimistic.wrap(commands.unsnooze, (thread) => ({
+    unsnooze: optimistic.wrap(commands.unsnooze, (thread, _input, now) => ({
       ...thread,
       snoozedUntil: null,
       snoozedAt: null,
+      // As the server: a wake starts a new Settled stay for child-thread folds.
+      lastSnoozeWakeAt: thread.snoozedUntil == null ? (thread.lastSnoozeWakeAt ?? null) : now,
     })),
     setAutoSettle: optimistic.wrap(commands.setAutoSettle, (thread, input, now) => ({
       ...thread,

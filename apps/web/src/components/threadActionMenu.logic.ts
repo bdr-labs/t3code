@@ -21,6 +21,8 @@ export type ThreadActionMenuId =
   | "regenerate-title"
   | "mark-unread"
   | "share-guest"
+  | "hide-child-threads"
+  | "show-child-threads"
   | "copy"
   | "copy-path"
   | "copy-branch"
@@ -95,6 +97,8 @@ export interface ThreadActionMenuState {
   readonly canShareWithGuest?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
+  /** Set when the thread heads a family of child threads in the sidebar. */
+  readonly childThreads?: { readonly collapsed: boolean } | null;
 }
 
 /** Local navigation, read markers, and copying remain available to read-only clients. */
@@ -105,6 +109,8 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
     "project-settings",
     "mark-unread",
     "share-guest",
+    "hide-child-threads",
+    "show-child-threads",
     "copy",
     "copy-path",
     "copy-branch",
@@ -180,6 +186,13 @@ export function buildThreadActionMenuItems(
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
     ...(state.canShareWithGuest
       ? [{ id: "share-guest" as const, label: "Share with guest", icon: "user-plus" }]
+      : []),
+    ...(state.childThreads
+      ? [
+          state.childThreads.collapsed
+            ? { id: "show-child-threads" as const, label: "Show child threads", icon: "list-tree" }
+            : { id: "hide-child-threads" as const, label: "Hide child threads", icon: "list-tree" },
+        ]
       : []),
     ...(state.projectFilter
       ? [
