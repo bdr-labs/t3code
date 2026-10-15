@@ -3262,6 +3262,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Thread ${command.threadId} branch changed before the metadata update could be applied.`,
       });
     }
+    if (command.type === "thread.metadata.update" && command.worktreeContinuation !== undefined) {
+      if (isProviderNativeSubagentThread(thread)) {
+        return yield* new OrchestratorSubagentThreadReadOnlyError({
+          commandId: command.commandId,
+          threadId: command.threadId,
+        });
+      }
+      if (
+        command.worktreePath == null ||
+        command.worktreePath === thread.worktreePath ||
+        thread.archivedAt !== null
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "A worktree continuation requires an active thread and a changed worktree binding.",
+        });
+      }
+    }
     if (command.type === "thread.metadata.update" && command.expectedEmpty === true) {
       const records = yield* projectionStore
         .getThreadRecords(command.threadId, ["runs"])
@@ -4287,6 +4307,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                           ? "Runtime mode changed."
                           : "Provider or model selection changed.",
                 // Terminal detaches revoke MCP credentials; reattachments need other detach reasons to preserve them.
+                ...(command.type === "thread.metadata.update"
+                  ? { reason: "workspace_changed" as const }
+                  : {}),
                 ...(command.type === "thread.archive" ? { revokeMcpCredential: true } : {}),
               },
             } satisfies PendingOrchestrationEffectV2;
@@ -5499,6 +5522,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    worktreeContinuationOfRunId?: RunId,
   ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     if (command.manualContinuationOfRunId !== undefined) {
@@ -5569,10 +5593,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const source = projection.runs.find((run) => run.id === command.restartContinuationOfRunId);
       if (
         !source ||
-        !(
-          isRestartContinuationSource(source, projection.providerTurns) ||
-          continuationFailedBeforePrompt(source, projection.providerTurns)
-        ) ||
+        (!(source.id === worktreeContinuationOfRunId && isActiveRun(source)) &&
+          !(
+            isRestartContinuationSource(source, projection.providerTurns) ||
+            continuationFailedBeforePrompt(source, projection.providerTurns)
+          )) ||
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
         projection.thread.providerInstanceId !== source.providerInstanceId ||
@@ -5585,6 +5610,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ) ||
         (yield* stopReachedRun(command, command.threadId, source.id))
       ) {
+        if (worktreeContinuationOfRunId !== undefined) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "The active run changed before the workspace continuation could be queued.",
+          });
+        }
         // Preserve the current row so stale automatic deliveries receive an
         // accepted receipt without changing work or repeatedly retrying.
         yield* emit(
@@ -13255,7 +13287,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.active.reorder":
       case "thread.tag.set":
       case "thread.mark-unread":
-      case "thread.metadata.update":
       case "thread.pull-request.link":
       case "thread.pull-request.unlink":
       case "thread.pull-request-link.sync":
@@ -13268,6 +13299,34 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "provider.switch":
         yield* dispatchThreadMutation(command, events, effects);
         break;
+      case "thread.metadata.update": {
+        const sourceRun =
+          command.worktreeContinuation === undefined
+            ? undefined
+            : (yield* getProjectionWithPendingEvents(command.threadId, events)).runs.find(
+                isActiveRun,
+              );
+        yield* dispatchThreadMutation(command, events, effects);
+        if (command.worktreeContinuation !== undefined) {
+          yield* dispatchMessage(
+            {
+              type: "message.dispatch",
+              commandId: command.commandId,
+              threadId: command.threadId,
+              ...command.worktreeContinuation,
+              ...(sourceRun ? { restartContinuationOfRunId: sourceRun.id } : {}),
+              attachments: [],
+              createdBy: "agent",
+              creationSource: "mcp",
+              dispatchMode: { type: "queue_after_active" },
+            },
+            events,
+            effects,
+            sourceRun?.id,
+          );
+        }
+        break;
+      }
       case "thread.pull-request-watch.sync":
         yield* dispatchPullRequestWatchSync(command, events, effects);
         break;
