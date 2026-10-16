@@ -16,6 +16,7 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopUpdatePolicy from "./DesktopUpdatePolicy.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
+import * as DesktopUpdateAutomation from "./DesktopUpdateAutomation.ts";
 
 export const flushCallbacks = Effect.yieldNow;
 
@@ -43,6 +44,7 @@ export interface UpdatesHarnessOptions {
   readonly savedChannel?: DesktopAppSettings.DesktopSettings["updateChannel"];
   /** Adds a WSL backend beside the primary, as on a Windows host with WSL enabled. */
   readonly wslBackend?: boolean;
+  readonly automation?: DesktopUpdateAutomation.DesktopUpdateAutomationPolicy;
 }
 
 export function makeHarness(options: UpdatesHarnessOptions = {}) {
@@ -52,6 +54,8 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   let allowDowngrade = false;
   const checkAllowedDowngrade: boolean[] = [];
   let fullChangelog = false;
+  let autoDownload: boolean | undefined;
+  let autoInstallOnAppQuit: boolean | undefined;
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
   const sentStates: DesktopUpdateState[] = [];
@@ -79,8 +83,14 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       Effect.sync(() => {
         feedUrls.push(options);
       }),
-    setAutoDownload: () => Effect.void,
-    setAutoInstallOnAppQuit: () => Effect.void,
+    setAutoDownload: (value) =>
+      Effect.sync(() => {
+        autoDownload = value;
+      }),
+    setAutoInstallOnAppQuit: (value) =>
+      Effect.sync(() => {
+        autoInstallOnAppQuit = value;
+      }),
     setChannel: () => Effect.void,
     setAllowPrerelease: () => Effect.void,
     allowDowngrade: Effect.sync(() => allowDowngrade),
@@ -275,6 +285,12 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   const layer = DesktopUpdates.layer.pipe(
     Layer.provide(layerFileSystem),
     Layer.provide(DesktopUpdatePolicy.layerTest(options.policy)),
+    Layer.provide(
+      Layer.succeed(
+        DesktopUpdateAutomation.DesktopUpdateAutomation,
+        options.automation ?? DesktopUpdateAutomation.STOCK_UPDATE_AUTOMATION,
+      ),
+    ),
     Layer.provideMerge(layerUpdater),
     Layer.provideMerge(layerWindow),
     Layer.provideMerge(layerBackend),
@@ -306,6 +322,8 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     /** Whether each feed check could offer an older release, and the flag now. */
     checkAllowedDowngrade,
     allowDowngrade: () => allowDowngrade,
+    autoDownload: () => autoDownload,
+    autoInstallOnAppQuit: () => autoInstallOnAppQuit,
     listenerCount: () =>
       Array.from(listeners.values()).reduce(
         (total, eventListeners) => total + eventListeners.size,

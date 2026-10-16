@@ -35,6 +35,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopUpdatePolicy from "./DesktopUpdatePolicy.ts";
+import { DesktopUpdateAutomation } from "./DesktopUpdateAutomation.ts";
 import { normalizeDesktopUpdateReleaseNotes } from "./releaseNotes.ts";
 import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
 import { compareSemverVersions } from "@t3tools/shared/semver";
@@ -366,6 +367,7 @@ export const make = Effect.gen(function* () {
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
   const desktopState = yield* DesktopState.DesktopState;
   const electronUpdater = yield* ElectronUpdater.ElectronUpdater;
+  const automation = yield* DesktopUpdateAutomation;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -579,12 +581,22 @@ export const make = Effect.gen(function* () {
       );
     });
 
-    return yield* actionReservation === "held"
-      ? check
-      : check.pipe(
-          Effect.onInterrupt(() => setState(state)),
-          Effect.ensuring(finishUpdateAction("check")),
-        );
+    if (actionReservation === "held") return yield* check;
+    const checked = yield* check.pipe(
+      Effect.onInterrupt(() => setState(state)),
+      Effect.ensuring(finishUpdateAction("check")),
+    );
+    yield* downloadAutomatically;
+    return checked;
+  });
+
+  // A customized build fetches what the check found right away, so quitting installs it.
+  // Detached: a check the user started answers now, not after the download.
+  const downloadAutomatically = Effect.gen(function* () {
+    if (!automation.autoDownload || (yield* Ref.get(desktopState.quitting))) return;
+    if ((yield* Ref.get(updateStateRef)).status !== "available") return;
+    yield* logUpdaterInfo("downloading update automatically (customized build)");
+    yield* Effect.forkDetach(downloadAvailableUpdate);
   });
 
   const downloadAvailableUpdate = Effect.gen(function* () {
@@ -1155,8 +1167,10 @@ export const make = Effect.gen(function* () {
       }
       yield* Ref.set(updaterConfiguredRef, true);
 
+      // The download itself stays ours (downloadAutomatically) so the state machine sees it;
+      // electron-updater only has to hand a downloaded update to Squirrel for the next quit.
       yield* electronUpdater.setAutoDownload(false);
-      yield* electronUpdater.setAutoInstallOnAppQuit(false);
+      yield* electronUpdater.setAutoInstallOnAppQuit(automation.installOnQuit);
       yield* applyAutoUpdaterChannel(settings.updateChannel);
       yield* electronUpdater.setDisableDifferentialDownload(
         isArm64HostRunningIntelBuild(environment.runtimeInfo),
