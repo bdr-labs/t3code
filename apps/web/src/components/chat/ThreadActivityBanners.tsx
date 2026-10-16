@@ -4,7 +4,10 @@ import type {
   OrchestrationV2ProviderGoal,
   ThreadId,
 } from "@t3tools/contracts";
-import type { EnvironmentThreadShell, ThreadStructure } from "@t3tools/client-runtime/state/shell";
+import type {
+  EnvironmentThreadShell,
+  ThreadStructure,
+} from "@t3tools/client-runtime/state/shell";
 import {
   presentPendingBackgroundWork,
   presentProviderGoal,
@@ -77,7 +80,10 @@ export function goalNowItem(input: {
   readonly threadId: ThreadId;
   readonly goal: OrchestrationV2ProviderGoal;
   readonly isWorking: boolean;
-  readonly onSendCommand: (text: string, failureMessage: string) => Promise<void>;
+  readonly onSendCommand: (
+    text: string,
+    failureMessage: string,
+  ) => Promise<void>;
 }): ThreadNowItem {
   const { isWorking, onSendCommand } = input;
   const presentation = presentProviderGoal(input.goal, isWorking);
@@ -95,7 +101,9 @@ export function goalNowItem(input: {
         {presentation.canResume && !isWorking ? (
           <>
             <InlineButton
-              onClick={() => void onSendCommand("/goal resume", "Failed to resume goal.")}
+              onClick={() =>
+                void onSendCommand("/goal resume", "Failed to resume goal.")
+              }
             >
               Resume
             </InlineButton>
@@ -104,7 +112,9 @@ export function goalNowItem(input: {
         ) : null}
         <InlineButton
           tone="muted"
-          onClick={() => void onSendCommand("/goal clear", "Failed to clear goal.")}
+          onClick={() =>
+            void onSendCommand("/goal clear", "Failed to clear goal.")
+          }
         >
           Clear
         </InlineButton>
@@ -169,7 +179,8 @@ export function backgroundWorkNowItem(input: {
   const rows = presentation.items.map((task) => {
     // Same key derivePendingBackgroundWork gives turn-item tasks; subagent items carry progress.
     const item = input.turnItems.findLast(
-      (candidate) => (candidate.nativeItemRef?.nativeId || candidate.id) === task.taskId,
+      (candidate) =>
+        (candidate.nativeItemRef?.nativeId || candidate.id) === task.taskId,
     );
     const subagent = item?.type === "subagent" ? item : undefined;
     return {
@@ -185,7 +196,9 @@ export function backgroundWorkNowItem(input: {
           task.label
         ),
       activity: subagent?.progress?.replace(/\s+/gu, " ").trim() || null,
-      startedAtMs: item?.startedAt ? DateTime.toEpochMillis(item.startedAt) : null,
+      startedAtMs: item?.startedAt
+        ? DateTime.toEpochMillis(item.startedAt)
+        : null,
       updatedAtMs: subagent ? DateTime.toEpochMillis(subagent.updatedAt) : 0,
       childThreadId: task.childThreadId ?? subagent?.childThreadId ?? undefined,
     };
@@ -201,9 +214,12 @@ export function backgroundWorkNowItem(input: {
     id: `background-work:${input.threadId}`,
     icon: rows.every(isCommand) ? <TerminalIcon /> : <CircleDashedIcon />,
     title:
-      only && typeof only.label !== "string" && only.task.label !== only.task.kind ? (
+      only && typeof only.label !== "string" && only.task.label !== only.task.noun ? (
         <>
-          {presentation.waiting ? "Waiting" : "Running"} · {only.label}
+          {presentation.waiting && only.task.kind === "subagent"
+            ? `Waiting on ${only.task.noun} `
+            : `${presentation.waiting ? "Waiting" : "Running"} · `}
+          {only.label}
         </>
       ) : (
         presentation.title
@@ -234,11 +250,18 @@ export function backgroundWorkNowItem(input: {
           />
         )}
         {onlyThreadId === undefined ? null : (
-          <InlineButton tone="muted" onClick={() => onOpenThread(onlyThreadId)}>
+          <InlineButton
+            tone="muted"
+            aria-label={`Open ${only?.task.noun ?? "subagent"} ${only?.task.label ?? ""}`.trim()}
+            onClick={() => onOpenThread(onlyThreadId)}
+          >
             Open
           </InlineButton>
         )}
-        <InlineButton disabled={input.stopDisabled} onClick={() => void input.onStop()}>
+        <InlineButton
+          disabled={input.stopDisabled}
+          onClick={() => void input.onStop()}
+        >
           {input.stopping ? "Stopping..." : "Stop"}
         </InlineButton>
       </>
@@ -249,7 +272,10 @@ export function backgroundWorkNowItem(input: {
 /** The local checkout moved off the branch this thread last ran on. */
 export function branchMismatchBannerItem(input: {
   readonly mismatchKey: string;
-  readonly mismatch: { readonly threadBranch: string; readonly currentBranch: string };
+  readonly mismatch: {
+    readonly threadBranch: string;
+    readonly currentBranch: string;
+  };
   readonly restoreDisabled: boolean;
   readonly restoring: boolean;
   readonly onRestore: () => void;
@@ -262,7 +288,9 @@ export function branchMismatchBannerItem(input: {
     icon: <GitBranchIcon />,
     title: (
       <span className="flex min-w-0 items-baseline gap-1.5">
-        <span className="shrink-0 font-normal text-muted-foreground">Branch changed from</span>
+        <span className="shrink-0 font-normal text-muted-foreground">
+          Branch changed from
+        </span>
         <Tooltip>
           <TooltipTrigger
             render={
@@ -272,14 +300,19 @@ export function branchMismatchBannerItem(input: {
             }
           />
           <TooltipPopup side="top">
-            This thread last ran on {mismatch.threadBranch}. Sending will continue on{" "}
-            {mismatch.currentBranch}.
+            This thread last ran on {mismatch.threadBranch}. Sending will
+            continue on {mismatch.currentBranch}.
           </TooltipPopup>
         </Tooltip>
       </span>
     ),
     actions: (
-      <Button size="xs" variant="ghost" disabled={input.restoreDisabled} onClick={input.onRestore}>
+      <Button
+        size="xs"
+        variant="ghost"
+        disabled={input.restoreDisabled}
+        onClick={input.onRestore}
+      >
         {input.restoring ? "Restoring..." : "Restore branch"}
       </Button>
     ),

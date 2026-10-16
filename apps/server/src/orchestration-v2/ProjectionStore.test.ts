@@ -1071,7 +1071,13 @@ it.effect("SQL shells use the latest subagent owner for duplicate provider-threa
       }
     });
     const owned = [
-      { taskId: nativeTaskId, description: item.title, kind: "subagent", providerInstanceId },
+      {
+        taskId: nativeTaskId,
+        description: item.title,
+        kind: "subagent",
+        providerInstanceId,
+        origin: "provider_native",
+      },
     ];
     yield* assertOwners(threadId, owned);
     yield* assertOwners(otherThreadId, owned);

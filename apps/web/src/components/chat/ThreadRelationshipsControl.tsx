@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
+import { relationshipLabel } from "./ThreadRelationshipsControl.logic";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { SectionHeaderStatus } from "../ui/collapsible-section-header";
@@ -12,7 +13,11 @@ import {
   projectedSubagentsToRuntime,
   type RuntimeSubagent,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
+import {
+  formatSubagentDisplayTitle,
+  subagentFallbackTitle,
+  subagentKindLabel,
+} from "@t3tools/client-runtime/state/subagent-display";
 import { deriveProviderSubagentStatus } from "@t3tools/client-runtime/state/thread-execution";
 import {
   deriveThreadRelationshipGraph,
@@ -183,14 +188,6 @@ function ThreadLineageGroup(props: {
       ) : null}
     </div>
   );
-}
-
-function relationshipLabel(edge: ThreadRelationshipEdge, currentThreadId: ThreadId) {
-  if (edge.kind === "transfer") return "Context transfer";
-  if (edge.kind === "subagent") {
-    return edge.sourceThreadId === currentThreadId ? "Subagent" : "Parent agent";
-  }
-  return edge.sourceThreadId === currentThreadId ? "Fork" : "Parent thread";
 }
 
 function relationshipThreadTitle(input: {
@@ -635,7 +632,7 @@ export function ThreadRelationshipsPanel(props: {
 
   const stopSubagent = async (
     childThreadId: ThreadId,
-    agent: Pick<OrchestrationV2Subagent, "id" | "threadId">,
+    agent: Pick<OrchestrationV2Subagent, "id" | "threadId" | "origin">,
   ) => {
     if (stoppingId !== null) return;
     setStoppingId(childThreadId);
@@ -645,7 +642,10 @@ export function ThreadRelationshipsPanel(props: {
     });
     setStoppingId(null);
     if (result._tag === "Failure") {
-      toastManager.add({ type: "error", title: "Could not stop subagent" });
+      toastManager.add({
+        type: "error",
+        title: `Could not stop ${subagentFallbackTitle(agent.origin)}`,
+      });
     }
   };
 
@@ -685,14 +685,15 @@ export function ThreadRelationshipsPanel(props: {
         : node?.thread?.lineage.sideChat === true
           ? MessagesSquareIcon
           : GitForkIcon;
-    const relationship =
-      node?.thread?.lineage.sideChat === true && !isParent
-        ? "Side chat"
-        : relationshipLabel(edge, props.threadId);
     const projectedAgent = isSubagent && !isParent ? subagentsByThreadId.get(threadId) : undefined;
     const workflowGroup =
       projectedAgent === undefined ? undefined : workflowGroupsById.get(projectedAgent.id);
     const agent = workflowGroup ? projectedAgent : currentSubagent(projectedAgent, node?.thread);
+    const kindLabel = subagentKindLabel(agent?.origin);
+    const relationship =
+      node?.thread?.lineage.sideChat === true && !isParent
+        ? "Side chat"
+        : relationshipLabel(edge, props.threadId, { origin: agent?.origin, thread: node?.thread });
     const failed = rowStatus === "failed" || rowStatus === "error";
     const canStop =
       agent &&
@@ -764,10 +765,13 @@ export function ThreadRelationshipsPanel(props: {
           fallbackIcon={RelationshipIcon}
           status={rowStatus}
         />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-left text-sm font-medium leading-4 text-foreground/85">
+        <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+          <span className="min-w-0 truncate text-left text-sm font-medium leading-4 text-foreground/85">
             {threadTitle}
           </span>
+          {kindLabel ? (
+            <span className="shrink-0 text-2xs font-normal text-muted-foreground">{kindLabel}</span>
+          ) : null}
         </span>
         {agent ? null : (
           <ArrowRightIcon className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
@@ -897,7 +901,7 @@ export function ThreadRelationshipsPanel(props: {
                     variant="ghost"
                     part="icon"
                     tone="destructive"
-                    aria-label={`Stop subagent ${threadTitle}`}
+                    aria-label={`Stop ${subagentFallbackTitle(agent.origin)} ${threadTitle}`}
                     disabled={stoppingId !== null}
                     onClick={() => void stopSubagent(threadId, agent)}
                   />
@@ -909,7 +913,7 @@ export function ThreadRelationshipsPanel(props: {
                   <SquareIcon aria-hidden className="size-3 fill-current" />
                 )}
               </TooltipTrigger>
-              <TooltipPopup side="left">Stop subagent</TooltipPopup>
+              <TooltipPopup side="left">Stop {subagentFallbackTitle(agent.origin)}</TooltipPopup>
             </Tooltip>
           </div>
         ) : null}

@@ -10,6 +10,7 @@ import type {
 import {
   resolveSubagentMetadata,
   subagentDetailPreview,
+  subagentKindLabel,
 } from "@t3tools/client-runtime/state/subagent-display";
 import { REASONING_EFFORT_OPTION_IDS } from "@t3tools/client-runtime/state/thread-execution";
 import { getModelSelectionStringOptionValue, resolveSelectableModel } from "@t3tools/shared/model";
@@ -52,6 +53,7 @@ export function SubagentTooltipContent(props: {
 }) {
   const { modelLabel, workspace: metadata } = resolveSubagentMetadata(props);
   const preview = subagentDetailPreview(props);
+  const kindLabel = subagentKindLabel(props.origin);
   const model = props.model?.trim();
   const modelSlug = props.provider
     ? resolveSelectableModel(props.provider.driver, model, props.provider.models)
@@ -165,6 +167,9 @@ export function SubagentTooltipContent(props: {
         >
           <StatusIcon aria-hidden className="size-3 shrink-0" />
           {props.status.replaceAll("_", " ")}
+          {kindLabel ? (
+            <span className="font-normal normal-case text-muted-foreground">· {kindLabel}</span>
+          ) : null}
         </span>
         {props.elapsed}
       </div>

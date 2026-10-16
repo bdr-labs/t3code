@@ -136,6 +136,7 @@ type PendingBackgroundWorkTurnItem = {
   readonly monitor?: boolean | undefined;
   readonly prompt?: string | undefined;
   readonly childThreadId?: ThreadId | null;
+  readonly origin?: Extract<OrchestrationV2TurnItem, { type: "subagent" }>["origin"];
 };
 
 function isLatestRunSettledForBackgroundWait(
@@ -190,6 +191,7 @@ function pendingTaskFromTurnItem(
           ? {}
           : { providerInstanceId: item.owningProviderInstanceId }),
         ...(item.childThreadId == null ? {} : { childThreadId: item.childThreadId }),
+        ...(item.origin === undefined ? {} : { origin: item.origin }),
       };
     case "command_execution":
       return { ...named, kind: item.monitor === true ? "monitor" : "command" };

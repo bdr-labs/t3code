@@ -301,14 +301,24 @@ export function threadRuntimeHasInterruptibleRun(
 
 type BackgroundWorkKind = OrchestrationV2PendingBackgroundTask["kind"];
 
-const BACKGROUND_WORK_KINDS: Record<
-  BackgroundWorkKind,
-  { readonly order: number; readonly singular: string; readonly plural: string }
-> = {
-  subagent: { order: 0, singular: "subagent", plural: "subagents" },
-  command: { order: 1, singular: "command", plural: "commands" },
-  monitor: { order: 2, singular: "monitor", plural: "monitors" },
-  background_task: { order: 3, singular: "background task", plural: "background tasks" },
+interface BackgroundWorkNoun {
+  readonly order: number;
+  readonly article: string;
+  readonly singular: string;
+  readonly plural: string;
+}
+
+const BACKGROUND_WORK_KINDS: Record<BackgroundWorkKind | "agent", BackgroundWorkNoun> = {
+  agent: { order: 0, article: "an", singular: "agent", plural: "agents" },
+  subagent: { order: 1, article: "a", singular: "subagent", plural: "subagents" },
+  command: { order: 2, article: "a", singular: "command", plural: "commands" },
+  monitor: { order: 3, article: "a", singular: "monitor", plural: "monitors" },
+  background_task: {
+    order: 4,
+    article: "a",
+    singular: "background task",
+    plural: "background tasks",
+  },
 };
 
 export interface RunStopPresentation {
@@ -360,10 +370,19 @@ export function presentRunStop(
   };
 }
 
+/** A T3 `delegate_task` worker reads "agent", a provider-native subagent "subagent". */
+function backgroundWorkNoun(task: OrchestrationV2PendingBackgroundTask): BackgroundWorkNoun {
+  return BACKGROUND_WORK_KINDS[
+    task.kind === "subagent" && task.origin === "app_owned" ? "agent" : task.kind
+  ];
+}
+
 export interface PendingBackgroundWorkItem {
   readonly taskId: string;
   readonly kind: BackgroundWorkKind;
   readonly label: string;
+  /** The item's noun, such as "agent" or "subagent", for an accessible "Open agent <label>". */
+  readonly noun: string;
   readonly childThreadId: ThreadId | undefined;
 }
 
@@ -403,8 +422,9 @@ export function presentPendingBackgroundWork(
 ): PendingBackgroundWorkPresentation | null {
   if (tasks.length === 0) return null;
   const waiting = backgroundWorkHoldsCompletion(tasks);
-  const items = tasks
-    .map((task): PendingBackgroundWorkItem => {
+  const entries = tasks
+    .map((task) => {
+      const noun = backgroundWorkNoun(task);
       const description = task.description?.trim();
       const label =
         description === undefined
@@ -414,38 +434,35 @@ export function presentPendingBackgroundWork(
             : task.kind === "command" || task.kind === "monitor"
               ? commandDisplayText(description)
               : description;
-      return {
+      const item: PendingBackgroundWorkItem = {
         taskId: task.taskId,
         kind: task.kind,
-        label:
-          label === undefined || label.length === 0
-            ? BACKGROUND_WORK_KINDS[task.kind].singular
-            : label,
+        label: label === undefined || label.length === 0 ? noun.singular : label,
+        noun: noun.singular,
         childThreadId: task.kind === "subagent" ? task.childThreadId : undefined,
       };
+      return { item, noun };
     })
     // `map` returned a new array; Hermes has no `toSorted`.
-    .sort(
-      (left, right) =>
-        BACKGROUND_WORK_KINDS[left.kind].order - BACKGROUND_WORK_KINDS[right.kind].order,
-    );
-  const [only] = items;
-  if (items.length === 1 && only !== undefined) {
-    const noun = BACKGROUND_WORK_KINDS[only.kind].singular;
-    const named = only.label !== noun;
+    .sort((left, right) => left.noun.order - right.noun.order);
+  const items = entries.map(({ item }) => item);
+  const [only] = entries;
+  if (entries.length === 1 && only !== undefined) {
+    const { item, noun } = only;
+    const named = item.label !== noun.singular;
     const title = named
-      ? `${waiting ? "Waiting" : "Running"} · ${only.label}`
-      : waiting
-        ? `Waiting on a ${noun}`
-        : `Running a ${noun}`;
+      ? waiting && item.kind === "subagent"
+        ? `Waiting on ${noun.singular} ${item.label}`
+        : `${waiting ? "Waiting" : "Running"} · ${item.label}`
+      : `${waiting ? "Waiting on" : "Running"} ${noun.article} ${noun.singular}`;
     return { title, items, waiting };
   }
-  const counts = new Map<BackgroundWorkKind, number>();
-  for (const item of items) counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
-  const groups = Array.from(counts, ([kind, count]) => {
-    const { singular, plural } = BACKGROUND_WORK_KINDS[kind];
-    return `${count} ${count === 1 ? singular : plural}`;
-  });
+  const counts = new Map<BackgroundWorkNoun, number>();
+  for (const { noun } of entries) counts.set(noun, (counts.get(noun) ?? 0) + 1);
+  const groups = Array.from(
+    counts,
+    ([{ singular, plural }, count]) => `${count} ${count === 1 ? singular : plural}`,
+  );
   return { title: `${waiting ? "Waiting on" : "Running"} ${joinWithAnd(groups)}`, items, waiting };
 }
 

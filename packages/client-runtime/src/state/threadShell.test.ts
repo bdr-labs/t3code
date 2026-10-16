@@ -337,7 +337,7 @@ describe("v2 thread shell lists", () => {
     expect(isThreadWorking(registry.get(parent)!)).toBe(false);
     const asking = registry.get(inputs);
     expect(asking.map((thread) => thread.id)).toEqual([grandchild.id]);
-    expect(childThreadInputsTitle(asking)).toBe("Subagent needs approval");
+    expect(childThreadInputsTitle(asking)).toBe("agent needs approval");
 
     registry.set(snapshotAtom(environmentId), {
       ...v2ShellSnapshot,

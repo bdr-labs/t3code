@@ -1551,3 +1551,25 @@ it("keeps concurrent approvals actionable outside collapsed work and restores se
     .element(screen.getByRole("button", { name: "Open the current tab", exact: true }))
     .toBeVisible();
 });
+
+describe("MessagesTimeline thread links", () => {
+  it("names a delegate_task worker's parent-thread link agent of", async () => {
+    await using screen = await renderTimeline([], {
+      parentThreadLink: {
+        title: "Architecture audit",
+        label: "agent of",
+      },
+    });
+    expect(screen.text()).toContain("agent of");
+    expect(screen.text()).not.toContain("subagent of");
+    expect(screen.text()).toContain("Architecture audit");
+  });
+
+  it("names a provider-native subagent's parent-thread link subagent of", async () => {
+    await using screen = await renderTimeline([], {
+      parentThreadLink: { title: "Architecture audit" },
+    });
+    expect(screen.text()).toContain("subagent of");
+    expect(screen.text()).toContain("Architecture audit");
+  });
+});

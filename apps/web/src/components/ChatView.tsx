@@ -98,6 +98,7 @@ import {
   shouldShowLoadEarlierControl,
   type CodexFeedbackSubmission,
 } from "@t3tools/client-runtime/state/threads";
+import { subagentFallbackTitle } from "@t3tools/client-runtime/state/subagent-display";
 import {
   parseScopedThreadKey,
   scopedThreadKey,
@@ -921,6 +922,9 @@ export default function ChatView(props: ChatViewProps) {
       : {
           threadId: parentSubagentThreadRef.threadId,
           title: parentSubagentThread?.title ?? "Parent thread",
+          label: `${subagentFallbackTitle(
+            serverThread?.delegatedByThreadId === undefined ? "provider_native" : "app_owned",
+          )} of`,
         };
   const threadError = isServerThread
     ? (localServerError ?? serverRuntime?.lastError ?? null)

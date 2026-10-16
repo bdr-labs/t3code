@@ -268,6 +268,8 @@ interface MessagesTimelineProps {
     /** Where it runs, when that is another environment. */
     readonly environmentLabel?: string;
     readonly open?: () => void;
+    /** "agent of" for a T3 delegate_task worker, "subagent of" for a provider-native one. */
+    readonly label?: string;
   } | null;
   workflowOpening?: WorkflowOpening | null;
   onForkFromRun?: (input: {
@@ -1096,7 +1098,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
       <div className="messages-timeline-row-frame">
         <div className="chat-content-lane pt-1 sm:pt-2">
           <TimelineSystemDivider
-            label={parentThreadLink.sideChat ? "Context from" : "Subagent of"}
+            label={
+              parentThreadLink.sideChat ? "Context from" : (parentThreadLink.label ?? "subagent of")
+            }
             detail={
               parentThreadLink.environmentLabel === undefined
                 ? parentThreadLink.title

@@ -1,4 +1,5 @@
 import type {
+  OrchestrationV2Subagent,
   OrchestrationV2TurnItemStatus,
   OrchestrationV2ThreadShell,
   OrchestrationProjectShell,
@@ -9,17 +10,52 @@ import { fileBasename } from "@t3tools/shared/path";
 import { resolveModelShortName } from "../providerClients.ts";
 import { isTerminalSubagentStatus } from "./subagentRuntime.ts";
 
+type SubagentOrigin = OrchestrationV2Subagent["origin"] | undefined;
+
 export function subagentGroupSummary(
-  members: ReadonlyArray<{ readonly status: OrchestrationV2TurnItemStatus }>,
+  members: ReadonlyArray<{
+    readonly status: OrchestrationV2TurnItemStatus;
+    readonly origin?: SubagentOrigin;
+  }>,
 ) {
   const active = members.some(
     ({ status }) => status === "pending" || status === "running" || status === "waiting",
   );
   return {
-    label: `${active ? "Kicked off" : "Ran"} ${members.length} ${members.length === 1 ? "subagent" : "subagents"}`,
+    label: `${active ? "Kicked off" : "Ran"} ${childAgentCountLabel(members.map(({ origin }) => origin))}`,
     active,
     failed: members.some(({ status }) => status === "failed"),
   };
+}
+
+/**
+ * A T3 `delegate_task` worker (`app_owned`) runs its own provider session in its own thread;
+ * a provider-native subagent runs inside the parent's provider process.
+ */
+export function subagentKindLabel(
+  origin: OrchestrationV2Subagent["origin"] | undefined,
+): "agent" | "subagent" | null {
+  if (origin === "app_owned") return "agent";
+  if (origin === "provider_native") return "subagent";
+  return null;
+}
+
+/** The kind as a title for a child agent that has none; an unknown origin reads "subagent". */
+export function subagentFallbackTitle(origin: SubagentOrigin): "agent" | "subagent" {
+  return origin === "app_owned" ? "agent" : "subagent";
+}
+
+/** "1 agent", "2 subagents", "1 agent and 2 subagents"; an unknown origin counts as a subagent. */
+export function childAgentCountLabel(origins: ReadonlyArray<SubagentOrigin>): string {
+  const agents = origins.filter((origin) => origin === "app_owned").length;
+  const subagents = origins.length - agents;
+  const parts = [
+    agents > 0 ? `${agents} ${agents === 1 ? "agent" : "agents"}` : null,
+    subagents > 0 || agents === 0
+      ? `${subagents} ${subagents === 1 ? "subagent" : "subagents"}`
+      : null,
+  ];
+  return parts.filter(Boolean).join(" and ");
 }
 
 export function summarizeSubagentStatuses(

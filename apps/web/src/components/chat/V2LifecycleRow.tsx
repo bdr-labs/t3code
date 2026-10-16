@@ -8,7 +8,10 @@ import { buildThreadRouteParams } from "../../threadRoutes";
 import { useNavigate } from "@tanstack/react-router";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { useAtomValue } from "@effect/atom-react";
-import { scopeThreadRef, scopeProjectRef } from "@t3tools/client-runtime/environment";
+import {
+  scopeThreadRef,
+  scopeProjectRef,
+} from "@t3tools/client-runtime/environment";
 import { environmentThreadDetails } from "../../state/threads";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { MiddleTruncate } from "../ui/middle-truncate";
@@ -20,7 +23,11 @@ import {
   type HandoffTimelineRun,
   resolveModelSwitchChange,
 } from "@t3tools/client-runtime/handoff";
-import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
+import {
+  formatSubagentDisplayTitle,
+  subagentFallbackTitle,
+  subagentKindLabel,
+} from "@t3tools/client-runtime/state/subagent-display";
 import {
   ProviderDriverKind,
   type ModelSelection,
@@ -57,7 +64,10 @@ import {
 } from "../../providerInstances";
 import { formatShortTimestamp } from "../../timestampFormat";
 import { getTriggerDisplayModelName } from "./providerIconUtils";
-import { ProviderInstanceIcon, providerTextColor } from "./ProviderInstanceIcon";
+import {
+  ProviderInstanceIcon,
+  providerTextColor,
+} from "./ProviderInstanceIcon";
 import { cn } from "~/lib/utils";
 import { TimelineSystemDivider } from "./TimelineSystemDivider";
 import { subagentResumedSince } from "./V2LifecycleRow.logic";
@@ -94,12 +104,19 @@ export function V2LifecycleRow(props: {
     );
   }
   if (item.type === "fork") {
-    const relatedThreadId = item.source.type === "run" ? item.source.threadId : item.targetThreadId;
+    const relatedThreadId =
+      item.source.type === "run" ? item.source.threadId : item.targetThreadId;
     return (
       <TimelineSystemDivider
-        label={item.source.type === "run" ? "Forked from conversation" : "Conversation fork"}
+        label={
+          item.source.type === "run"
+            ? "Forked from conversation"
+            : "Conversation fork"
+        }
         icon={GitForkIcon}
-        actionLabel={item.source.type === "run" ? "Open source conversation" : "Open fork"}
+        actionLabel={
+          item.source.type === "run" ? "Open source conversation" : "Open fork"
+        }
         onAction={() => props.onOpenThread(relatedThreadId)}
       />
     );
@@ -112,7 +129,10 @@ export function V2LifecycleRow(props: {
           className="flex min-w-0 items-center gap-3 rounded-lg border border-border/60 p-3"
         >
           <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted/60">
-            <MessageSquareIcon className="size-4 text-secondary-label" aria-hidden />
+            <MessageSquareIcon
+              className="size-4 text-secondary-label"
+              aria-hidden
+            />
           </span>
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
             {item.title ?? "Created thread"}
@@ -153,7 +173,9 @@ export function V2LifecycleRow(props: {
         origin={item.origin}
         status={item.status}
         driver={item.driver}
-        title={formatSubagentDisplayTitle(item.title ?? "Subagent")}
+        title={formatSubagentDisplayTitle(
+          item.title ?? subagentFallbackTitle(item.origin),
+        )}
         result={item.result}
         progress={item.progress}
         startedAt={item.startedAt}
@@ -207,7 +229,11 @@ function isoOrNull(value: DateTime.Utc | null | undefined): string | null {
   return value ? DateTime.formatIso(value) : null;
 }
 
-export function SubagentElapsed({ agent }: { agent: Parameters<typeof AgentElapsed>[0]["agent"] }) {
+export function SubagentElapsed({
+  agent,
+}: {
+  agent: Parameters<typeof AgentElapsed>[0]["agent"];
+}) {
   return <AgentElapsed agent={agent} />;
 }
 
@@ -288,7 +314,8 @@ export function EnvironmentSubagentAvatar({
   const providerDriver = useAtomValue(
     providersAtom,
     (providers) =>
-      providers?.find((provider) => provider.instanceId === providerInstanceId)?.driver,
+      providers?.find((provider) => provider.instanceId === providerInstanceId)
+        ?.driver,
   );
   const displayName = useAtomValue(
     providersAtom,
@@ -308,7 +335,8 @@ export function EnvironmentSubagentAvatar({
   const iconUrl = useAtomValue(
     providersAtom,
     (providers) =>
-      providers?.find((provider) => provider.instanceId === providerInstanceId)?.iconUrl,
+      providers?.find((provider) => provider.instanceId === providerInstanceId)
+        ?.iconUrl,
   );
   return (
     <SubagentAvatar
@@ -333,7 +361,10 @@ const NOTIFICATION_OUTCOME_STATUS: Record<
   unknown: null,
 };
 
-const NOTIFICATION_OUTCOME_LABEL: Record<OrchestrationV2Notification["outcome"], string> = {
+const NOTIFICATION_OUTCOME_LABEL: Record<
+  OrchestrationV2Notification["outcome"],
+  string
+> = {
   completed: "Finished",
   failed: "Failed",
   cancelled: "Stopped",
@@ -373,7 +404,9 @@ export function SubagentNotificationLink(props: {
       origin={agent.origin}
       status={agent.status}
       driver={agent.driver}
-      title={formatSubagentDisplayTitle(agent.title ?? "Subagent")}
+      title={formatSubagentDisplayTitle(
+        agent.title ?? subagentFallbackTitle(agent.origin),
+      )}
       result={agent.result}
       progress={agent.progress}
       startedAt={agent.startedAt}
@@ -386,7 +419,10 @@ export function SubagentNotificationLink(props: {
             event: {
               status: NOTIFICATION_OUTCOME_STATUS[props.outcome],
               label: NOTIFICATION_OUTCOME_LABEL[props.outcome],
-              timestamp: formatShortTimestamp(props.createdAt, props.timestampFormat),
+              timestamp: formatShortTimestamp(
+                props.createdAt,
+                props.timestampFormat,
+              ),
             },
           })}
     />
@@ -417,7 +453,10 @@ function SubagentTimelineLink(props: {
 }) {
   const agent = useAtomValue(
     environmentThreadDetails.threadAtom(props.parentRef),
-    (thread) => thread?.projection.subagents.find((agent) => agent.id === props.subagentId) ?? null,
+    (thread) =>
+      thread?.projection.subagents.find(
+        (agent) => agent.id === props.subagentId,
+      ) ?? null,
   );
   const remote = props.remote ?? agent?.remoteChild;
   const remoteEnvironment = useEnvironment(remote?.environmentId ?? null);
@@ -431,18 +470,27 @@ function SubagentTimelineLink(props: {
         ? () =>
             void navigate({
               to: "/$environmentId/$threadId",
-              params: buildThreadRouteParams(scopeThreadRef(remote.environmentId, remote.threadId)),
+              params: buildThreadRouteParams(
+                scopeThreadRef(remote.environmentId, remote.threadId),
+              ),
             })
         : null;
   const liveStatus = agent?.status ?? props.status;
   const status = props.event ? props.event.status : liveStatus;
-  const statusLabel = props.event?.label ?? subagentStatusVisual(liveStatus).label;
+  const statusLabel =
+    props.event?.label ?? subagentStatusVisual(liveStatus).label;
+  const kindLabel = subagentKindLabel(props.origin);
+  const kindStatusLabel = kindLabel
+    ? `${kindLabel} · ${statusLabel}`
+    : statusLabel;
   const result = (agent?.result ?? props.result)?.trim();
   const progress = (agent?.progress ?? props.progress)?.trim();
   const settled = SETTLED_SUBAGENT_STATUSES.has(status ?? liveStatus);
   const rawDetail = settled ? result || progress : progress || result;
   const detail =
-    rawDetail && !GENERIC_CHILD_END.test(rawDetail) ? plainDetail(rawDetail) || null : null;
+    rawDetail && !GENERIC_CHILD_END.test(rawDetail)
+      ? plainDetail(rawDetail) || null
+      : null;
   const failed = status === "failed";
   const timing = {
     status: liveStatus,
@@ -464,7 +512,17 @@ function SubagentTimelineLink(props: {
             {props.title}
           </span>
           {remote !== undefined ? (
-            <span className="shrink-0 text-xs text-muted-foreground">on {remote.label}</span>
+            <span className="shrink-0 text-xs text-muted-foreground">
+              on {remote.label}
+            </span>
+          ) : null}
+          {detail !== null &&
+          props.event === undefined &&
+          status === "completed" &&
+          kindLabel ? (
+            <span className="shrink-0 text-3xs text-muted-foreground">
+              {kindLabel}
+            </span>
           ) : null}
         </span>
         <span
@@ -474,7 +532,7 @@ function SubagentTimelineLink(props: {
           )}
         >
           {detail === null ? (
-            statusLabel
+            kindStatusLabel
           ) : detail.includes("/") && !detail.includes(" ") ? (
             <MiddleTruncate value={detail} showTitle={false} className="flex" />
           ) : (
@@ -482,15 +540,23 @@ function SubagentTimelineLink(props: {
           )}
         </span>
       </span>
-      {detail !== null && (props.event !== undefined || status !== "completed") ? (
+      {detail !== null &&
+      (props.event !== undefined || status !== "completed") ? (
         <span
-          className={cn("shrink-0 text-xs", failed ? "text-destructive" : "text-muted-foreground")}
+          className={cn(
+            "shrink-0 text-xs",
+            failed ? "text-destructive" : "text-muted-foreground",
+          )}
         >
-          {statusLabel}
+          {kindStatusLabel}
         </span>
       ) : null}
       <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-        {props.event ? props.event.timestamp : <SubagentElapsed agent={timing} />}
+        {props.event ? (
+          props.event.timestamp
+        ) : (
+          <SubagentElapsed agent={timing} />
+        )}
       </span>
       {open !== null ? (
         <ChevronRightIcon
@@ -508,7 +574,11 @@ function SubagentTimelineLink(props: {
         delay={200}
         render={
           open === null ? (
-            <div data-v2-item-type="subagent" aria-description={statusLabel} className={className}>
+            <div
+              data-v2-item-type="subagent"
+              aria-description={kindStatusLabel}
+              className={className}
+            >
               {content}
             </div>
           ) : (
@@ -516,7 +586,7 @@ function SubagentTimelineLink(props: {
               type="button"
               data-v2-item-type="subagent"
               aria-label={`Open ${props.title}`}
-              aria-description={statusLabel}
+              aria-description={kindStatusLabel}
               onClick={open}
               className={cn(
                 className,
@@ -531,7 +601,11 @@ function SubagentTimelineLink(props: {
       <ThreadHoverCardPopup>
         <SubagentTimelineTooltip
           {...props}
-          elapsed={agent ? <AgentElapsed agent={projectedSubagentsToRuntime([agent])[0]!} /> : null}
+          elapsed={
+            agent ? (
+              <AgentElapsed agent={projectedSubagentsToRuntime([agent])[0]!} />
+            ) : null
+          }
           model={agent?.model ?? null}
           modelSelection={agent?.modelSelection}
           status={liveStatus}
@@ -553,7 +627,8 @@ function SubagentTimelineTooltip(
   const environmentId = props.parentRef.environmentId;
   // Read providers only in the open popup to avoid per-row subscriptions.
   const providers =
-    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
+    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ??
+    EMPTY_SERVER_PROVIDERS;
   const parent = useThreadShell(props.parentRef)?.source;
   const child = useThreadShell(
     props.threadId ? scopeThreadRef(environmentId, props.threadId) : null,
@@ -561,7 +636,9 @@ function SubagentTimelineTooltip(
   const parentProject = useProject(
     parent ? scopeProjectRef(environmentId, parent.projectId) : null,
   );
-  const childProject = useProject(child ? scopeProjectRef(environmentId, child.projectId) : null);
+  const childProject = useProject(
+    child ? scopeProjectRef(environmentId, child.projectId) : null,
+  );
   return (
     <SubagentTooltipContent
       title={formatSubagentDisplayTitle(child?.title ?? props.title)}
@@ -569,7 +646,9 @@ function SubagentTimelineTooltip(
       providerInstanceId={props.providerInstanceId}
       origin={props.origin}
       modelSelection={props.modelSelection}
-      provider={providers.find((provider) => provider.instanceId === props.providerInstanceId)}
+      provider={providers.find(
+        (provider) => provider.instanceId === props.providerInstanceId,
+      )}
       providers={providers}
       driver={props.driver}
       elapsed={props.elapsed}
@@ -593,8 +672,15 @@ function EnvironmentHandoffRow({
   readonly failed: boolean;
 }) {
   const providers =
-    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
-  return <HandoffRow {...props} environmentId={environmentId} providers={providers} />;
+    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ??
+    EMPTY_SERVER_PROVIDERS;
+  return (
+    <HandoffRow
+      {...props}
+      environmentId={environmentId}
+      providers={providers}
+    />
+  );
 }
 
 /** A same-harness model or effort change. Shows only what changed. */
@@ -629,9 +715,13 @@ export function HandoffRow(props: {
   readonly failed?: boolean;
 }) {
   const { from: fromEndpoints, to } = props.endpoints;
-  const settings = useAtomValue(serverEnvironment.settingsValueAtom(props.environmentId));
+  const settings = useAtomValue(
+    serverEnvironment.settingsValueAtom(props.environmentId),
+  );
   const derived = deriveProviderInstanceEntries(props.providers);
-  const entries = settings ? applyProviderInstanceSettings(derived, settings, null) : derived;
+  const entries = settings
+    ? applyProviderInstanceSettings(derived, settings, null)
+    : derived;
   return (
     <TimelineSystemDivider
       label={props.pending ? "Context handoff pending" : "Context handoff"}
@@ -660,7 +750,11 @@ export function HandoffRow(props: {
           {fromEndpoints.length > 0 ? (
             <ArrowRightIcon aria-hidden="true" className="size-3 shrink-0" />
           ) : null}
-          <HandoffEndpoint entries={entries} instanceId={to.instanceId} model={to.model} />
+          <HandoffEndpoint
+            entries={entries}
+            instanceId={to.instanceId}
+            model={to.model}
+          />
         </span>
       }
     />
@@ -672,8 +766,11 @@ function HandoffEndpoint(props: {
   readonly instanceId: ProviderInstanceId;
   readonly model?: string | undefined;
 }) {
-  const entry = props.entries.find((candidate) => candidate.instanceId === props.instanceId);
-  const showBadge = entry !== undefined && shouldShowInstanceBadge(entry, props.entries);
+  const entry = props.entries.find(
+    (candidate) => candidate.instanceId === props.instanceId,
+  );
+  const showBadge =
+    entry !== undefined && shouldShowInstanceBadge(entry, props.entries);
   const model = props.model?.trim();
   const providerModel =
     model === undefined || model.length === 0
@@ -697,7 +794,9 @@ function HandoffEndpoint(props: {
             className="inline-flex min-w-0 items-center gap-1.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
           >
             <ProviderInstanceIcon
-              driverKind={entry?.driverKind ?? ProviderDriverKind.make(props.instanceId)}
+              driverKind={
+                entry?.driverKind ?? ProviderDriverKind.make(props.instanceId)
+              }
               displayName={entry?.displayName ?? props.instanceId}
               accentColor={entry?.accentColor}
               acpRegistryAgentId={entry?.acpRegistryAgentId}

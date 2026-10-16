@@ -18,6 +18,7 @@ import type { EnvironmentThreadShell, PendingSubagentRequest } from "./models.ts
 import { presentThreadShell, threadRuntimeIsActive } from "./models.ts";
 import { hiddenThreadKeys, NO_HIDDEN_THREADS } from "./threadTagFilter.ts";
 import { type EnvironmentCatalogState, enabledEnvironmentIds } from "./connections.ts";
+import { childAgentCountLabel, subagentFallbackTitle } from "./subagentDisplay.ts";
 import {
   arrayElementsEqual,
   parseProjectRefCollectionKey,
@@ -153,16 +154,25 @@ const sameRequests = (
   [...right].every(([threadId, request]) => left.get(threadId) === request);
 
 export function childThreadInputsTitle(
-  children: ReadonlyArray<Pick<EnvironmentThreadShell, "hasPendingApprovals" | "lineage">>,
+  children: ReadonlyArray<
+    Pick<EnvironmentThreadShell, "hasPendingApprovals" | "delegatedByThreadId"> &
+      Partial<Pick<EnvironmentThreadShell, "lineage">>
+  >,
 ): string {
   const approvals = children.filter((child) => child.hasPendingApprovals).length;
   const need = approvals === 0 ? "input" : approvals === children.length ? "approval" : "you";
-  const sideChats = children.filter((child) => child.lineage.sideChat === true).length;
-  const noun =
-    sideChats === children.length ? "side chat" : sideChats === 0 ? "subagent" : "thread";
+  const sideChats = children.filter((child) => child.lineage?.sideChat === true).length;
+  if (sideChats === children.length) {
+    return children.length === 1 ? `Side chat needs ${need}` : `${children.length} side chats need ${need}`;
+  }
+  if (sideChats > 0) return `${children.length} threads need ${need}`;
+  // A T3 delegate_task worker is an agent, a provider-native child a subagent.
+  const origins = children.map((child) =>
+    child.delegatedByThreadId === undefined ? "provider_native" : "app_owned",
+  );
   return children.length === 1
-    ? `${noun === "side chat" ? "Side chat" : "Subagent"} needs ${need}`
-    : `${children.length} ${noun}s need ${need}`;
+    ? `${subagentFallbackTitle(origins[0])} needs ${need}`
+    : `${childAgentCountLabel(origins)} need ${need}`;
 }
 
 const sameWireThreadShell = Schema.toEquivalence(OrchestrationV2ThreadShell);

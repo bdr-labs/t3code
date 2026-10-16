@@ -1040,6 +1040,7 @@ export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
       /** The owning provider thread's instance, populated in derived pending work. */
       providerInstanceId: Schema.optional(ProviderInstanceId),
       childThreadId: Schema.optional(ThreadId),
+      origin: Schema.optional(Schema.Literals(["provider_native", "app_owned"])),
     }),
     Schema.Struct({ ...PendingBackgroundTaskFields, kind: Schema.Literal("command") }),
     Schema.Struct({ ...PendingBackgroundTaskFields, kind: Schema.Literal("monitor") }),
