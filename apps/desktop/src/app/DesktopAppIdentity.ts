@@ -12,6 +12,8 @@ import * as DesktopAssets from "./DesktopAssets.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopUserData from "./DesktopUserData.ts";
 
+declare const __T3CODE_CUSTOMIZED_BUILD__: string | undefined;
+
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{7,40}$/i;
 const COMMIT_HASH_DISPLAY_LENGTH = 12;
 
@@ -30,6 +32,17 @@ export class DesktopAppIdentity extends Context.Service<
     readonly configure: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/app/DesktopAppIdentity") {}
+
+/** The About panel's version line, with the t3code-customize recipe when this is a customized build. */
+export const aboutPanelVersion = (
+  commitHash: string,
+  customizedBuild: string | undefined = typeof __T3CODE_CUSTOMIZED_BUILD__ === "undefined"
+    ? undefined
+    : __T3CODE_CUSTOMIZED_BUILD__,
+): string => {
+  const recipe = customizedBuild?.trim().split(/\s+/)[0];
+  return recipe ? `${commitHash}, custom ${recipe.slice(0, 7)}` : commitHash;
+};
 
 const normalizeCommitHash = (value: string): Option.Option<string> => {
   const trimmed = value.trim();
@@ -98,7 +111,7 @@ export const make = Effect.gen(function* () {
     yield* electronApp.setAboutPanelOptions({
       applicationName: environment.displayName,
       applicationVersion: environment.appVersion,
-      version: Option.getOrElse(commitHash, () => "unknown"),
+      version: aboutPanelVersion(Option.getOrElse(commitHash, () => "unknown")),
     });
 
     if (environment.platform === "win32") {

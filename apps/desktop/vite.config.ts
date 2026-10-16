@@ -14,6 +14,8 @@ const publicConfigDefine = {
   __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
     repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",
   ),
+  // Set by t3code-customize: "<recipe hash> <build time>", shown in the About panel.
+  __T3CODE_CUSTOMIZED_BUILD__: JSON.stringify(process.env.T3CODE_CUSTOMIZED_BUILD?.trim() ?? ""),
 };
 
 export default defineConfig({
