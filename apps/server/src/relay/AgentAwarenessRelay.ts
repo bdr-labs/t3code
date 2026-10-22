@@ -45,6 +45,7 @@ import {
 import { EnvironmentSigningKey } from "../cloud/environmentKeys.ts";
 import * as DirectPush from "../directPush/DirectPush.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { isIdleCompactionRun } from "../orchestration-v2/IdleCompaction.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import { forkParked } from "../serverActivation.ts";
@@ -527,6 +528,22 @@ export const make = Effect.gen(function* () {
 
     // Read only this thread; full shell reads would make each activity event scale with all threads.
     const threadShell = (yield* threads.getAgentAwarenessSnapshot(threadId)).threads[0] ?? null;
+    // Fork: an idle compaction is housekeeping, so it neither starts nor ends
+    // a card or alert; the last published state stands. Archiving and
+    // settling still publish, so the card can clear.
+    const shellRunId = threadShell?.activeRunId ?? threadShell?.latestRunId ?? null;
+    if (
+      threadShell !== null &&
+      shellRunId !== null &&
+      threadShell.archivedAt === null &&
+      threadShell.settledAt === null &&
+      threadShell.settledOverride !== "settled"
+    ) {
+      const { runs } = yield* threads.getThreadRecords(threadId, ["runs"], {
+        runIds: [shellRunId],
+      });
+      if (runs.some((run) => run.id === shellRunId && isIdleCompactionRun(run))) return;
+    }
     if (
       threadShell !== null &&
       !isListedThreadLineage(threadShell.lineage) &&

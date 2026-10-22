@@ -6,6 +6,7 @@ import {
   MessageId,
   NodeId,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2Run,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2TurnItem,
   ProjectId,
@@ -145,6 +146,10 @@ const makeTestRelay = Effect.fnUntraced(function* (
     readonly failSecretRead?: (name: string) => boolean;
     readonly linked?: boolean;
     readonly readShell?: (threadId: ThreadId) => Effect.Effect<OrchestrationV2ThreadShell | null>;
+    readonly readRuns?: (
+      threadId: ThreadId,
+      runIds?: ReadonlyArray<RunId>,
+    ) => ReadonlyArray<OrchestrationV2Run>;
     readonly domainEvents?: Stream.Stream<OrchestrationV2DomainEvent>;
     readonly catchUpThreads?: ReadonlyArray<OrchestrationV2ThreadShell>;
     readonly directPush?: DirectPush.DirectPush["Service"];
@@ -214,7 +219,13 @@ const makeTestRelay = Effect.fnUntraced(function* (
     getTimelinePage: () => Effect.die("Unused timeline read"),
     getMessageCount: () => Effect.die("unused message count"),
     getTurnItem: () => Effect.die("unused turn item read"),
-    getThreadRecords: () => Effect.die("unused record read"),
+    getThreadRecords: (threadId, fields, filter) =>
+      fields.some((field) => field === "runs")
+        ? Effect.succeed({
+            thread: shell({ id: threadId }),
+            runs: options.readRuns?.(threadId, filter?.runIds) ?? [],
+          } as never)
+        : Effect.die("unused record read"),
     getThreadProjection: unused,
     getCheckpointContext: unused,
     getThreadSnapshot: unused,
@@ -374,6 +385,41 @@ describe("AgentAwarenessRelay", () => {
       assert.equal(publications.length, 0);
       assert.equal(direct.length, 1);
       assert.equal(direct[0]?.threadId, THREAD_ID);
+      assert.equal(direct[0]?.phase, "running");
+    }),
+  );
+
+  it.effect("keeps an idle compaction off the card and the alerts", () =>
+    Effect.gen(function* () {
+      const direct: Array<RelayAgentActivityState | null> = [];
+      const compactionRunId = RunId.make("relay-idle-compaction-run");
+      const userRunId = RunId.make("relay-user-run");
+      const run = (id: RunId, userMessageId: string) =>
+        ({ id, userMessageId: MessageId.make(userMessageId) }) as OrchestrationV2Run;
+      let latestRunId = compactionRunId;
+      const { relay } = yield* makeTestRelay({
+        linked: false,
+        readShell: () =>
+          Effect.succeed(shell({ activeRunId: latestRunId, latestRunId })),
+        readRuns: (_threadId, runIds) =>
+          [
+            run(compactionRunId, `idle-compact:${THREAD_ID}:${userRunId}`),
+            run(userRunId, "relay-user-message"),
+          ].filter((candidate) => runIds?.includes(candidate.id) ?? true),
+        directPush: {
+          isEnabled: Effect.succeed(true),
+          registerDevice: () => Effect.die("unused"),
+          registerLiveActivity: () => Effect.die("unused"),
+          snapshot: Effect.die("unused"),
+          publish: ({ state }) => Effect.sync(() => void direct.push(state)),
+        },
+      });
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(direct.length, 0);
+
+      latestRunId = userRunId;
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(direct.length, 1);
       assert.equal(direct[0]?.phase, "running");
     }),
   );

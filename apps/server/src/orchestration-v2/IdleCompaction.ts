@@ -1,4 +1,11 @@
-import { isListedThreadLineage, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
+import {
+  isListedThreadLineage,
+  MessageId,
+  type OrchestrationV2Run,
+  type OrchestrationV2ThreadProjection,
+  type RunId,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { COMPACTION_SUGGESTION_MIN_TOKENS } from "@t3tools/shared/claudeCompaction";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
@@ -103,4 +110,56 @@ export function idleCompactionWindow(
   const endMs = expiresAt === undefined ? Number.NaN : Date.parse(expiresAt);
   if (!Number.isFinite(endMs) || nowMs >= endMs) return null;
   return { runId: latestRun.id, startMs: endMs - LEAD_MS, endMs };
+}
+
+const IDLE_COMPACTION_MESSAGE_PREFIX = "idle-compact:";
+
+/** The message an idle compaction sends for the completed run `runId`. */
+export function idleCompactionMessageId(threadId: ThreadId, runId: RunId): MessageId {
+  return MessageId.make(`${IDLE_COMPACTION_MESSAGE_PREFIX}${threadId}:${runId}`);
+}
+
+/** Whether a run was started by an idle compaction rather than by someone. */
+export function isIdleCompactionRun(run: Pick<OrchestrationV2Run, "userMessageId">): boolean {
+  return run.userMessageId.startsWith(IDLE_COMPACTION_MESSAGE_PREFIX);
+}
+
+/**
+ * When a finished idle compaction should move the thread's read mark to its
+ * end, or null. Housekeeping must not make a thread the person had already
+ * read look unread; a thread that was still unread stays unread.
+ */
+export function idleCompactionVisitedAt(
+  {
+    thread,
+    runs,
+  }: {
+    readonly thread: Pick<OrchestrationV2ThreadProjection["thread"], "lastVisitedAt">;
+    readonly runs: ReadonlyArray<
+      Pick<OrchestrationV2Run, "id" | "ordinal" | "status" | "completedAt" | "userMessageId">
+    >;
+  },
+  compactionRunId: RunId,
+): DateTime.Utc | null {
+  const compaction = runs.find((run) => run.id === compactionRunId);
+  if (
+    compaction === undefined ||
+    !isIdleCompactionRun(compaction) ||
+    compaction.status !== "completed" ||
+    compaction.completedAt === null ||
+    thread.lastVisitedAt === null
+  )
+    return null;
+  const previous = runs
+    .filter((run) => run.ordinal < compaction.ordinal && !isIdleCompactionRun(run))
+    .reduce<(typeof runs)[number] | null>(
+      (latest, run) => (latest === null || run.ordinal > latest.ordinal ? run : latest),
+      null,
+    );
+  if (
+    previous?.completedAt == null ||
+    DateTime.toEpochMillis(thread.lastVisitedAt) < DateTime.toEpochMillis(previous.completedAt)
+  )
+    return null;
+  return compaction.completedAt;
 }

@@ -1,7 +1,6 @@
 import {
   CommandId,
   IDLE_COMPACTION_TEXT,
-  MessageId,
   resolveIdleCompaction,
   resolveProjectProviderInstanceEnabled,
   type RunId,
@@ -15,7 +14,12 @@ import * as Stream from "effect/Stream";
 
 import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { idleCompactionWindow } from "./IdleCompaction.ts";
+import {
+  idleCompactionMessageId,
+  idleCompactionVisitedAt,
+  idleCompactionWindow,
+  isIdleCompactionRun,
+} from "./IdleCompaction.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
@@ -110,7 +114,7 @@ export const make = Effect.gen(function* () {
           type: "message.dispatch",
           // One compaction per completed run, even across duplicate events.
           commandId: CommandId.make(`server:idle-compact:${threadId}:${runId}`),
-          messageId: MessageId.make(`idle-compact:${threadId}:${runId}`),
+          messageId: idleCompactionMessageId(threadId, runId),
           threadId,
           text: IDLE_COMPACTION_TEXT,
           attachments: [],
@@ -128,13 +132,36 @@ export const make = Effect.gen(function* () {
       ),
   );
 
+  // Fork: a finished compaction leaves an already-read thread read.
+  const keepReadState = Effect.fn("IdleCompactionService.keepReadState")(
+    function* (threadId: ThreadId, runId: RunId) {
+      const records = yield* projections.getThreadRecords(threadId, ["runs"]);
+      const visitedAt = idleCompactionVisitedAt(records, runId);
+      if (visitedAt === null) return;
+      yield* orchestrator.dispatch({
+        type: "thread.visit",
+        commandId: CommandId.make(`server:idle-compact-visit:${threadId}:${runId}`),
+        threadId,
+        visitedAt: DateTime.formatIso(visitedAt),
+      });
+    },
+    (effect, threadId) =>
+      effect.pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("idle compaction read state skipped", { threadId, cause }),
+        ),
+      ),
+  );
+
   const start = Effect.fn("IdleCompactionService.start")(function* () {
     // Keyed by thread: a newer completed run replaces the waiting timer.
     const timers = yield* FiberMap.make<ThreadId>();
     yield* forkParked(
       Stream.runForEach(orchestrator.streamDomainEvents, (event) =>
         event.type === "run.updated" && event.payload.status === "completed"
-          ? FiberMap.run(timers, event.threadId, compactWhenDue(event.threadId, event.payload.id))
+          ? isIdleCompactionRun(event.payload)
+            ? keepReadState(event.threadId, event.payload.id)
+            : FiberMap.run(timers, event.threadId, compactWhenDue(event.threadId, event.payload.id))
           : Effect.void,
       ),
     );

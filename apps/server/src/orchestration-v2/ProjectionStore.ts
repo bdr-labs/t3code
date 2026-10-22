@@ -1012,6 +1012,8 @@ export type AgentAwarenessThread = ProjectThreadAwarenessV2Input["thread"] &
     | "activeRunId"
     | "latestRunId"
     | "hasActionableProposedPlan"
+    // Fork: the relay skips idle compactions only on threads that are not settled.
+    | "settledAt"
   >;
 
 type ShellThreadRow = {
@@ -7131,6 +7133,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               lineage: state.thread.lineage,
               modelSelection: state.thread.modelSelection,
               settledOverride: state.thread.settledOverride,
+              settledAt: state.thread.settledAt,
               updatedAt: state.updatedAt,
               status: state.latestRunStatus,
               activityRunStatus: state.activityRunStatus,
