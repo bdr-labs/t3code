@@ -2573,3 +2573,309 @@ code {
   outline: 2px solid var(--ring);
   outline-offset: -2px;
 }
+
+/* Window glass (macOS desktop), after Rex's dark blend theme material. The
+   Electron window carries native HUD vibrancy behind a transparent page;
+   windowGlass.ts sets data-window-glass and the layer strengths. The window
+   shows the vibrancy through a canvas tint under a black shade, and the main
+   content becomes an inset card tinted with the canvas again, with the light
+   rim of a macOS 26 glass pane. Unlayered so it wins over the sidebar's
+   background utilities. */
+/* The conversation card (Settings > Appearance > Conversation card) is its own
+   switch: its gap, corners, rim and shadow apply with or without the glass. */
+html[data-window-card] {
+  --window-glass-gap: 8px;
+  --window-glass-radius: 10px;
+  /* Rex's pane: a glass rim (the card's ::after) on the top and bottom edge
+     that runs round the corners and fades out along the sides, a soft glow
+     inward from those edges, and a dark hairline outside. */
+  --window-glass-card-rim: linear-gradient(
+    to bottom,
+    rgb(215 228 255 / 0.16),
+    rgb(255 255 255 / 0.05) 12px,
+    transparent 32px,
+    transparent calc(100% - 32px),
+    rgb(255 255 255 / 0.06) calc(100% - 12px),
+    rgb(255 255 255 / 0.2)
+  );
+  --window-glass-card-shadow:
+    inset 0 10px 10px -8px rgb(255 255 255 / 0.035),
+    inset 0 -10px 10px -8px rgb(255 255 255 / 0.045), 0 0 0 0.5px rgb(0 0 0 / 0.5),
+    0 6px 16px rgb(0 0 0 / 0.18);
+}
+
+html[data-window-card]:not(.dark) {
+  --window-glass-card-rim: linear-gradient(rgb(255 255 255 / 0.6), rgb(255 255 255 / 0.25));
+  --window-glass-card-shadow:
+    inset 0 0.5px 0 rgb(255 255 255 / 0.8), inset 0 0 0 0.5px rgb(0 0 0 / 0.06),
+    0 1px 2px rgb(0 0 0 / 0.06), 0 6px 16px rgb(0 0 0 / 0.08);
+}
+
+html[data-window-glass] {
+  --window-glass-tint-color: var(--background);
+  --window-glass-card-color: var(--background);
+  /* Resolved here, before the card clears --background for its contents. */
+  --window-glass-card-background: color-mix(
+    in srgb,
+    var(--window-glass-card-color) var(--window-glass-card),
+    transparent
+  );
+  /* Liquid Glass lifts Rex's pane above its tint. */
+  --window-glass-card-lift: rgb(255 255 255 / 0.065);
+}
+
+html[data-window-glass]:not(.dark) {
+  /* Light glass over a dark backdrop needs far more tint to reach Rex's
+     near-white sidebar and card; the slider still scales both. */
+  --window-glass-card-background: color-mix(
+    in srgb,
+    var(--window-glass-card-color) min(100%, calc(var(--window-glass-card) * 1.56)),
+    transparent
+  );
+  --window-glass-card-lift: transparent;
+}
+
+/* useTheme and the boot script paint html and body inline. */
+html[data-window-glass],
+html[data-window-glass] body {
+  background-color: transparent !important;
+}
+
+html[data-window-glass] [data-slot="sidebar-wrapper"] {
+  background-color: color-mix(
+    in srgb,
+    var(--window-glass-tint-color) var(--window-glass-tint),
+    transparent
+  );
+  background-image: linear-gradient(
+    color-mix(in srgb, black var(--window-glass-shade), transparent),
+    color-mix(in srgb, black var(--window-glass-shade), transparent)
+  );
+}
+
+html[data-window-glass]:not(.dark) [data-slot="sidebar-wrapper"] {
+  background-color: color-mix(
+    in srgb,
+    var(--window-glass-tint-color) min(100%, calc(var(--window-glass-tint) * 1.73)),
+    transparent
+  ); /* The black shade only belongs to the dark glass. */
+  background-image: none;
+}
+
+html[data-window-glass] [data-slot="sidebar-inner"] {
+  background-color: transparent;
+  background-image: none;
+}
+
+/* Measured on screen, the rows sat about 1px further from the card than
+   from the window edge; trim the right inset so both sides match. */
+html[data-window-card]
+  [data-slot="sidebar-container"]
+  :is([data-slot="sidebar-header"], [data-slot="sidebar-group"], [data-slot="sidebar-footer"]) {
+  padding-right: calc(var(--sidebar-content-inset) - 1px);
+}
+
+html:is([data-window-glass], [data-window-card]) [data-slot="sidebar-container"] {
+  border-color: transparent !important;
+}
+
+/* Without the glass the card sits on the sidebar's own color. */
+html[data-window-card]:not([data-window-glass]) [data-slot="sidebar-wrapper"] {
+  background-color: var(--sidebar);
+}
+
+html[data-window-glass] [data-slot="sidebar-inset"] {
+  /* Surfaces inside the card that paint the canvas or the theme's chrome (the
+     thread header) let the card show through. */
+  --background: transparent;
+  --app-chrome-background: transparent;
+  --toolbar-background: transparent;
+  background-color: var(--window-glass-card-background);
+  background-image: linear-gradient(var(--window-glass-card-lift), var(--window-glass-card-lift));
+}
+
+html[data-window-card] [data-slot="sidebar-inset"] {
+  margin: var(--window-glass-gap) var(--window-glass-gap) var(--window-glass-gap) 0;
+  height: calc(100dvh - 2 * var(--window-glass-gap));
+  min-height: 0;
+  overflow: hidden;
+  border-radius: var(--window-glass-radius);
+  box-shadow: var(--window-glass-card-shadow);
+}
+
+/* Opaque theme surfaces would sink into the glass card as dark slabs; Rex
+   raises its surfaces with light veils of its content color instead (control
+   2.1%, hover 4.2%, pressed 7.3%) and sets code on a dark one. */
+html[data-window-glass].dark [data-slot="sidebar-inset"] {
+  /* Only the composer and its banners read this one, and they float. */
+  --app-theme-surface-raised: var(--window-glass-raised);
+  --chat-composer-outline: rgb(255 255 255 / 0.07);
+  --message-surface: color-mix(in srgb, var(--foreground) 8%, transparent);
+  --card: color-mix(in srgb, var(--foreground) 4.2%, transparent);
+  --surface-raised: color-mix(in srgb, var(--foreground) 6%, transparent);
+  --secondary: color-mix(in srgb, var(--foreground) 6%, transparent);
+  --muted: color-mix(in srgb, var(--foreground) 7.3%, transparent);
+  --toolbar-control: color-mix(in srgb, var(--foreground) 2.1%, transparent);
+  --toolbar-control-hover: color-mix(in srgb, var(--foreground) 4.2%, transparent);
+  --code-background: rgb(0 0 0 / 0.2);
+}
+
+/* Surfaces that float or stick over scrolled content would turn see-through
+   on the card's cleared background; give them the composer's opaque color. */
+html[data-window-glass].dark
+  [data-slot="sidebar-inset"]
+  :is(.surface-glass, .sticky.dark\:bg-background, .bg-background\/85) {
+  --background: var(--window-glass-raised);
+}
+
+/* The composer becomes a raised glass surface like Rex's selected rows: a
+   light veil with a faint rim instead of a dark slab. Its shell sets these
+   variables with utilities, hence !important. */
+html[data-window-glass].dark [data-slot="sidebar-inset"] [data-slot="composer-shell"] {
+  /* Opaque, unlike the other veils: the composer floats over scrolled
+     messages, which must not read through it. */
+  --chat-composer-glass-surface: var(--window-glass-raised) !important;
+  --chat-composer-outline: rgb(255 255 255 / 0.07) !important;
+  --chat-composer-highlight: rgb(255 255 255 / 0.1) !important;
+  --accent: color-mix(in srgb, var(--foreground) 4.2%, transparent) !important;
+}
+
+/* The composer's command menu ($, /, @) is portaled to body, outside the
+   card: give it the composer's raised glass, frosted over the messages by its
+   banner surface's blur, with a light rim and a neutral highlighted row. */
+html[data-window-glass].dark [data-composer-drawer-layer] {
+  --chat-composer-glass-surface: var(--window-glass-raised);
+  --app-theme-surface-raised: var(--window-glass-raised);
+  --chat-composer-outline: rgb(255 255 255 / 0.09);
+  --secondary: color-mix(in srgb, var(--foreground) 6%, transparent);
+}
+
+/* Sidebar rows and controls: Rex's veils instead of the theme's opaque row
+   colors, and no fade to an opaque sidebar color under sticky art. */
+html[data-window-glass].dark [data-app-sidebar] {
+  --accent: color-mix(in srgb, var(--foreground) 7.3%, transparent);
+  --accent-foreground: var(--foreground);
+}
+
+html[data-window-glass].dark [data-slot="sidebar-container"] {
+  --sidebar-row-hover: color-mix(in srgb, var(--foreground) 4.2%, transparent);
+  --sidebar-row-active: color-mix(in srgb, var(--foreground) 7.3%, transparent);
+  --sidebar-row-selected: color-mix(in srgb, var(--foreground) 7.3%, transparent);
+  --sidebar-control-surface: color-mix(in srgb, var(--foreground) 2.1%, transparent);
+  --sidebar-border: rgb(255 255 255 / 0.07);
+  --sidebar-stage-fade: transparent;
+}
+
+/* Light sidebar rows: Rex lifts the selection with white instead of the
+   theme's opaque gray. */
+/* Light glass: a dark veil like the light sidebar's hover, not the theme's
+   tinted accent surface. */
+html[data-window-glass]:not(.dark),
+html[data-window-glass]:not(.dark) [data-app-sidebar] {
+  --accent: color-mix(in srgb, var(--foreground) 6%, transparent);
+  --accent-foreground: var(--foreground);
+}
+
+html[data-window-glass]:not(.dark) [data-slot="sidebar-container"] {
+  --sidebar-row-hover: rgb(0 0 0 / 0.04);
+  --sidebar-row-active: rgb(255 255 255 / 0.5);
+  --sidebar-row-selected: rgb(255 255 255 / 0.5);
+  --sidebar-control-surface: rgb(0 0 0 / 0.04);
+  --sidebar-stage-fade: transparent;
+}
+
+/* Surfaces inside floating panels (settings, dialogs, menus) get the same
+   veils as the card, so they do not sit there as dark slabs. */
+html[data-window-glass].dark :is(.dropdown-glass, .dialog-glass, [data-app-modal]) {
+  --card: color-mix(in srgb, var(--foreground) 4.2%, transparent);
+  --surface-raised: color-mix(in srgb, var(--foreground) 6%, transparent);
+  --secondary: color-mix(in srgb, var(--foreground) 6%, transparent);
+  --muted: color-mix(in srgb, var(--foreground) 7.3%, transparent);
+  --code-background: rgb(0 0 0 / 0.2);
+}
+
+html[data-window-glass].dark :is(.dialog-glass, [data-app-modal]) {
+  --background: transparent;
+  --sidebar: rgb(0 0 0 / 0.18);
+  --sidebar-row-hover: color-mix(in srgb, var(--foreground) 4.2%, transparent);
+  --sidebar-row-selected: color-mix(in srgb, var(--foreground) 7.3%, transparent);
+  background: color-mix(in srgb, var(--popover) var(--glass-opacity), transparent) !important;
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+}
+
+/* Floating panels, menus and toasts: a lighter frosted glass with a light
+   rim, like Rex's overlays, instead of the dark canvas. */
+html[data-window-glass].dark {
+  /* Derived from the theme so other themes follow; with Merino these land on
+     the colors measured next to Rex. */
+  --window-glass-raised: color-mix(in srgb, var(--foreground) 15%, var(--background));
+  --popover: var(--window-glass-raised);
+  /* Hovered, highlighted and pressed items (toggles, tabs, menu and list rows,
+     file trees): Rex's pressed veil, never the theme's tinted accent surface.
+     Set here and on the sidebar, the two places the theme sets it, so the
+     card and everything portaled out of it (menus, popovers, dialogs, the
+     composer's command menu) follow. */
+  --accent: color-mix(in srgb, var(--foreground) 7.3%, transparent);
+  --accent-foreground: var(--foreground);
+  /* Rex's pane is a touch cooler than its canvas: lean toward the theme surface. */
+  --window-glass-card-color: color-mix(
+    in srgb,
+    var(--background) 65%,
+    var(--app-theme-surface, var(--background))
+  );
+}
+
+html[data-window-glass].dark :is(.dropdown-glass, .dialog-glass, [data-app-modal]) {
+  border-color: rgb(255 255 255 / 0.09) !important;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.08),
+    0 18px 44px -16px rgb(0 0 0 / 0.6) !important;
+}
+
+/* The terminal canvas leaves its default background clear in glass mode;
+   one veil on the drawer keeps it a shade apart from the card, like Rex's terminal pane. */
+html[data-window-glass] [data-thread-terminal-drawer] {
+  background-color: rgb(255 255 255 / 0.25) !important;
+}
+
+html[data-window-glass].dark [data-thread-terminal-drawer] {
+  background-color: rgb(0 0 0 / 0.16) !important;
+}
+
+html[data-window-glass] [data-thread-terminal-drawer] .bg-\(--terminal-background\) {
+  background-color: transparent !important;
+}
+
+html[data-window-card] [data-slot="sidebar-inset"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  padding: 1px;
+  border-radius: inherit;
+  background: var(--window-glass-card-rim);
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+  pointer-events: none;
+}
+
+html[data-window-card] [data-sidebar-state="collapsed"] [data-slot="sidebar-inset"] {
+  margin-left: var(--window-glass-gap);
+}
+
+/* The resize rail keeps its cursor but draws no line beside the card. */
+html[data-window-card] [data-slot="sidebar-rail"],
+html[data-window-card] [data-slot="sidebar-rail"]::after {
+  background-color: transparent !important;
+}
+
+/* Keep scrollbars out of the card's rounded corners. */
+html[data-window-card] [data-slot="sidebar-inset"] ::-webkit-scrollbar-track:vertical {
+  margin-block: var(--window-glass-radius);
+}
+
+html[data-window-card] [data-slot="sidebar-inset"] ::-webkit-scrollbar-track:horizontal {
+  margin-inline: var(--window-glass-radius);
+}

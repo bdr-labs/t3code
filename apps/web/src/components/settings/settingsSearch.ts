@@ -324,6 +324,24 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["transparent transparency solid menus dialogs composer"],
   },
   {
+    id: "window-glass",
+    title: "Window glass",
+    to: "/settings/appearance",
+    searchTerms: ["vibrancy blur translucent macos sidebar card liquid"],
+  },
+  {
+    id: "window-transparency",
+    title: "Window transparency",
+    to: "/settings/appearance",
+    searchTerms: ["vibrancy glass blur translucent macos sidebar card opacity"],
+  },
+  {
+    id: "window-card",
+    title: "Conversation card",
+    to: "/settings/appearance",
+    searchTerms: ["inset card rounded corners frame gap macos rex"],
+  },
+  {
     id: "diff-color-scheme",
     title: "Diff colors",
     to: "/settings/diffs",

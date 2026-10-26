@@ -9,10 +9,14 @@ import {
   MAX_APPEARANCE_CONTRAST,
   MAX_GLASS_OPACITY,
   MAX_PANEL_ANIMATION_DURATION_MS,
+  MAX_WINDOW_TRANSPARENCY,
   MIN_APPEARANCE_CONTRAST,
   MIN_GLASS_OPACITY,
   MIN_PANEL_ANIMATION_DURATION_MS,
+  MIN_WINDOW_TRANSPARENCY,
 } from "@t3tools/contracts/settings";
+import { isElectron } from "../../env";
+import { isMacPlatform } from "../../lib/utils";
 import {
   resolveSidebarStageBackdropVariant,
   type SidebarStageBackdropVariant,
@@ -126,6 +130,15 @@ export function AppearanceSettingsPanel() {
   const glassOpacitySliderStyle = {
     "--settings-slider-progress": `${glassOpacityRatio * 100}%`,
     "--settings-slider-fill-offset": `${0.5 - glassOpacityRatio}rem`,
+  } as CSSProperties;
+  // Only the macOS desktop window carries the native vibrancy these rows tune.
+  const showWindowGlass = isElectron && isMacPlatform(navigator.platform);
+  const windowTransparencyRatio =
+    (settings.windowTransparency - MIN_WINDOW_TRANSPARENCY) /
+    (MAX_WINDOW_TRANSPARENCY - MIN_WINDOW_TRANSPARENCY);
+  const windowTransparencySliderStyle = {
+    "--settings-slider-progress": `${windowTransparencyRatio * 100}%`,
+    "--settings-slider-fill-offset": `${0.5 - windowTransparencyRatio}rem`,
   } as CSSProperties;
   const appearanceContrastRatio =
     (settings.appearanceContrast - MIN_APPEARANCE_CONTRAST) /
@@ -256,6 +269,104 @@ export function AppearanceSettingsPanel() {
             </div>
           }
         />
+
+        {showWindowGlass ? (
+          <SettingsRow
+            {...searchableSetting("window-glass")}
+            description="Let the desktop show through the sidebar and the conversation."
+            resetAction={
+              settings.windowGlass !== DEFAULT_UNIFIED_SETTINGS.windowGlass ? (
+                <SettingResetButton
+                  label="window glass"
+                  onClick={() =>
+                    updateSettings({ windowGlass: DEFAULT_UNIFIED_SETTINGS.windowGlass })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                aria-label="Window glass"
+                checked={settings.windowGlass}
+                onCheckedChange={(checked) => updateSettings({ windowGlass: Boolean(checked) })}
+              />
+            }
+          />
+        ) : null}
+
+        {showWindowGlass && settings.windowGlass ? (
+          <SettingsRow
+            {...searchableSetting("window-transparency")}
+            description="Higher values let more of the desktop through the sidebar and the conversation."
+            resetAction={
+              settings.windowTransparency !== DEFAULT_UNIFIED_SETTINGS.windowTransparency ? (
+                <SettingResetButton
+                  label="window transparency"
+                  onClick={() =>
+                    updateSettings({
+                      windowTransparency: DEFAULT_UNIFIED_SETTINGS.windowTransparency,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <div className="flex w-full items-center gap-3 sm:w-52">
+                <output
+                  className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
+                  htmlFor="window-transparency"
+                >
+                  {settings.windowTransparency}%
+                </output>
+                <input
+                  aria-label="Window transparency"
+                  className="settings-slider min-w-0 flex-1"
+                  id="window-transparency"
+                  max={MAX_WINDOW_TRANSPARENCY}
+                  min={MIN_WINDOW_TRANSPARENCY}
+                  onChange={(event) => {
+                    const windowTransparency = Number(event.currentTarget.value);
+                    if (
+                      Number.isInteger(windowTransparency) &&
+                      windowTransparency >= MIN_WINDOW_TRANSPARENCY &&
+                      windowTransparency <= MAX_WINDOW_TRANSPARENCY
+                    ) {
+                      updateSettings({ windowTransparency });
+                    }
+                  }}
+                  step={5}
+                  style={windowTransparencySliderStyle}
+                  type="range"
+                  value={settings.windowTransparency}
+                />
+              </div>
+            }
+          />
+        ) : null}
+
+        {showWindowGlass ? (
+          <SettingsRow
+            {...searchableSetting("window-card")}
+            description="Frame the conversation as a card with rounded corners beside the sidebar."
+            resetAction={
+              settings.windowCard !== DEFAULT_UNIFIED_SETTINGS.windowCard ? (
+                <SettingResetButton
+                  label="conversation card"
+                  onClick={() =>
+                    updateSettings({ windowCard: DEFAULT_UNIFIED_SETTINGS.windowCard })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                aria-label="Conversation card"
+                checked={settings.windowCard}
+                onCheckedChange={(checked) => updateSettings({ windowCard: Boolean(checked) })}
+              />
+            }
+          />
+        ) : null}
 
         <SettingsRow
           {...searchableSetting("chat-width")}

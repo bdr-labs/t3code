@@ -709,10 +709,12 @@ export class GhosttyTerminalSurface {
     scrollbar.append(scrollbarThumb);
     mount.replaceChildren(canvas, input, scrollbar);
 
-    const context = canvas.getContext("2d", { alpha: false });
+    const context = canvas.getContext("2d", { alpha: true });
     if (!context) throw new Error("Canvas 2D is unavailable");
-    context.fillStyle = `rgb(${options.theme.background.r}, ${options.theme.background.g}, ${options.theme.background.b})`;
-    context.fillRect(0, 0, canvas.width, canvas.height);
+    if (!options.theme.transparentBackground) {
+      context.fillStyle = `rgb(${options.theme.background.r}, ${options.theme.background.g}, ${options.theme.background.b})`;
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
     const fontSize = terminalFontSize(options.font?.size);
     try {
       // Load bundled fonts before measuring; fallback metrics would size the wrong grid.
@@ -2082,6 +2084,7 @@ export class GhosttyTerminalSurface {
       previousCursorY: this.renderedCursorY,
       focused: this.focused,
       hoveredLinkRange: this.hoveredLink?.range ?? null,
+      transparentBackground: this.theme.transparentBackground === true,
       ...(this.theme.selectionBackground !== undefined
         ? { selectionBackground: this.theme.selectionBackground }
         : {}),

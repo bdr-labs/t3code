@@ -135,6 +135,19 @@ export const GlassOpacity = Schema.Int.check(
 export type GlassOpacity = typeof GlassOpacity.Type;
 const DEFAULT_GLASS_OPACITY: GlassOpacity = 80;
 
+// macOS desktop only: how much of the native window vibrancy shows through
+// the sidebar tint and the main content card. 0 keeps both opaque.
+export const MIN_WINDOW_TRANSPARENCY = 0;
+export const MAX_WINDOW_TRANSPARENCY = 100;
+export const WindowTransparency = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_WINDOW_TRANSPARENCY,
+    maximum: MAX_WINDOW_TRANSPARENCY,
+  }),
+);
+export type WindowTransparency = typeof WindowTransparency.Type;
+const DEFAULT_WINDOW_TRANSPARENCY: WindowTransparency = 20;
+
 export const MIN_APPEARANCE_CONTRAST = 50;
 export const MAX_APPEARANCE_CONTRAST = 200;
 export const AppearanceContrast = Schema.Int.check(
@@ -427,6 +440,11 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   glassOpacity: GlassOpacity.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_GLASS_OPACITY)),
+  ),
+  windowGlass: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  windowCard: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  windowTransparency: WindowTransparency.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WINDOW_TRANSPARENCY)),
   ),
   fontSizeInterface: InterfaceFontSize.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_INTERFACE_FONT_SIZE)),
@@ -1795,6 +1813,9 @@ export const ClientSettingsPatch = Schema.Struct({
   diffLayout: Schema.optionalKey(DiffLayout),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
   glassOpacity: Schema.optionalKey(GlassOpacity),
+  windowGlass: Schema.optionalKey(Schema.Boolean),
+  windowCard: Schema.optionalKey(Schema.Boolean),
+  windowTransparency: Schema.optionalKey(WindowTransparency),
   onboardingCompletedAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
   fontSizeInterface: Schema.optionalKey(InterfaceFontSize),
   fontSizePrompt: Schema.optionalKey(PromptFontSize),

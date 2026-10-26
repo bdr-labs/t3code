@@ -8,6 +8,12 @@ import { applyAppearanceFontVariables, TYPOGRAPHY_ADVANCED_STORAGE_KEY } from ".
 import { startElectronBrowserHost } from "./browser/ElectronBrowserHost";
 import { startBrowserProfileReporting } from "./browser/BrowserProfileReporter";
 import { startPreviewTitleRecording } from "./browserHistoryStore";
+import {
+  applyWindowCard,
+  applyWindowGlass,
+  resolveWindowCard,
+  resolveWindowGlass,
+} from "./windowGlass";
 import { retainThreadOverlaysForThread } from "./components/chat/threadOverlayRetention";
 import { startBackgroundThreadAnnouncements } from "./components/BackgroundThreadAnnouncer";
 import { startSshPasswordPromptQueue } from "./components/desktop/SshPasswordPromptDialog";
@@ -24,6 +30,7 @@ import { startGuideRunNotifications } from "./components/pullRequest/guide/PullR
 import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL } from "./branding";
 import { resolveServerBackedAppDisplayName } from "./branding.logic";
 import { isElectron } from "./env";
+import { isMacPlatform } from "./lib/utils";
 import {
   subscribeComposerDraftModelReconciliation,
   subscribeDraftThreadPromotion,
@@ -88,6 +95,28 @@ function startClientAppearance(): void {
       } else {
         root.style.removeProperty("--glass-blur");
       }
+    }
+    if (
+      previous?.windowGlass !== settings.windowGlass ||
+      previous.windowTransparency !== settings.windowTransparency
+    ) {
+      applyWindowGlass(
+        root,
+        resolveWindowGlass({
+          macDesktop: isElectron && isMacPlatform(navigator.platform),
+          enabled: settings.windowGlass,
+          transparency: settings.windowTransparency,
+        }),
+      );
+    }
+    if (previous?.windowCard !== settings.windowCard) {
+      applyWindowCard(
+        root,
+        resolveWindowCard({
+          macDesktop: isElectron && isMacPlatform(navigator.platform),
+          enabled: settings.windowCard,
+        }),
+      );
     }
     if (
       previous?.fontFamilySans !== settings.fontFamilySans ||

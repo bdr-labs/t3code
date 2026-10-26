@@ -82,6 +82,8 @@ export interface GhosttyTheme {
   readonly cursor: GhosttyColor;
   readonly palette?: readonly GhosttyColor[];
   readonly selectionBackground?: string;
+  /** Leaves default-background cells clear so window glass shows through. */
+  readonly transparentBackground?: boolean;
 }
 
 export interface GhosttyCell {

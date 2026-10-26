@@ -136,6 +136,24 @@ function getInitialWindowBackgroundColor(shouldUseDarkColors: boolean): string {
   return shouldUseDarkColors ? "#000000" : "#ffffff";
 }
 
+/**
+ * The macOS main window carries HUD vibrancy (Rex's `hudWindow` material) behind
+ * a transparent page for the web app's window glass; like Rex's glass it
+ * flattens while the window is unfocused.
+ */
+export function getMainWindowGlassOptions(
+  platform: NodeJS.Platform,
+): Pick<
+  Electron.BrowserWindowConstructorOptions,
+  "backgroundColor" | "vibrancy" | "visualEffectState"
+> {
+  if (platform !== "darwin") return {};
+  return { backgroundColor: "#00000000", vibrancy: "hud", visualEffectState: "followWindow" };
+}
+
+// Windows created with glass keep their transparent background through theme changes.
+const glassWindows = new WeakSet<Electron.BrowserWindow>();
+
 type DisplayBounds = Pick<Electron.Rectangle, "x" | "y" | "width" | "height">;
 
 function windowFitsWithinDisplay(
@@ -266,7 +284,9 @@ function syncWindowAppearance(
       return;
     }
 
-    window.setBackgroundColor(getInitialWindowBackgroundColor(shouldUseDarkColors));
+    if (!glassWindows.has(window)) {
+      window.setBackgroundColor(getInitialWindowBackgroundColor(shouldUseDarkColors));
+    }
     const { titleBarOverlay } = getWindowTitleBarOptions(shouldUseDarkColors, platform);
     if (typeof titleBarOverlay === "object") {
       window.setTitleBarOverlay(titleBarOverlay);
@@ -395,6 +415,7 @@ export const make = Effect.gen(function* () {
       autoHideMenuBar: true,
       ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
       backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
+      ...getMainWindowGlassOptions(environment.platform),
       ...iconOption,
       title: environment.displayName,
       ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),
@@ -419,6 +440,7 @@ export const make = Effect.gen(function* () {
     yield* rendererHistory.register(window.webContents, { surface: "main" });
     if (environment.platform === "darwin") {
       window.setAutoHideCursor(false);
+      glassWindows.add(window);
     }
     let boundsPersistFiber: Fiber.Fiber<void, never> | undefined;
     let pendingBoundsPersistFiber: Fiber.Fiber<void, never> | undefined;

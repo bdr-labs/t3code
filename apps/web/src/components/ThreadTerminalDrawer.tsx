@@ -384,6 +384,7 @@ export function terminalThemeFromApp(mountElement?: HTMLElement | null): Ghostty
     ),
     palette: TERMINAL_PALETTES[isDark ? "dark" : "light"],
     selectionBackground: terminalSelection,
+    transparentBackground: document.documentElement.hasAttribute("data-window-glass"),
   };
 }
 
@@ -1132,7 +1133,7 @@ function TerminalSessionViewport({
       });
       themeObserver.observe(document.documentElement, {
         attributes: true,
-        attributeFilter: ["class", "style"],
+        attributeFilter: ["class", "style", "data-window-glass"],
       });
       setupCleanups.push(() => themeObserver.disconnect());
 

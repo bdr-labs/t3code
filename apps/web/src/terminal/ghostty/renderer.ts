@@ -129,6 +129,7 @@ export function renderGhosttySnapshot(options: {
   readonly selectionBackground?: string;
   readonly hoveredLinkRange?: GhosttyCellRange | null;
   readonly originY?: number;
+  readonly transparentBackground?: boolean;
 }): void {
   const {
     context,
@@ -145,6 +146,14 @@ export function renderGhosttySnapshot(options: {
   const selectionBackground = options.selectionBackground ?? DEFAULT_SELECTION_BACKGROUND;
   const hoveredLinkRange = options.hoveredLinkRange ?? null;
   const originY = options.originY ?? padding;
+  const fillDefaultBackground = (x: number, y: number, width: number, height: number) => {
+    if (options.transparentBackground) {
+      context.clearRect(x, y, width, height);
+      return;
+    }
+    context.fillStyle = cssColor(snapshot.background);
+    context.fillRect(x, y, width, height);
+  };
   const rowsToDraw = forceFull
     ? Array.from({ length: snapshot.rows }, (_, index) => index)
     : [...snapshot.dirtyRows];
@@ -163,8 +172,7 @@ export function renderGhosttySnapshot(options: {
   if (forceFull) {
     context.save();
     context.resetTransform();
-    context.fillStyle = cssColor(snapshot.background);
-    context.fillRect(0, 0, context.canvas.width, context.canvas.height);
+    fillDefaultBackground(0, 0, context.canvas.width, context.canvas.height);
     context.restore();
   }
 
@@ -174,8 +182,7 @@ export function renderGhosttySnapshot(options: {
     if (!row) continue;
     const top = originY + rowIndex * metrics.height;
 
-    context.fillStyle = cssColor(snapshot.background);
-    context.fillRect(padding, top, snapshot.cols * metrics.width, metrics.height);
+    fillDefaultBackground(padding, top, snapshot.cols * metrics.width, metrics.height);
 
     let backgroundStart = 0;
     while (backgroundStart < row.cells.length) {

@@ -449,6 +449,11 @@ export function useSettingsRestore(onRestored?: () => void) {
       ? ["Contrast"]
       : []),
     ...(settings.glassOpacity !== DEFAULT_UNIFIED_SETTINGS.glassOpacity ? ["Glass opacity"] : []),
+    ...(settings.windowGlass !== DEFAULT_UNIFIED_SETTINGS.windowGlass ? ["Window glass"] : []),
+    ...(settings.windowCard !== DEFAULT_UNIFIED_SETTINGS.windowCard ? ["Conversation card"] : []),
+    ...(settings.windowTransparency !== DEFAULT_UNIFIED_SETTINGS.windowTransparency
+      ? ["Window transparency"]
+      : []),
     ...(settings.diffColorScheme !== DEFAULT_UNIFIED_SETTINGS.diffColorScheme
       ? ["Diff colors"]
       : []),
@@ -653,6 +658,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       contextWindowMeterEnabled: DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled,
       environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
       glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity,
+      windowGlass: DEFAULT_UNIFIED_SETTINGS.windowGlass,
+      windowCard: DEFAULT_UNIFIED_SETTINGS.windowCard,
+      windowTransparency: DEFAULT_UNIFIED_SETTINGS.windowTransparency,
       panelAnimationDurationMs: DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs,
       sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
       sidebarProjectSortOrder: DEFAULT_UNIFIED_SETTINGS.sidebarProjectSortOrder,
