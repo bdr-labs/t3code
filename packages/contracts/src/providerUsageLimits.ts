@@ -59,9 +59,13 @@ export const ServerProviderUsageLimits = Schema.Struct({
 });
 export type ServerProviderUsageLimits = typeof ServerProviderUsageLimits.Type;
 
-/** Partial updates merge windows by id; omitted windows remain unchanged. */
+/**
+ * Partial updates merge windows by id; omitted windows remain unchanged, except
+ * ids in `replaces`: the reading covers those in full, so one it omits is gone.
+ */
 export const ProviderUsageLimitsUpdate = Schema.Struct({
   windows: Schema.Array(ServerProviderUsageWindow),
+  replaces: Schema.optional(Schema.Array(Schema.String)),
 });
 export type ProviderUsageLimitsUpdate = typeof ProviderUsageLimitsUpdate.Type;
 

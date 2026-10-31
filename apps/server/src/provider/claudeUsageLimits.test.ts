@@ -325,7 +325,37 @@ describe("claudeRateLimitEventToUpdate", () => {
           resetsAt: "2026-07-19T22:26:40.000Z",
         },
       ],
+      replaces: ["five_hour", "seven_day"],
     });
+  });
+
+  it("replaces the rolling windows when unifiedWindows no longer lists the 5h window", () => {
+    const update = claudeRateLimitEventToUpdate(
+      {
+        status: "allowed",
+        rateLimitType: "seven_day",
+        resetsAt: 1_784_600_000,
+        unifiedWindows: { seven_day: { utilization: 0.79, resetsAt: 1_784_600_000 } },
+      } as never,
+      noNames,
+    );
+
+    expect(update?.windows.map((window) => window.id)).toEqual(["seven_day"]);
+    expect(update?.replaces).toEqual(["five_hour", "seven_day"]);
+  });
+
+  it("keeps a legacy single-window event partial", () => {
+    const update = claudeRateLimitEventToUpdate(
+      {
+        status: "allowed",
+        rateLimitType: "seven_day",
+        utilization: 0.5,
+        resetsAt: 1_784_600_000,
+      } as never,
+      noNames,
+    );
+
+    expect(update?.replaces).toBeUndefined();
   });
 });
 

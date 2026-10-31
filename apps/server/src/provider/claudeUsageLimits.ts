@@ -211,6 +211,10 @@ export function claudeRateLimitEventToUpdate(
       scopedWindow(names.overageIncluded, overage.usedPercent, overage.resetsAt, "turn"),
     );
   }
+  // unifiedWindows lists every rolling window the account has, so one it omits is gone.
+  if (Object.keys(unifiedWindows).length > 0) {
+    return { windows, replaces: Object.keys(WINDOWS) };
+  }
   return windows.length > 0 ? { windows } : undefined;
 }
 

@@ -145,10 +145,29 @@ export function applyUsageLimitsUpdate(input: {
     previous === undefined || mergeNowMs === undefined
       ? previous
       : normalizeUsageLimitsAt(previous, mergeNowMs);
-  if (update.windows.length === 0) return normalizedPrevious;
+  if (update.windows.length === 0 && (update.replaces ?? []).length === 0) {
+    return normalizedPrevious;
+  }
   const merged = new Map(normalizedPrevious?.windows.map((window) => [window.id, window] as const));
   // Keep the newest fetch time even for unchanged values so delayed events cannot look newer.
   let changed = normalizedPrevious !== previous;
+  // A window the account no longer has (a plan without a 5h limit) drops out
+  // unless a reading newer than this one still reports it.
+  for (const id of update.replaces ?? []) {
+    if (update.windows.some((window) => window.id === id)) continue;
+    const existing = merged.get(id);
+    if (existing === undefined) continue;
+    const existingCheckedAtMs = parseTimeMs(existing.checkedAt);
+    if (
+      updateCheckedAtMs !== undefined &&
+      existingCheckedAtMs !== undefined &&
+      existingCheckedAtMs > updateCheckedAtMs
+    ) {
+      continue;
+    }
+    merged.delete(id);
+    changed = true;
+  }
   for (const window of update.windows) {
     const existing = merged.get(window.id);
     const checkedAt = window.checkedAt ?? input.checkedAt;

@@ -84,6 +84,67 @@ describe("applyUsageLimitsUpdate", () => {
   });
 });
 
+describe("replaced windows", () => {
+  const later = "2026-09-03T12:05:00.000Z";
+
+  it("drops a replaced window the newer reading no longer reports", () => {
+    const next = applyUsageLimitsUpdate({
+      previous: published,
+      checkedAt: later,
+      update: {
+        windows: [{ ...weekly, checkedAt: later, usedPercent: 79 }],
+        replaces: ["five_hour", "seven_day"],
+      },
+    });
+    expect(next?.windows.map((window) => [window.id, window.usedPercent])).toEqual([
+      ["seven_day", 79],
+    ]);
+  });
+
+  it("drops it even when the reading reports no window at all", () => {
+    const next = applyUsageLimitsUpdate({
+      previous: published,
+      checkedAt: later,
+      update: { windows: [], replaces: ["five_hour"] },
+    });
+    expect(next?.windows.map((window) => window.id)).toEqual(["seven_day"]);
+  });
+
+  it("keeps a window outside replaces and one read after the update", () => {
+    const scoped = {
+      id: "seven_day_opus",
+      kind: "weekly",
+      label: "Weekly · Opus",
+      checkedAt,
+      usedPercent: 5,
+    } as const;
+    const next = applyUsageLimitsUpdate({
+      previous: {
+        checkedAt: later,
+        windows: [{ ...session, checkedAt: "2026-09-03T12:10:00.000Z" }, weekly, scoped],
+      },
+      checkedAt: later,
+      update: { windows: [{ ...weekly, checkedAt: later }], replaces: ["five_hour", "seven_day"] },
+    });
+    expect(next?.windows.map((window) => window.id).sort()).toEqual([
+      "five_hour",
+      "seven_day",
+      "seven_day_opus",
+    ]);
+  });
+
+  it("leaves the snapshot alone when nothing replaced is present", () => {
+    const only = { checkedAt, windows: [weekly] };
+    expect(
+      applyUsageLimitsUpdate({
+        previous: only,
+        checkedAt: later,
+        update: { windows: [], replaces: ["five_hour"] },
+      }),
+    ).toBe(only);
+  });
+});
+
 describe("resolveUsageLimitsAfterProbe", () => {
   it("uses read order for windows while taking metadata from the successful probe", () => {
     const live = {
