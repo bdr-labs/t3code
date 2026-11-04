@@ -76,7 +76,13 @@ export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHead
         className="flex h-8 w-full cursor-pointer items-center gap-2.5 rounded-(--control-radius) px-(--sidebar-row-content-inset) text-left outline-none hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
         <ProjectFavicon project={group} className="size-4 shrink-0" />
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-sidebar-foreground/90">
+        {/* The new-thread action overlays the name's end whenever it shows; fade the name
+            under it, like the thread rows. At the narrowest sidebar the clear last 20% is
+            wider than the action's overlap. */}
+        <span
+          data-slot="sidebar-folder-name"
+          className="min-w-0 flex-1 truncate text-sm font-medium text-sidebar-foreground/90 group-hover/project-folder:mask-r-from-70% group-hover/project-folder:mask-r-to-80% group-has-[[data-sidebar-action-for]:focus]/project-folder:mask-r-from-70% group-has-[[data-sidebar-action-for]:focus]/project-folder:mask-r-to-80% pointer-coarse:mask-r-from-70% pointer-coarse:mask-r-to-80%"
+        >
           {group.displayName}
         </span>
         {dot ? (
