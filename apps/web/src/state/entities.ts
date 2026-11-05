@@ -26,6 +26,7 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
+import { threadGroupOf } from "@t3tools/client-runtime/state/thread-groups";
 import { Atom } from "effect/reactivity";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentProjects } from "./projects";
@@ -409,8 +410,15 @@ export function selectThreadRelationshipShells(
   const current = threads.find((thread) => thread.id === threadId);
   const currentParentId = current === undefined ? null : shellParentThreadId(current);
   if (currentParentId !== null) named.add(currentParentId);
+  const opener = projection?.thread.openedByThreadId ?? current?.openedByThreadId;
+  if (opener !== undefined) named.add(opener);
+  const group = threadGroupOf((projection?.thread ?? current)?.tags);
   return threads.filter(
-    (thread) => named.has(thread.id) || shellParentThreadId(thread) === threadId,
+    (thread) =>
+      named.has(thread.id) ||
+      shellParentThreadId(thread) === threadId ||
+      thread.openedByThreadId === threadId ||
+      (group !== null && threadGroupOf(thread.tags) === group),
   );
 }
 

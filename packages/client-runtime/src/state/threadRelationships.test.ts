@@ -5,6 +5,7 @@ import * as DateTime from "effect/DateTime";
 import {
   deriveThreadRelationshipGraph,
   immediateThreadRelationships,
+  isParentThreadRelationship,
   orderWebThreadLineageRows,
   resolveMergeBackTargetThreadId,
   threadRelationshipRowStatus,
@@ -205,6 +206,139 @@ describe("thread relationships", () => {
         }),
       ]),
     );
+  });
+
+  it("links an opener to the thread it opened, from either side, with each row's own status", () => {
+    const opener = ThreadId.make("opener");
+    const child = ThreadId.make("child");
+    const graph = deriveThreadRelationshipGraph({
+      threads: [
+        { id: opener, status: "completed", lineage: { parentThreadId: null } },
+        {
+          id: child,
+          activityRunStatus: "running",
+          status: "running",
+          openedByThreadId: opener,
+          lineage: { parentThreadId: null },
+        },
+      ] as never,
+      projection: null,
+    });
+    const edge = {
+      sourceThreadId: opener,
+      targetThreadId: child,
+      kind: "opened",
+      status: "running",
+    };
+    const childRows = immediateThreadRelationships(graph, child);
+    const openerRows = immediateThreadRelationships(graph, opener);
+    expect(childRows).toEqual([{ threadId: opener, fromThreadId: child, depth: 1, edge }]);
+    expect(openerRows).toEqual([{ threadId: child, fromThreadId: opener, depth: 1, edge }]);
+    expect(threadRelationshipRowStatus(graph, childRows[0]!)).toBe("completed");
+    expect(threadRelationshipRowStatus(graph, openerRows[0]!)).toBe("running");
+    expect(isParentThreadRelationship(edge as never, child)).toBe(false);
+  });
+
+  it("links the open thread's opener when only its projection is loaded", () => {
+    const opener = ThreadId.make("opener");
+    const child = ThreadId.make("child");
+    const graph = deriveThreadRelationshipGraph({
+      threads: [{ id: opener, status: "completed", lineage: { parentThreadId: null } }] as never,
+      projection: {
+        thread: { id: child, openedByThreadId: opener, lineage: { parentThreadId: null } },
+        subagents: [],
+        contextTransfers: [],
+      } as never,
+    });
+    expect(immediateThreadRelationships(graph, child).map((row) => row.edge.kind)).toEqual([
+      "opened",
+    ]);
+  });
+
+  it.each([
+    ["a delegate_task worker", { parentThreadId: "opener", relationshipToParent: "subagent" }],
+    ["a fork", { parentThreadId: "opener", relationshipToParent: "fork" }],
+  ])("keeps %s on its own edge when its opener is also its parent", (_name, lineage) => {
+    const opener = ThreadId.make("opener");
+    const child = ThreadId.make("child");
+    const graph = deriveThreadRelationshipGraph({
+      threads: [
+        { id: opener, status: "running", lineage: { parentThreadId: null } },
+        { id: child, status: "running", openedByThreadId: opener, lineage },
+      ] as never,
+      projection: null,
+    });
+    expect(graph.edges.map((edge) => edge.kind)).toEqual([
+      lineage.relationshipToParent === "subagent" ? "subagent" : "fork",
+    ]);
+    expect(immediateThreadRelationships(graph, opener)).toHaveLength(1);
+  });
+
+  it("keeps one row for a pair that opened each other", () => {
+    const left = ThreadId.make("left");
+    const right = ThreadId.make("right");
+    const graph = deriveThreadRelationshipGraph({
+      threads: [
+        { id: left, status: "idle", openedByThreadId: right, lineage: { parentThreadId: null } },
+        { id: right, status: "idle", openedByThreadId: left, lineage: { parentThreadId: null } },
+      ] as never,
+      projection: null,
+    });
+    expect(graph.edges).toHaveLength(1);
+  });
+
+  it.each([
+    ["a dangling opener", "gone", {}],
+    [
+      "another environment's opener",
+      "remote-opener",
+      { delegatedFrom: { environmentId: "remote", threadId: "remote-opener", title: "Remote" } },
+    ],
+    ["itself", "child", {}],
+  ])("makes no edge or node for %s", (_name, openerThreadId, extra) => {
+    const child = ThreadId.make("child");
+    const graph = deriveThreadRelationshipGraph({
+      threads: [
+        {
+          id: child,
+          status: "running",
+          openedByThreadId: openerThreadId,
+          lineage: { parentThreadId: null },
+          ...extra,
+        },
+      ] as never,
+      projection: null,
+    });
+    expect(graph.edges).toEqual([]);
+    expect([...graph.nodes.keys()]).toEqual([child]);
+  });
+
+  it("makes no edge to or from a deleted thread", () => {
+    const opener = ThreadId.make("opener");
+    const child = ThreadId.make("child");
+    const deletedAt = "2026-06-24T00:00:00.000Z";
+    const threads = (openerDeleted: boolean) =>
+      [
+        {
+          id: opener,
+          status: "idle",
+          deletedAt: openerDeleted ? deletedAt : null,
+          lineage: { parentThreadId: null },
+        },
+        {
+          id: child,
+          status: "idle",
+          deletedAt: openerDeleted ? null : deletedAt,
+          openedByThreadId: opener,
+          lineage: { parentThreadId: null },
+        },
+      ] as never;
+    expect(
+      deriveThreadRelationshipGraph({ threads: threads(true), projection: null }).edges,
+    ).toEqual([]);
+    expect(
+      deriveThreadRelationshipGraph({ threads: threads(false), projection: null }).edges,
+    ).toEqual([]);
   });
 
   it("keeps the live shell when an archived snapshot contains the same thread id", () => {

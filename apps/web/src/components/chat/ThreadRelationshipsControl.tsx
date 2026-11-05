@@ -1,7 +1,13 @@
 import { useAtomValue } from "@effect/atom-react";
 import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
-import { relationshipLabel } from "./ThreadRelationshipsControl.logic";
+import {
+  deriveLineageGroup,
+  foldLineageRows,
+  lineageThreadKindOf,
+  relationshipLabel,
+  type LineageGroup,
+} from "./ThreadRelationshipsControl.logic";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { SectionHeaderStatus } from "../ui/collapsible-section-header";
@@ -53,6 +59,7 @@ import {
   ArrowRightIcon,
   BotIcon,
   ChevronDownIcon,
+  CornerDownRightIcon,
   CornerLeftUpIcon,
   GitForkIcon,
   MessagesSquareIcon,
@@ -60,8 +67,10 @@ import {
   PlusIcon,
   SquareIcon,
   UnplugIcon,
+  UsersIcon,
+  type LucideIcon,
 } from "lucide-react";
-import { useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ComponentProps, type ReactNode } from "react";
 
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { buildThreadRouteParams } from "../../threadRoutes";
@@ -143,6 +152,8 @@ function ThreadLineageRowList(props: {
 
 function ThreadLineageGroup(props: {
   readonly label: string | null;
+  /** The label already names the count, so the collapsed row does not repeat it. */
+  readonly labelCounts?: boolean;
   readonly rows: ReadonlyArray<ThreadRelationshipWalkRow>;
   readonly expanded: boolean;
   readonly children: (rows: ReadonlyArray<ThreadRelationshipWalkRow>) => ReactNode;
@@ -163,7 +174,7 @@ function ThreadLineageGroup(props: {
             {props.label}
           </span>
           {failedCount > 0 ? <SectionHeaderStatus>{failedCount} failed</SectionHeaderStatus> : null}
-          {expanded ? null : (
+          {expanded || props.labelCounts ? null : (
             <span className="shrink-0 text-xs font-normal tabular-nums text-muted-foreground">
               {props.rows.length}
             </span>
@@ -185,6 +196,49 @@ function ThreadLineageGroup(props: {
         >
           {props.children(visibleRows)}
         </ThreadLineageRowList>
+      ) : null}
+    </div>
+  );
+}
+
+function ThreadLineageSubheading(props: ComponentProps<"h4">) {
+  return (
+    <h4
+      {...props}
+      className="mt-1.5 truncate px-2.5 py-1 text-2xs font-medium text-muted-foreground select-none"
+    />
+  );
+}
+
+function ThreadLineageGroupSection(props: {
+  readonly group: LineageGroup;
+  readonly renderRow: (thread: OrchestrationV2ThreadShell) => ReactNode;
+}) {
+  const [visibleCount, setVisibleCount] = useState(THREAD_LINEAGE_INITIAL_COUNT);
+  const { visibleRows, hiddenCount } = resolveThreadLineageWindow(
+    props.group.members,
+    visibleCount,
+  );
+  return (
+    <div>
+      <Tooltip>
+        <TooltipTrigger delay={200} render={<ThreadLineageSubheading />}>
+          Group: {props.group.name}
+        </TooltipTrigger>
+        <TooltipPopup side="left">{props.group.name}</TooltipPopup>
+      </Tooltip>
+      {visibleRows.length > 0 ? (
+        <ThreadLineageRowList
+          hiddenCount={hiddenCount}
+          onShowMore={() => setVisibleCount((count) => count + THREAD_LINEAGE_PAGE_COUNT)}
+        >
+          {visibleRows.map(props.renderRow)}
+        </ThreadLineageRowList>
+      ) : null}
+      {props.group.settledCount > 0 ? (
+        <p className="m-0 px-2.5 py-1 text-2xs text-muted-foreground">
+          +{props.group.settledCount} settled
+        </p>
       ) : null}
     </div>
   );
@@ -237,6 +291,44 @@ function currentSubagent<Agent extends RuntimeSubagent>(
     result: null,
     error: null,
   };
+}
+
+/** A thread this one is tied to by an opener or a group: its title, its status, a way there. */
+function ThreadLineageLinkRow(props: {
+  readonly title: string;
+  readonly status: string | null;
+  readonly icon: LucideIcon;
+  readonly hint: string;
+  readonly onOpen: () => void;
+}) {
+  const failed = props.status === "failed" || props.status === "error";
+  return (
+    <li className="group relative flex h-8 items-center rounded-lg">
+      <Tooltip>
+        <TooltipTrigger
+          delay={200}
+          render={
+            <ThreadDetailsControl size="sm" variant="ghost" part="row" onClick={props.onOpen} />
+          }
+        >
+          <ThreadRelationshipIcon fallbackIcon={props.icon} status={props.status} />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-left text-sm font-medium leading-4 text-foreground/85">
+              {props.title}
+            </span>
+          </span>
+          <span
+            className={`shrink-0 text-2xs ${failed ? "text-destructive" : "text-muted-foreground"}`}
+          >
+            {threadRelationshipStatusLabel(props.status)}
+          </span>
+        </TooltipTrigger>
+        <TooltipPopup side="left">
+          <LineageTooltipContent title={props.title} hint={props.hint} />
+        </TooltipPopup>
+      </Tooltip>
+    </li>
+  );
 }
 
 /**
@@ -529,7 +621,10 @@ export function ThreadRelationshipsPanel(props: {
     active = [],
     previous = [],
     sideChats = [],
+    openedBy = [],
+    opened = [],
   } = groupBy(visibleRelationships, ({ threadId, edge }) => {
+    if (edge.kind === "opened") return edge.targetThreadId === threadId ? "opened" : "openedBy";
     const isParent = isParentThreadRelationship(edge, props.threadId);
     if (!isParent && graph.nodes.get(threadId)?.thread?.lineage.sideChat === true)
       return "sideChats";
@@ -558,9 +653,24 @@ export function ThreadRelationshipsPanel(props: {
   // A linked environment's agent may have delegated this thread from there.
   const delegatedFrom = currentThread?.delegatedFrom;
 
+  const lineageKindOf = (thread: OrchestrationV2ThreadShell) =>
+    lineageThreadKindOf(props.environmentId, thread);
+  const openedFold = foldLineageRows(opened, ({ threadId }) => {
+    const thread = graph.nodes.get(threadId)?.thread;
+    return thread ? lineageKindOf(thread) : "done";
+  });
+  const lineageGroup = deriveLineageGroup({
+    currentThread,
+    nodes: graph.nodes.values(),
+    listedThreadIds: new Set(visibleRelationships.map(({ threadId }) => threadId)),
+    isHidden: isHiddenRelation,
+    kindOf: lineageKindOf,
+  });
+  const familyVisible = openedBy.length > 0 || opened.length > 0 || lineageGroup !== null;
   const lineageVisible =
     props.showLineage &&
     (related.length > 0 ||
+      familyVisible ||
       active.length > 0 ||
       previous.length > 0 ||
       runningCount > 0 ||
@@ -668,6 +778,37 @@ export function ThreadRelationshipsPanel(props: {
       : isHiddenRelation(mergeTargetThreadId)
         ? null
         : (graph.nodes.get(mergeTargetThreadId)?.thread?.title ?? null);
+
+  const renderFamilyRow = (
+    thread: OrchestrationV2ThreadShell,
+    status: string | null,
+    icon: LucideIcon,
+    hint: string,
+  ) => (
+    <ThreadLineageLinkRow
+      key={thread.id}
+      title={relationshipThreadTitle({
+        // Fresher than an archived snapshot's copy.
+        title: resolvedThreadTitles[thread.id] ?? thread.title,
+        isSubagent: thread.lineage.relationshipToParent === "subagent",
+      })}
+      status={status}
+      icon={icon}
+      hint={hint}
+      onOpen={() => openThread(thread.id)}
+    />
+  );
+
+  const renderOpenedRow = (row: ThreadRelationshipWalkRow) => {
+    const thread = graph.nodes.get(row.threadId)?.thread;
+    if (!thread) return null;
+    return renderFamilyRow(
+      thread,
+      threadRelationshipRowStatus(graph, row),
+      row.edge.targetThreadId === props.threadId ? CornerLeftUpIcon : CornerDownRightIcon,
+      `Open ${relationshipLabel(row.edge, props.threadId).toLowerCase()} in this chat`,
+    );
+  };
 
   const renderRelationshipRow = ({ threadId, edge }: ThreadRelationshipWalkRow) => {
     const node = graph.nodes.get(threadId);
@@ -933,6 +1074,7 @@ export function ThreadRelationshipsPanel(props: {
             canDetach ||
             related.length > 0 ||
             active.length > 0 ||
+            familyVisible ||
             delegatedFrom !== undefined
           }
           data-thread-relationships-panel
@@ -989,6 +1131,50 @@ export function ThreadRelationshipsPanel(props: {
               ))}
             </ThreadLineageRowList>
           ) : null}
+          {openedBy.length > 0 ? (
+            <div>
+              <ThreadLineageSubheading>Opened by</ThreadLineageSubheading>
+              <ThreadLineageRowList hiddenCount={0} onShowMore={() => {}}>
+                {openedBy.map(renderOpenedRow)}
+              </ThreadLineageRowList>
+            </div>
+          ) : null}
+          {opened.length > 0 ? (
+            <div>
+              <ThreadLineageSubheading>Opened</ThreadLineageSubheading>
+              <ThreadLineageGroup
+                key={`${scopedThreadKey(ref)}:opened`}
+                label={null}
+                rows={openedFold.shown}
+                expanded
+              >
+                {(visibleRows) => visibleRows.map(renderOpenedRow)}
+              </ThreadLineageGroup>
+              <ThreadLineageGroup
+                key={`${scopedThreadKey(ref)}:opened-settled`}
+                label={`Settled (${openedFold.settled.length})`}
+                labelCounts
+                rows={openedFold.settled}
+                expanded={false}
+              >
+                {(visibleRows) => visibleRows.map(renderOpenedRow)}
+              </ThreadLineageGroup>
+            </div>
+          ) : null}
+          {lineageGroup === null ? null : (
+            <ThreadLineageGroupSection
+              key={`${scopedThreadKey(ref)}:group`}
+              group={lineageGroup}
+              renderRow={(thread) =>
+                renderFamilyRow(
+                  thread,
+                  thread.activityRunStatus ?? thread.status,
+                  UsersIcon,
+                  "Open group thread in this chat",
+                )
+              }
+            />
+          )}
         </ThreadDetailsSection>
       ) : null}
       {sideChatsVisible ? (

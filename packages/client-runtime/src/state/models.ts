@@ -153,6 +153,8 @@ export interface EnvironmentThreadShell {
   readonly delegatedFrom: OrchestrationV2ThreadShell["delegatedFrom"] | null;
   /** Thread whose agent opened this one through T3 tools; absent otherwise. */
   readonly openedByThreadId?: ThreadId;
+  /** Absent on threads written before tags existed. */
+  readonly tags?: OrchestrationV2ThreadShell["tags"];
   /** Set when an agent or automatic settlement settled the thread. */
   readonly settledBy?: "agent" | "auto";
   /** Thread that delegated this one through T3 `delegate_task`; absent for
@@ -309,6 +311,7 @@ export function presentThreadShell(
     linkOrigin: thread.linkOrigin ?? null,
     delegatedFrom: thread.delegatedFrom ?? null,
     ...(thread.openedByThreadId === undefined ? {} : { openedByThreadId: thread.openedByThreadId }),
+    ...(thread.tags === undefined ? {} : { tags: thread.tags }),
     ...(thread.settledBy === undefined ? {} : { settledBy: thread.settledBy }),
     ...(thread.lineage.relationshipToParent === "subagent" &&
     thread.lineage.parentThreadId !== null &&

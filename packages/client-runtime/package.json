@@ -335,6 +335,10 @@
       "types": "./src/state/threadInbox.ts",
       "default": "./src/state/threadInbox.ts"
     },
+    "./state/thread-groups": {
+      "types": "./src/state/threadGroups.ts",
+      "default": "./src/state/threadGroups.ts"
+    },
     "./state/thread-relationships": {
       "types": "./src/state/threadRelationships.ts",
       "default": "./src/state/threadRelationships.ts"

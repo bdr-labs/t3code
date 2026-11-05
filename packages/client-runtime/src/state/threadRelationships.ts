@@ -6,7 +6,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-export type ThreadRelationshipKind = "parent" | "fork" | "subagent" | "transfer";
+export type ThreadRelationshipKind = "parent" | "fork" | "subagent" | "transfer" | "opened";
 
 export interface ThreadRelationshipNode {
   readonly threadId: ThreadId;
@@ -44,6 +44,10 @@ export function resolveMergeBackTargetThreadId(
 
 function edgeKey(edge: ThreadRelationshipEdge): string {
   return `${edge.sourceThreadId}\u001f${edge.targetThreadId}\u001f${edge.kind}`;
+}
+
+function threadPairKey(left: ThreadId, right: ThreadId): string {
+  return left < right ? `${left}\u001f${right}` : `${right}\u001f${left}`;
 }
 
 export function deriveThreadRelationshipGraph(input: {
@@ -126,6 +130,29 @@ export function deriveThreadRelationshipGraph(input: {
     }
   }
 
+  // Added last, so a pair with another edge keeps it: a delegate_task worker stays an agent row.
+  // Only a thread present here can be an opener: a deleted or another environment's has no row.
+  const linkedPairs = new Set(
+    [...edgesByKey.values()].map((edge) => threadPairKey(edge.sourceThreadId, edge.targetThreadId)),
+  );
+  const presentThreadIds = new Set(
+    lineageThreads.filter((thread) => thread.deletedAt == null).map((thread) => thread.id),
+  );
+  for (const thread of lineageThreads) {
+    const openerThreadId = thread.openedByThreadId;
+    if (openerThreadId === undefined || openerThreadId === thread.id) continue;
+    if (!presentThreadIds.has(openerThreadId) || !presentThreadIds.has(thread.id)) continue;
+    const pair = threadPairKey(openerThreadId, thread.id);
+    if (linkedPairs.has(pair)) continue;
+    linkedPairs.add(pair);
+    addEdge({
+      sourceThreadId: openerThreadId,
+      targetThreadId: thread.id,
+      kind: "opened",
+      status: thread.activityRunStatus ?? thread.status,
+    });
+  }
+
   return { nodes, edges: [...edgesByKey.values()] };
 }
 
@@ -155,7 +182,9 @@ export function isParentThreadRelationship(
   edge: ThreadRelationshipEdge,
   currentThreadId: ThreadId,
 ): boolean {
-  return edge.kind !== "transfer" && edge.targetThreadId === currentThreadId;
+  return (
+    edge.kind !== "transfer" && edge.kind !== "opened" && edge.targetThreadId === currentThreadId
+  );
 }
 
 export function threadRelationshipRowStatus(
