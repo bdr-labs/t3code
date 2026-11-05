@@ -16,8 +16,10 @@ import {
   composerLimitsFreshness,
   deriveContextCompaction,
   deriveResponseRate,
+  deriveTimeToFirstToken,
   deriveTurnCachePercentage,
   formatCachePercentage,
+  formatTimeToFirstToken,
   deriveTurnElapsedMs,
   selectComposerLimitWindows,
   selectComposerStatsTurns,
@@ -286,6 +288,28 @@ describe("observed response rate", () => {
         }),
       ).toBeNull();
     }
+  });
+});
+
+describe("time to first token", () => {
+  it("gives the measured value and null, never 0, without one", () => {
+    expect(deriveTimeToFirstToken({ ...turn(1), timeToFirstTokenMs: 1234 })).toBe(1234);
+    expect(deriveTimeToFirstToken(null)).toBeNull();
+    expect(deriveTimeToFirstToken(turn(1))).toBeNull();
+    for (const timeToFirstTokenMs of [0, -1, NaN, Infinity]) {
+      expect(deriveTimeToFirstToken({ ...turn(1), timeToFirstTokenMs })).toBeNull();
+    }
+  });
+  it.each([
+    [1, "0.1s"],
+    [49, "0.1s"],
+    [1234, "1.2s"],
+    [9949, "9.9s"],
+    [9950, "10s"],
+    [10_400, "10s"],
+    [95_500, "96s"],
+  ])("formats %d ms as %s", (ms, text) => {
+    expect(formatTimeToFirstToken(ms)).toBe(text);
   });
 });
 

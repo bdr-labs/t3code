@@ -53,6 +53,11 @@ export function assertClaudeBackgroundTaskWakeOutput(
     return `${message?.createdBy}:${message?.creationSource}`;
   });
   assert.deepEqual(creators, ["user:web", "agent:provider", "user:web"]);
+  // A wake has no send to time, and the next turn neither inherits a figure nor loses its own.
+  assert.deepEqual(
+    projection.providerTurns.map((turn) => turn.timeToFirstTokenMs !== undefined),
+    [true, false, true],
+  );
   const wakeMessage = projection.messages.find((message) => message.id === wakeRun?.userMessageId);
   assert.equal(wakeMessage?.text, WAKE_SUMMARY);
 

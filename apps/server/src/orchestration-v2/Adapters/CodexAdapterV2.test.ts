@@ -2531,6 +2531,166 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect.each([
+    { order: "only a child's delta", swap: false, childOnly: true },
+    { order: "the response before turn/started", swap: false, childOnly: false },
+    { order: "turn/started before the response", swap: true, childOnly: false },
+  ])("sends the first token figure on existing updates with $order", ({ swap, childOnly }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const nativeThreadId = "first-token-thread";
+        const nativeTurnId = "first-token-turn";
+        const entry = (
+          method: string,
+          params: Record<string, unknown>,
+        ): CodexReplay.CodexAppServerReplayEntry => ({
+          type: "emit_inbound",
+          label: method,
+          frame: { method, params },
+        });
+        const delta = (threadId: string, text: string) =>
+          entry("item/agentMessage/delta", {
+            threadId,
+            turnId: nativeTurnId,
+            itemId: "answer",
+            delta: text,
+          });
+        const usage = {
+          totalTokens: 20,
+          inputTokens: 10,
+          cachedInputTokens: 0,
+          outputTokens: 10,
+          reasoningOutputTokens: 0,
+        };
+        const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "Work" });
+        const started = preamble.at(-1)!;
+        const response = preamble.at(-2)!;
+        const transcript = makeCodexReplayTranscript({
+          scenario: "first-token",
+          entries: [
+            ...preamble.slice(0, -2),
+            ...(swap ? [started, response] : [response, started]),
+            delta(nativeThreadId, ""),
+            delta("child-thread", "child output"),
+            ...(childOnly ? [] : [delta(nativeThreadId, "Answer"), delta(nativeThreadId, " more")]),
+            entry("thread/tokenUsage/updated", {
+              threadId: nativeThreadId,
+              turnId: nativeTurnId,
+              tokenUsage: { total: usage, last: usage, modelContextWindow: 200_000 },
+            }),
+            entry("turn/completed", {
+              threadId: nativeThreadId,
+              turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+            }),
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("first-token-attempt"),
+            text: "Work",
+          }),
+        );
+        yield* harness.firstTerminal;
+        const updates = harness.events.flatMap((event) =>
+          event.type === "provider_turn.updated" ? [event.providerTurn] : [],
+        );
+        // The start, the usage update and the end: the deltas add no message.
+        assert.equal(updates.length, 3);
+        assert.equal(updates[0]?.timeToFirstTokenMs, undefined);
+        if (childOnly) assert.equal(updates[1]?.timeToFirstTokenMs, undefined);
+        else assert.isAbove(updates[1]?.timeToFirstTokenMs ?? 0, 0);
+        assert.equal(updates[2]?.timeToFirstTokenMs, updates[1]?.timeToFirstTokenMs);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("gives a compaction turn no first token figure, whatever it streams", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const nativeThreadId = "compact-figure-thread";
+        const nativeTurnId = "compact-figure-turn";
+        const notification = (
+          method: string,
+          params: Record<string, unknown>,
+        ): CodexReplay.CodexAppServerReplayEntry => ({
+          type: "emit_inbound",
+          label: method,
+          frame: { method, params },
+        });
+        const transcript = makeCodexReplayTranscript({
+          scenario: "native-compaction-first-token",
+          entries: [
+            ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "unused" }).slice(0, 5),
+            {
+              type: "expect_outbound",
+              label: "compact",
+              frame: {
+                id: 3,
+                method: "thread/compact/start",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            { type: "emit_inbound", label: "compact", frame: { id: 3, result: {} } },
+            notification("turn/started", {
+              threadId: nativeThreadId,
+              turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+            }),
+            notification("item/agentMessage/delta", {
+              threadId: nativeThreadId,
+              turnId: nativeTurnId,
+              itemId: "compact-notice",
+              delta: "Compact task completed",
+            }),
+            notification("turn/completed", {
+              threadId: nativeThreadId,
+              turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+            }),
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        yield* harness.runtime.compactThread!(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("compact-figure-attempt"),
+            text: "/compact",
+          }),
+        );
+        yield* harness.firstTerminal;
+        assert.isFalse(
+          harness.events.some(
+            (event) =>
+              event.type === "provider_turn.updated" &&
+              event.providerTurn.timeToFirstTokenMs !== undefined,
+          ),
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+    ),
+  );
+
   it.effect("compacts Codex with the native RPC and completes the compaction turn", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -5983,6 +5983,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           ...(input.context.responseThroughput.aggregate() === undefined
             ? {}
             : { responseThroughput: input.context.responseThroughput.aggregate() }),
+          ...(input.context.responseThroughput.timeToFirstTokenMs() === undefined
+            ? {}
+            : { timeToFirstTokenMs: input.context.responseThroughput.timeToFirstTokenMs() }),
         });
 
         const buildToolCallArtifacts = (input: {
@@ -10125,6 +10128,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           context: ActiveClaudeTurnContext,
         ) {
           context.promptEcho = "confirmed";
+          context.responseThroughput.promptQueued(false);
           const liveQuery = yield* Ref.get(queryContext);
           const held = context.heldRootFrames.splice(0);
           if (liveQuery === null) {
@@ -10177,6 +10181,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             if (liveQuery.promptEchoMode === "unknown") {
               liveQuery.promptEchoMode = "acknowledged";
             }
+            context.responseThroughput.promptQueued(lifecycle.state === "queued");
             if (lifecycle.state === "started") {
               context.promptStarted = true;
             }
@@ -11098,6 +11103,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const startTurn = Effect.fn("ClaudeAdapterV2.startTurn")(
           function* (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput) {
             const startedAt = yield* DateTime.now;
+            const monotonicStartedAt = performance.now();
             const nativeThreadId = yield* getNativeThreadId(turnInput.providerThread);
             const nativeTurnId = `turn:${turnInput.attemptId}`;
             // Use fresh uuids: native sessions can outlive this database, and Claude skips previously recorded prompts.
@@ -11169,7 +11175,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   );
             const querySession = yield* openQuery(turnInput, nativeThreadId);
             const context: ActiveClaudeTurnContext = {
-              responseThroughput: new ClaudeResponseThroughput(),
+              responseThroughput: new ClaudeResponseThroughput(
+                isClaudeProviderContinuationTurn(turnInput) ||
+                  isCompactionCommandMessage({ role: "user", ...turnInput.message })
+                  ? undefined
+                  : monotonicStartedAt,
+              ),
               input: turnInput,
               queryPolicy: querySession.queryPolicy,
               nativeThreadId,

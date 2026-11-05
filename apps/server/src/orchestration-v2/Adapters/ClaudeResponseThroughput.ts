@@ -37,6 +37,16 @@ export class ClaudeResponseThroughput {
   private elapsedMs = 0;
   private partial = false;
   private finalized = false;
+  private readonly turnStartedAt: number | undefined;
+  private firstDeltaSeen = false;
+  private firstTokenMs: number | undefined;
+  private compacting = false;
+  private queued = false;
+
+  /** A turn with no send to time, a wake or a compaction, passes no start and gets no figure. */
+  constructor(turnStartedAt?: number) {
+    this.turnStartedAt = turnStartedAt;
+  }
 
   observe(
     message: SDKMessage,
@@ -44,6 +54,11 @@ export class ClaudeResponseThroughput {
     epoch: object = seenMessageIds,
   ): boolean {
     if (this.finalized) return false;
+    if (message.type === "system") {
+      if (message.subtype === "status") this.compacting = message.status === "compacting";
+      else if (message.subtype === "compact_boundary") this.compacting = false;
+      return false;
+    }
     if (
       (message.type !== "stream_event" && message.type !== "assistant") ||
       message.parent_tool_use_id !== null
@@ -128,8 +143,44 @@ export class ClaudeResponseThroughput {
       this.outputTokens += response.tokens;
       this.elapsedMs += duration;
       return true;
+    } else if (event.type === "content_block_delta") {
+      const delta = event.delta;
+      // Signatures and citations are not output, and tool blocks open with an empty delta.
+      if (
+        (delta.type === "text_delta" && delta.text.length > 0) ||
+        (delta.type === "thinking_delta" && delta.thinking.length > 0) ||
+        (delta.type === "input_json_delta" && delta.partial_json.length > 0)
+      )
+        this.observeFirstDelta(at);
     }
     return false;
+  }
+
+  /** The first output of a response opened in this turn decides, once; replays are never it. */
+  private observeFirstDelta(at: number | undefined): void {
+    const start = this.turnStartedAt;
+    if (
+      this.firstDeltaSeen ||
+      start === undefined ||
+      this.active === undefined ||
+      this.active.invalid ||
+      this.active.startedAt < start ||
+      at === undefined ||
+      !Number.isFinite(at) ||
+      at < start
+    )
+      return;
+    this.firstDeltaSeen = true;
+    if (!this.compacting && !this.queued) this.firstTokenMs = Math.max(1, Math.round(at - start));
+  }
+
+  /** Root output while the CLI still holds this prompt queued is another turn's, so no figure. */
+  promptQueued(queued: boolean): void {
+    this.queued = queued;
+  }
+
+  timeToFirstTokenMs(): number | undefined {
+    return this.firstTokenMs;
   }
 
   finalize(partial = false): void {

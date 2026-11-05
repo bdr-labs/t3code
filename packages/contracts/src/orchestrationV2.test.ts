@@ -675,6 +675,15 @@ describe("provider response throughput wire persistence", () => {
     );
     expect(decode(encode(base)).responseThroughput).toBeUndefined();
   });
+  it("round-trips the first token figure, reads stored turns without it, refuses a non-positive one", () => {
+    const encode = Schema.encodeSync(codec);
+    const decode = Schema.decodeUnknownSync(codec);
+    expect(decode(encode({ ...base, timeToFirstTokenMs: 1234 })).timeToFirstTokenMs).toBe(1234);
+    expect(decode(encode(base)).timeToFirstTokenMs).toBeUndefined();
+    for (const timeToFirstTokenMs of [0, -1, 1.5, NaN]) {
+      expect(() => decodeTurn({ ...base, timeToFirstTokenMs })).toThrow();
+    }
+  });
   it("round-trips both measurement bases and accepts pre-basis Claude telemetry", () => {
     const encode = Schema.encodeSync(codec);
     const decode = Schema.decodeUnknownSync(codec);

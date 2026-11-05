@@ -749,6 +749,9 @@ function upsertProviderTurn(
     ...((next.responseThroughput ?? current?.responseThroughput) === undefined
       ? {}
       : { responseThroughput: next.responseThroughput ?? current?.responseThroughput }),
+    ...((next.timeToFirstTokenMs ?? current?.timeToFirstTokenMs) === undefined
+      ? {}
+      : { timeToFirstTokenMs: next.timeToFirstTokenMs ?? current?.timeToFirstTokenMs }),
   });
 }
 
@@ -2450,7 +2453,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             case "provider-turn.updated": {
               const existingRows =
                 event.payload.tokenUsage === undefined ||
-                event.payload.responseThroughput === undefined
+                event.payload.responseThroughput === undefined ||
+                event.payload.timeToFirstTokenMs === undefined
                   ? yield* sql<PayloadRow>`
                     SELECT payload_json
                     FROM orchestration_v2_projection_provider_turns

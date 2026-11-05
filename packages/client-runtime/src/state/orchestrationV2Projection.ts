@@ -362,6 +362,11 @@ export function applyOrchestrationV2ProjectionEvent(
             : {
                 responseThroughput: event.payload.responseThroughput ?? current?.responseThroughput,
               }),
+          ...((event.payload.timeToFirstTokenMs ?? current?.timeToFirstTokenMs) === undefined
+            ? {}
+            : {
+                timeToFirstTokenMs: event.payload.timeToFirstTokenMs ?? current?.timeToFirstTokenMs,
+              }),
         }),
       };
     }

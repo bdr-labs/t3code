@@ -1213,6 +1213,8 @@ export const OrchestrationV2ProviderTurn = Schema.Struct({
       partial: Schema.Boolean,
     }),
   ),
+  /** Turn start to the first streamed output. Absent where a provider gives no first delta. */
+  timeToFirstTokenMs: Schema.optional(PositiveInt),
 });
 export type OrchestrationV2ProviderTurn = typeof OrchestrationV2ProviderTurn.Type;
 

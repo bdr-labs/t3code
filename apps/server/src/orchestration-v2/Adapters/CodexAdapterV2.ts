@@ -33,6 +33,7 @@ import {
 import {
   CodexSettings,
   defaultInstanceIdForDriver,
+  isCompactionCommandMessage,
   isOrchestrationV2WorkActive,
   type OrchestrationV2GoalCommand,
   OrchestrationV2ProviderGoal,
@@ -1177,6 +1178,13 @@ function failureResetAt(
   return classifyCodexManagedError(failure.code)?.usageLimit
     ? null
     : codexUsageLimitResetAt(snapshot);
+}
+
+function codexTimeToFirstToken(context: {
+  readonly responseThroughput?: CodexResponseThroughput;
+}): { readonly timeToFirstTokenMs?: number } {
+  const timeToFirstTokenMs = context.responseThroughput?.timeToFirstTokenMs();
+  return timeToFirstTokenMs === undefined ? {} : { timeToFirstTokenMs };
 }
 
 interface ActiveCodexTurnContext {
@@ -3512,8 +3520,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         ) {
           const context = yield* awaitActiveTurn(payload.turnId);
           if (context === undefined || payload.delta.length === 0) return;
-          if (context.providerThread.nativeThreadRef?.nativeId === payload.threadId)
+          if (context.providerThread.nativeThreadRef?.nativeId === payload.threadId) {
             context.responseThroughput?.activity(payload.itemId, receipt);
+            context.responseThroughput?.firstDelta(payload.itemId, receipt);
+          }
           yield* completeProviderRetry(context, yield* DateTime.now);
           const itemId = reasoningPartKey(payload.turnId, payload.itemId, stream, index);
           // Reserve positions before delayed flushes so later tools stay after them.
@@ -4440,8 +4450,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               if (
                 payload.delta.length > 0 &&
                 context.providerThread.nativeThreadRef?.nativeId === payload.threadId
-              )
+              ) {
                 context.responseThroughput?.activity(payload.itemId, receipt);
+                context.responseThroughput?.firstDelta(payload.itemId, receipt);
+              }
               yield* completeProviderRetry(context, yield* DateTime.now);
             }
             yield* agentMessageDeltas.append({
@@ -4628,6 +4640,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   payload.tokenUsage,
                   DateTime.formatIso(now),
                 ),
+                ...codexTimeToFirstToken(context),
               },
             });
           }).pipe(Effect.orDie),
@@ -4668,10 +4681,18 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           }),
         );
 
-        yield* client.handleServerNotification("turn/started", (payload) =>
+        // A compaction has no reply to time, so its turn never starts the clock.
+        const markTurnStarted = (context: ActiveCodexTurnContext, receipt: number) => {
+          if (!isCompactionCommandMessage({ role: "user", ...context.input.message }))
+            context.responseThroughput?.turnStarted(receipt);
+        };
+
+        // The receipt is taken before the terminalization permit, as for the deltas it is timed to.
+        yield* client.handleServerNotification("turn/started", (payload, at = performance.now()) =>
           Effect.gen(function* () {
             const context = (yield* Ref.get(activeTurns)).get(payload.turn.id);
             if (context !== undefined) {
+              markTurnStarted(context, at);
               if (context.nativeStartReady !== undefined) {
                 yield* Deferred.succeed(context.nativeStartReady, undefined);
               }
@@ -4679,11 +4700,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             }
             const pendingRootTurn = (yield* Ref.get(pendingRootTurns)).get(payload.threadId);
             if (pendingRootTurn !== undefined) {
-              yield* registerRootTurn({
+              const registered = yield* registerRootTurn({
                 turnInput: pendingRootTurn,
                 nativeTurnId: payload.turn.id,
                 startedAt: codexTimestamp(payload.turn.startedAt),
               });
+              markTurnStarted(registered, at);
               yield* Ref.update(pendingRootTurns, (current) => {
                 const updated = new Map(current);
                 updated.delete(payload.threadId);
@@ -4708,6 +4730,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 nativeTurnId: payload.turn.id,
                 startedAt: codexTimestamp(payload.turn.startedAt),
               });
+              markTurnStarted(next, at);
               const goalRun = continuedRuns.get(goalHold.context.providerTurnId) ?? [
                 goalHold.context,
               ];
@@ -6312,6 +6335,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 completedAt: input.completedAt,
                 turnTokenUsage,
                 ...(responseThroughput === undefined ? {} : { responseThroughput }),
+                ...codexTimeToFirstToken(input.context),
               };
               if (!holdsForGoal) {
                 yield* emitProviderEvent({

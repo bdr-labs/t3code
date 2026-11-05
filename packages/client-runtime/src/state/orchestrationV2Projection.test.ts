@@ -186,6 +186,46 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     ).toEqual(running.responseThroughput);
   });
 
+  it("keeps the first token figure when a later provider turn update omits it", () => {
+    const running = {
+      id: ProviderTurnId.make("provider-turn-first-token"),
+      providerThreadId: ProviderThreadId.make("provider-thread-reducer"),
+      nodeId: NodeId.make("provider-node-reducer"),
+      runAttemptId: null,
+      nativeTurnRef: null,
+      ordinal: 1,
+      status: "running" as const,
+      startedAt: now,
+      completedAt: null,
+      timeToFirstTokenMs: 1234,
+    };
+    const update = (
+      id: string,
+      payload: object,
+      providerTurns: ReadonlyArray<object> = [running],
+    ) =>
+      applyOrchestrationV2ProjectionEvent(
+        { ...emptyProjection, providerTurns } as typeof emptyProjection,
+        {
+          id,
+          type: "provider-turn.updated",
+          threadId,
+          driver: "codex",
+          occurredAt: now,
+          payload,
+        } as OrchestrationV2DomainEvent,
+      );
+    const { timeToFirstTokenMs: _measured, ...withoutFigure } = running;
+    const completed = { ...withoutFigure, status: "completed", completedAt: now };
+    expect(update("event-keep", completed)?.providerTurns[0]?.timeToFirstTokenMs).toBe(1234);
+    // Another turn has no figure to inherit.
+    const next = { ...withoutFigure, id: ProviderTurnId.make("provider-turn-next"), ordinal: 2 };
+    expect(update("event-next", next)?.providerTurns.at(-1)?.timeToFirstTokenMs).toBeUndefined();
+    expect(update("event-first", completed, [])?.providerTurns[0]).not.toHaveProperty(
+      "timeToFirstTokenMs",
+    );
+  });
+
   it("applies thread lifecycle payloads instead of leaving stale metadata", () => {
     const archivedAt = DateTime.makeUnsafe("2026-06-20T01:00:00.000Z");
     const event = {

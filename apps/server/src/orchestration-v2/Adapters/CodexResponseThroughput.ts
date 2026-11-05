@@ -15,6 +15,11 @@ export class CodexResponseThroughput {
   private partial = false;
   private finalized = false;
   private outputSinceWait = false;
+  private readonly relayItems = new Set<string>();
+  private readonly compactions = new Set<string>();
+  private turnStartedAt: number | undefined;
+  private firstDeltaSeen = false;
+  private firstTokenMs: number | undefined;
 
   constructor(unixOrigin: number, monotonicOrigin = performance.now()) {
     this.unixOrigin = unixOrigin;
@@ -49,6 +54,24 @@ export class CodexResponseThroughput {
     this.outputSinceWait = true;
   }
 
+  /** Native turn times are whole seconds, so both ends of the figure are monotonic receipts. */
+  turnStarted(receipt = performance.now()): void {
+    if (this.turnStartedAt === undefined && Number.isFinite(receipt)) this.turnStartedAt = receipt;
+  }
+
+  /** The first non-empty reasoning or message delta decides, once. */
+  firstDelta(itemId: string, receipt = performance.now()): void {
+    if (this.finalized || this.firstDeltaSeen || this.relayItems.has(itemId)) return;
+    this.firstDeltaSeen = true;
+    const start = this.turnStartedAt;
+    if (start !== undefined && this.compactions.size === 0 && receipt >= start)
+      this.firstTokenMs = Math.max(1, Math.round(receipt - start));
+  }
+
+  timeToFirstTokenMs(): number | undefined {
+    return this.firstTokenMs;
+  }
+
   /** Plan snapshots have no output envelope; their spacing may include tool work. */
   unmeasuredActivity(): void {
     if (!this.finalized) this.partial = true;
@@ -56,7 +79,11 @@ export class CodexResponseThroughput {
 
   itemStarted(item: Item, nativeMs?: number, receipt = performance.now()): void {
     if (this.finalized) return;
-    if (item.type === "agentMessage" && item.delivery === "async") return;
+    if (item.type === "agentMessage" && item.delivery === "async") {
+      this.relayItems.add(item.id);
+      return;
+    }
+    if (item.type === "contextCompaction") this.compactions.add(item.id);
     if (item.type === "reasoning" || item.type === "agentMessage" || item.type === "plan") {
       if (this.completed.has(item.id) || this.active.has(item.id)) return;
       const at = this.at(nativeMs, receipt);
@@ -77,6 +104,7 @@ export class CodexResponseThroughput {
   itemCompleted(item: Item, nativeMs?: number, receipt = performance.now()): void {
     if (this.finalized || this.completed.has(item.id)) return;
     if (item.type === "agentMessage" && item.delivery === "async") return;
+    this.compactions.delete(item.id);
     if (item.type !== "reasoning" && item.type !== "agentMessage" && item.type !== "plan") {
       if (
         item.type !== "userMessage" &&

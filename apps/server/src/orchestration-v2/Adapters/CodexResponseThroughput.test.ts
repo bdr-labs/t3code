@@ -201,3 +201,86 @@ describe("stock Codex response activity estimate", () => {
     }
   });
 });
+
+describe("Codex time to first token", () => {
+  it("runs from turn/started to the first delta, once, on receipts", () => {
+    const t = tracker();
+    t.turnStarted(1000);
+    expect(t.timeToFirstTokenMs()).toBeUndefined();
+    t.firstDelta(reasoning.id, 2234.4);
+    t.firstDelta(text.id, 9000);
+    t.turnStarted(8000);
+    t.firstDelta(text.id, 9500);
+    expect(t.timeToFirstTokenMs()).toBe(1234);
+    t.finalize(usage);
+    expect(t.timeToFirstTokenMs()).toBe(1234);
+  });
+
+  it("never reports zero and never takes a delta from before the start", () => {
+    const close = tracker();
+    close.turnStarted(1000);
+    close.firstDelta(text.id, 1000);
+    expect(close.timeToFirstTokenMs()).toBe(1);
+
+    // Whatever came first decides: a start after it cannot turn a later delta into a small figure.
+    const reversed = tracker();
+    reversed.firstDelta(text.id, 1000);
+    reversed.turnStarted(2000);
+    reversed.firstDelta(text.id, 2100);
+    expect(reversed.timeToFirstTokenMs()).toBeUndefined();
+
+    const backwards = tracker();
+    backwards.turnStarted(2000);
+    backwards.firstDelta(text.id, 1000);
+    expect(backwards.timeToFirstTokenMs()).toBeUndefined();
+  });
+
+  it("has no figure without a start or a delta, and leaves the estimate as it was", () => {
+    const noStart = tracker();
+    noStart.firstDelta(text.id, 1000);
+    expect(noStart.timeToFirstTokenMs()).toBeUndefined();
+
+    const noDelta = tracker();
+    noDelta.turnStarted(1000);
+    noDelta.itemStarted(text, origin);
+    noDelta.itemCompleted(text, origin + 1000);
+    expect(noDelta.finalize(usage)).toEqual(expected(1000));
+    expect(noDelta.timeToFirstTokenMs()).toBeUndefined();
+  });
+
+  it("does not take a child's relayed message", () => {
+    const t = tracker();
+    t.turnStarted(1000);
+    t.itemStarted({ ...text, id: "relay", delivery: "async" }, origin);
+    t.firstDelta("relay", 1100);
+    expect(t.timeToFirstTokenMs()).toBeUndefined();
+    t.firstDelta(text.id, 1500);
+    expect(t.timeToFirstTokenMs()).toBe(500);
+  });
+
+  it("gives a delta during a compaction no figure, and measures a reply after one", () => {
+    const compaction = { type: "contextCompaction", id: "compaction" } as const;
+    const during = tracker();
+    during.turnStarted(1000);
+    during.itemStarted(compaction, origin);
+    during.firstDelta(text.id, 1100);
+    during.itemCompleted(compaction, origin + 1000);
+    during.firstDelta(text.id, 2100);
+    expect(during.timeToFirstTokenMs()).toBeUndefined();
+
+    const after = tracker();
+    after.turnStarted(1000);
+    after.itemStarted(compaction, origin);
+    after.itemCompleted(compaction, origin + 1000);
+    after.firstDelta(text.id, 2100);
+    expect(after.timeToFirstTokenMs()).toBe(1100);
+  });
+
+  it("does not take a delta after the turn ended", () => {
+    const t = tracker();
+    t.turnStarted(1000);
+    t.finalize(usage);
+    t.firstDelta(text.id, 1100);
+    expect(t.timeToFirstTokenMs()).toBeUndefined();
+  });
+});

@@ -30,4 +30,9 @@ export function assertClaudeCompactAfterResumeWakeOutput(
       compactions: [[27445, 1192]],
     },
   ]);
+  // The wake's recorded deltas reach the /compact run, which still has no reply of its own to time.
+  assert.deepEqual(
+    projection.providerTurns.map((turn) => turn.timeToFirstTokenMs !== undefined),
+    [true, false],
+  );
 }

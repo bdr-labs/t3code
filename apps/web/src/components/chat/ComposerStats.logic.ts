@@ -142,6 +142,18 @@ export function deriveResponseRate(turn: OrchestrationV2ProviderTurn | null): nu
   return throughput.outputTokens / (throughput.elapsedMs / 1000);
 }
 
+/** Null, never 0, when the provider gave no first delta to time. */
+export function deriveTimeToFirstToken(turn: OrchestrationV2ProviderTurn | null): number | null {
+  const ms = turn?.timeToFirstTokenMs;
+  return ms !== undefined && Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+/** One decimal to 10 s, whole seconds beyond, and never a rounded `0.0s`. */
+export function formatTimeToFirstToken(ms: number): string {
+  const tenths = Math.max(1, Math.round(ms / 100));
+  return tenths < 100 ? `${(tenths / 10).toFixed(1)}s` : `${Math.round(ms / 1000)}s`;
+}
+
 function windowShortLabel(window: ServerProviderUsageWindow): string {
   const mins = window.windowDurationMins;
   if (mins !== undefined && mins > 0) {

@@ -10,6 +10,7 @@ import {
   MessageId,
   type ModelSelection,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2ProviderTurn,
   type OrchestrationV2TurnItem,
   type OrchestrationV2ThreadHistoryPage,
   type OrchestrationV2ThreadShellSnapshot,
@@ -2658,6 +2659,91 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         ...throughput,
         partial: true,
       });
+    }),
+  );
+
+  it.effect("keeps the first token figure across updates that omit it, for that turn only", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:first-token");
+      const nodeId = NodeId.make("node:first-token");
+      yield* projectionStore.apply({
+        id: EventId.make("event:first-token:thread"),
+        type: "thread.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: threadId,
+          projectId: ProjectId.make("project:first-token"),
+          title: "First token",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      const providerTurn = {
+        id: ProviderTurnId.make("provider-turn:first-token"),
+        providerThreadId: ProviderThreadId.make("provider-thread:first-token"),
+        nodeId,
+        runAttemptId: null,
+        nativeTurnRef: null,
+        ordinal: 1,
+        status: "running" as const,
+        startedAt: now,
+        completedAt: null,
+      };
+      const apply = (label: string, payload: OrchestrationV2ProviderTurn) =>
+        projectionStore.apply({
+          id: EventId.make(`event:first-token:${label}`),
+          type: "provider-turn.updated",
+          threadId,
+          nodeId,
+          driver,
+          occurredAt: now,
+          payload,
+        });
+      const figures = Effect.map(projectionStore.getThreadProjection(threadId), (projection) =>
+        projection.providerTurns.map((turn) => turn.timeToFirstTokenMs),
+      );
+      yield* apply("measured", { ...providerTurn, timeToFirstTokenMs: 1234 });
+      yield* apply("bare", { ...providerTurn, status: "completed", completedAt: now });
+      assert.deepEqual(yield* figures, [1234]);
+      // Usage and throughput both present: only the figure's absence can make this read the row.
+      yield* apply("full", {
+        ...providerTurn,
+        status: "completed",
+        completedAt: now,
+        tokenUsage: { usedTokens: 1, maxTokens: 2, updatedAt: "2026-08-29T12:00:00.000Z" },
+        responseThroughput: {
+          outputTokens: 400,
+          elapsedMs: 4000,
+          responseCount: 1,
+          partial: false,
+        },
+      });
+      assert.deepEqual(yield* figures, [1234]);
+      yield* apply("next", {
+        ...providerTurn,
+        id: ProviderTurnId.make("provider-turn:first-token-next"),
+        ordinal: 2,
+      });
+      assert.deepEqual(yield* figures, [1234, undefined]);
     }),
   );
 

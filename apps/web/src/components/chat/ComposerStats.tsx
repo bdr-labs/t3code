@@ -24,8 +24,10 @@ import {
   composerLimitsFreshness,
   deriveContextCompaction,
   deriveResponseRate,
+  deriveTimeToFirstToken,
   deriveTurnCachePercentage,
   formatCachePercentage,
+  formatTimeToFirstToken,
   deriveTurnElapsedMs,
   selectComposerLimitWindows,
 } from "./ComposerStats.logic";
@@ -371,6 +373,7 @@ export function ComposerStats({
 }) {
   const compaction = deriveContextCompaction(context, contextDriver, configuredClaudeThreshold);
   const responseRate = deriveResponseRate(turn);
+  const timeToFirstToken = deriveTimeToFirstToken(turn);
   const estimated = turn?.responseThroughput?.basis === "codex_active_windows_estimate";
   const usage = turn?.turnTokenUsage;
   const availableUsage = usage?.usageStatus !== "unavailable" ? usage : undefined;
@@ -386,6 +389,7 @@ export function ComposerStats({
     !hasElapsed &&
     !hasTokens &&
     responseRate === null &&
+    timeToFirstToken === null &&
     compactions.length === 0 &&
     selectComposerLimitWindows(usageLimits?.limits).length === 0 &&
     subscriptionSwitch === null &&
@@ -400,9 +404,11 @@ export function ComposerStats({
     responseRate === null
       ? null
       : `${estimated ? "≈" : ""}${responseRate.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+  const firstTokenText =
+    timeToFirstToken === null ? null : formatTimeToFirstToken(timeToFirstToken);
   // T3 already shows turn time inline in the timeline, so the line shows tok/s and
   // keeps elapsed time in the details popover.
-  if (turn !== null && (hasElapsed || hasTokens || rateText !== null)) {
+  if (turn !== null && (hasElapsed || hasTokens || rateText !== null || firstTokenText !== null)) {
     stats.push({
       key: "turn",
       node: (
@@ -419,13 +425,19 @@ export function ComposerStats({
               />
             }
           >
+            {firstTokenText !== null && (
+              <span className="me-1 inline-flex items-center gap-1">
+                <Value>{firstTokenText}</Value>
+                <Label>ttft</Label>
+              </span>
+            )}
             {rateText !== null ? (
               <>
                 <Value>{rateText}</Value>
                 <Label>tok/s{throughput?.partial && " partial"}</Label>
               </>
             ) : (
-              <Label>Tokens</Label>
+              firstTokenText === null && <Label>Tokens</Label>
             )}
           </PopoverTrigger>
           <PopoverPopup {...composerFloatingLayerProps} side="top" align="start" width="md">
@@ -436,6 +448,9 @@ export function ComposerStats({
               <dl className="space-y-1.5">
                 <Detail label="Status">{turn.status}</Detail>
                 {rateText !== null && <Detail label="Output rate">{rateText} tok/s</Detail>}
+                {firstTokenText !== null && (
+                  <Detail label="Time to first token">{firstTokenText}</Detail>
+                )}
                 {hasElapsed && (
                   <Detail label="Elapsed wall time">
                     <ElapsedTime turn={turn} />
@@ -452,6 +467,11 @@ export function ComposerStats({
                 includes tools and waits. Child-agent usage is excluded.
                 {usage?.hasSubagents && " This turn used subagents."}
               </p>
+              {firstTokenText !== null && (
+                <p className="text-muted-foreground">
+                  From the turn starting on the server, so a queued turn's wait is not counted.
+                </p>
+              )}
               {rateText !== null && (
                 <p className="text-muted-foreground">
                   {estimated

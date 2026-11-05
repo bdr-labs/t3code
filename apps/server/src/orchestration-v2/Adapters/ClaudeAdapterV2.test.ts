@@ -6051,6 +6051,285 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
+  it.effect("sends the first token figure on existing updates and not into the next turn", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("first-token-attempt"),
+          text: "Check first token",
+          attachments: [],
+        }),
+      );
+      // Stamped past any clock reading: the turn's start comes from the real monotonic clock.
+      const stampedAfterStart = 1e12;
+      const send = Effect.fnUntraced(function* (event: unknown, at: number, label: string) {
+        const message = claudeSdkFrame({
+          type: "stream_event",
+          event,
+          parent_tool_use_id: null,
+          session_id: WAKE_NATIVE_SESSION,
+          uuid: `first-token-${label}`,
+        });
+        observeClaudeFrame(message, stampedAfterStart + at);
+        yield* harness.offerAndWait(message);
+      });
+      const text = {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "x" },
+      };
+      for (const [id, offset] of [
+        ["response-one", 0],
+        ["response-two", 5000],
+      ] as const) {
+        yield* send({ type: "message_start", message: { id } }, offset, `${id}-start`);
+        yield* send(text, offset + 100, `${id}-delta-1`);
+        yield* send(text, offset + 200, `${id}-delta-2`);
+        yield* send(
+          { type: "message_delta", usage: { output_tokens: 10 } },
+          offset + 300,
+          `${id}-usage`,
+        );
+        yield* send({ type: "message_stop" }, offset + 300, `${id}-stop`);
+      }
+      yield* harness.offerAndWait(
+        makeResultFrame({ uuid: "first-token-result", result: "", numTurns: 2 }),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+      const updates = harness.events.flatMap((event) =>
+        event.type === "provider_turn.updated" ? [event.providerTurn] : [],
+      );
+      // The start, one per completed response and the end: four deltas add no message.
+      assert.equal(updates.length, 4);
+      assert.equal(updates[0]?.timeToFirstTokenMs, undefined);
+      const figures = updates.slice(1).map((turn) => turn.timeToFirstTokenMs);
+      assert.isAbove(figures[0] ?? 0, 0);
+      assert.deepEqual(figures, [figures[0], figures[0], figures[0]]);
+
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("first-token-next"),
+          providerTurnOrdinal: 2,
+          text: "No stream this time",
+          attachments: [],
+        }),
+      );
+      yield* harness.offerAndWait(
+        makeResultFrame({ uuid: "first-token-next-result", result: "Done" }),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+      const next = harness.events.findLast((event) => event.type === "provider_turn.updated");
+      if (next?.type !== "provider_turn.updated") throw new Error("missing turn");
+      assert.equal(next.providerTurn.ordinal, 2);
+      assert.equal(next.providerTurn.timeToFirstTokenMs, undefined);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
+  const firstTokenFrame = (event: unknown, uuid: string) => {
+    const message = claudeSdkFrame({
+      type: "stream_event",
+      event,
+      parent_tool_use_id: null,
+      session_id: WAKE_NATIVE_SESSION,
+      uuid,
+    });
+    // Past any clock reading, so only the turn's kind can keep these frames from counting.
+    observeClaudeFrame(message, 1e12);
+    return message;
+  };
+  const firstTokenDelta = {
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "text_delta", text: "x" },
+  };
+
+  it.effect.each([
+    { kind: "a user's prompt", text: "Hello", measured: true },
+    { kind: "a /compact", text: "/compact", measured: false },
+  ])("times $kind turn only when it has a reply to time", ({ text, measured }) =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("first-token-kind"),
+          text,
+          attachments: [],
+        }),
+      );
+      yield* harness.offerAndWait(
+        firstTokenFrame(
+          { type: "message_start", message: { id: "kind-reply" } },
+          "first-token-kind-start",
+        ),
+      );
+      yield* harness.offerAndWait(firstTokenFrame(firstTokenDelta, "first-token-kind-delta"));
+      yield* harness.offerAndWait(
+        makeResultFrame({ uuid: "first-token-kind-result", result: "Done" }),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+      const final = harness.events.findLast((event) => event.type === "provider_turn.updated");
+      if (final?.type !== "provider_turn.updated") throw new Error("missing turn");
+      assert.equal(final.providerTurn.timeToFirstTokenMs !== undefined, measured);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
+  it.effect("gives a wake turn no figure, since it has no send to time", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("first-token-before-wake"),
+          text: "Run the build in the background.",
+          attachments: [],
+        }),
+      );
+      yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+      yield* Queue.offer(harness.sdkMessages, turnOneResult);
+      yield* harness.awaitTerminal(1);
+      yield* harness.offerAndWait(wakeNotification);
+      yield* harness.offerAndWait(wakeTurnInit);
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("first-token-wake"),
+          text: "Background task completed.",
+          attachments: [],
+          providerTurnOrdinal: 2,
+          messageCreatedBy: "agent",
+          messageCreationSource: "provider",
+        }),
+      );
+      yield* harness.offerAndWait(
+        firstTokenFrame(
+          { type: "message_start", message: { id: "wake-reply" } },
+          "first-token-wake-start",
+        ),
+      );
+      yield* harness.offerAndWait(firstTokenFrame(firstTokenDelta, "first-token-wake-delta"));
+      yield* harness.offerAndWait(wakeResult);
+      yield* harness.awaitTerminal(2);
+      const final = harness.events.findLast((event) => event.type === "provider_turn.updated");
+      if (final?.type !== "provider_turn.updated") throw new Error("missing turn");
+      assert.equal(final.providerTurn.ordinal, 2);
+      assert.equal(final.providerTurn.timeToFirstTokenMs, undefined);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
+  it.effect("gives a prompt behind another turn's output in the CLI queue no figure", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("first-token-queued"),
+          text: "Queued behind a wake",
+          attachments: [],
+        }),
+      );
+      const lifecycle = (state: "queued" | "started", uuid: string) =>
+        claudeSdkFrame({
+          type: "command_lifecycle",
+          command_uuid: harness.promptUuid(0),
+          state,
+          uuid,
+          session_id: WAKE_NATIVE_SESSION,
+        });
+      const stream = (event: unknown, uuid: string) => {
+        const message = claudeSdkFrame({
+          type: "stream_event",
+          event,
+          parent_tool_use_id: null,
+          session_id: WAKE_NATIVE_SESSION,
+          uuid,
+        });
+        observeClaudeFrame(message, 1e12);
+        return message;
+      };
+      const delta = {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "x" },
+      };
+      yield* harness.offerAndWait(lifecycle("queued", "00000000-0000-4000-8000-000000000a01"));
+      yield* harness.offerAndWait(
+        stream({ type: "message_start", message: { id: "wake-reply" } }, "first-token-wake-start"),
+      );
+      yield* harness.offerAndWait(stream(delta, "first-token-wake-delta"));
+      yield* harness.offerAndWait(stream({ type: "message_stop" }, "first-token-wake-stop"));
+      yield* harness.offerAndWait(lifecycle("started", "00000000-0000-4000-8000-000000000a02"));
+      yield* harness.offerAndWait(
+        stream({ type: "message_start", message: { id: "own-reply" } }, "first-token-own-start"),
+      );
+      yield* harness.offerAndWait(stream(delta, "first-token-own-delta"));
+      yield* harness.offerAndWait(
+        claudeSdkFrame({
+          ...makeResultFrame({ uuid: "first-token-queued-result", result: "Done" }),
+          user_message_uuid: harness.promptUuid(0),
+        }),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+      const final = harness.events.findLast((event) => event.type === "provider_turn.updated");
+      if (final?.type !== "provider_turn.updated") throw new Error("missing turn");
+      assert.equal(final.providerTurn.status, "completed");
+      assert.equal(final.providerTurn.timeToFirstTokenMs, undefined);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
   it.effect("measures held root frames at ingress while tracking live permission mode", () =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarness;
