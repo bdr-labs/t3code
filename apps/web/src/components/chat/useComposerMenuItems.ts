@@ -43,6 +43,7 @@ import {
   rankPullRequestMatches,
 } from "../pullRequest/pullRequestList.logic";
 import type { ComposerCommandItem } from "./ComposerCommandMenu";
+import { applyCompactSlashEntry, type CompactSlashEntry } from "./composerCompact.logic";
 import {
   searchSlashCommandItems,
   slashCommandItemsForPromptPosition,
@@ -66,7 +67,7 @@ export function useComposerMenuItems({
   planModeUiEnabled,
   sideChatAvailable,
   sideChatDisabledReason,
-  compactSlashCommandAvailable,
+  compactEntry,
   selectedProvider,
   selectedProviderSkills,
   selectedProviderSlashCommands,
@@ -85,7 +86,7 @@ export function useComposerMenuItems({
   readonly planModeUiEnabled: boolean;
   readonly sideChatAvailable: boolean;
   readonly sideChatDisabledReason: string | null;
-  readonly compactSlashCommandAvailable: boolean;
+  readonly compactEntry: CompactSlashEntry;
   readonly selectedProvider: ProviderDriverKind;
   readonly selectedProviderSkills: ServerProvider["skills"];
   readonly selectedProviderSlashCommands: ServerProvider["slashCommands"];
@@ -288,8 +289,9 @@ export function useComposerMenuItems({
           skill.description ??
           (skill.scope ? `${skill.scope} skill` : ""),
       }));
-      const visibleProviderSlashCommandItems = providerSlashCommandItems.filter(
-        (item) => item.command.name !== "compact" || compactSlashCommandAvailable,
+      const visibleProviderSlashCommandItems = applyCompactSlashEntry(
+        providerSlashCommandItems,
+        compactEntry,
       );
       const slashCommandItems = slashCommandItemsForPromptPosition(
         [...builtInSlashCommandItems, ...visibleProviderSlashCommandItems, ...skillItems],

@@ -1,5 +1,5 @@
 export function resolveComposerMenuActiveItemId(input: {
-  items: ReadonlyArray<{ id: string }>;
+  items: ReadonlyArray<{ id: string; disabledReason?: string }>;
   highlightedItemId: string | null;
   currentSearchKey: string | null;
   highlightedSearchKey: string | null;
@@ -16,5 +16,6 @@ export function resolveComposerMenuActiveItemId(input: {
     return input.highlightedItemId;
   }
 
-  return input.items[0]?.id ?? null;
+  // Arrows can reach a disabled entry; it never takes the default from a usable one.
+  return (input.items.find((item) => !item.disabledReason) ?? input.items[0])?.id ?? null;
 }

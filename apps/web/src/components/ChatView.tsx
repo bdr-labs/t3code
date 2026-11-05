@@ -320,6 +320,7 @@ import { selectComposerStatsTurns, selectRecordedCompactions } from "./chat/Comp
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
 import { hasAvailableCompactionProvider } from "./chat/ContextWindowMeter.logic";
+import { COMPACT_DISABLED_REASONS } from "./chat/composerCompact.logic";
 import {
   deriveLatestContextWindowSnapshot,
   hasDismissedResumeCompaction,
@@ -2534,12 +2535,12 @@ export default function ChatView(props: ChatViewProps) {
   const compactDisabled = compactThreadUnavailable;
   const compactDisabledReason = compactDisabled
     ? !canOperateThread
-      ? "This connection cannot change threads."
+      ? COMPACT_DISABLED_REASONS.cannotOperate
       : !activeProject
-        ? "Choose a project before compacting"
+        ? COMPACT_DISABLED_REASONS.noProject
         : !manualCompactionProviderAvailable
           ? "Compaction is unavailable for this provider"
-          : "Compacting is unavailable right now"
+          : COMPACT_DISABLED_REASONS.unavailable
     : null;
   const resumeCompactionTokens =
     activeContextWindow &&
@@ -3742,6 +3743,10 @@ export default function ChatView(props: ChatViewProps) {
                               contextWindowLiveUsage={activeThreadLiveTokenUsage}
                               contextWindowProviderThread={activeProviderThread}
                               compactThreadUnavailable={compactThreadUnavailable}
+                              isServerThread={isServerThread}
+                              isWorking={isWorking}
+                              manualCompactionProviderAvailable={manualCompactionProviderAvailable}
+                              hasCompactableConversation={activeThreadHasCompactableConversation}
                               compactDisabled={compactDisabled}
                               compactDisabledReason={compactDisabledReason}
                               resolvedTheme={resolvedTheme}
@@ -3883,11 +3888,11 @@ export default function ChatView(props: ChatViewProps) {
                           compactDisabled={compactDisabled}
                           compactDisabledReason={
                             pendingApprovals.length > 0
-                              ? "Resolve the pending approval first."
+                              ? COMPACT_DISABLED_REASONS.pendingApproval
                               : pendingUserInputs.length > 0
-                                ? "Answer the pending question first."
+                                ? COMPACT_DISABLED_REASONS.pendingInput
                                 : isWorking
-                                  ? "Wait for the current turn to finish."
+                                  ? COMPACT_DISABLED_REASONS.working
                                   : compactDisabledReason
                           }
                           isCompacting={isCompacting}

@@ -34,7 +34,9 @@ import { PierreEntryIcon } from "./PierreEntryIcon";
 import { ComposerBanner } from "./ComposerBanner";
 import { resolvePullRequestState } from "../pullRequest/pullRequestPresentation";
 
-export type ComposerCommandItem =
+export type ComposerCommandItem = ComposerCommandItemKind & { disabledReason?: string };
+
+type ComposerCommandItemKind =
   | {
       id: string;
       type: "path";
@@ -191,6 +193,7 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
     <CommandItem
       render={<div id={props.optionId} />}
       aria-selected={props.isActive}
+      aria-disabled={props.item.disabledReason ? true : undefined}
       value={props.item.id}
       data-composer-item-id={props.item.id}
       active={props.isActive}
@@ -201,7 +204,7 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
         event.preventDefault();
       }}
       onClick={() => {
-        props.onSelect(props.item);
+        if (!props.item.disabledReason) props.onSelect(props.item);
       }}
     >
       {props.item.type === "path" ? (
@@ -228,7 +231,12 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
           className={cn("size-4 shrink-0", pullRequestPresentation.toneClassName)}
         />
       ) : null}
-      <span className="flex min-w-0 flex-1 items-center gap-2">
+      <span
+        className={cn(
+          "flex min-w-0 flex-1 items-center gap-2",
+          props.item.disabledReason && "cursor-not-allowed opacity-64",
+        )}
+      >
         <span className="min-w-0 max-w-[45%] shrink-0 truncate font-sans text-xs font-medium">
           {isSlashSkill ? (
             <>
@@ -240,7 +248,7 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
           )}
         </span>
         <span className="min-w-0 flex-1 truncate text-left text-secondary-label text-xs">
-          {props.item.description}
+          {props.item.disabledReason ?? props.item.description}
         </span>
         {skillSourceKind ? (
           <SkillSourceBadge

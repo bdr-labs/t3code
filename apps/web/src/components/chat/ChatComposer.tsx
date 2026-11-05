@@ -278,6 +278,7 @@ import {
 } from "./preparingComposerImages";
 import { ComposerControlsBar } from "./ComposerControlsBar";
 import { composerCommandKeyHandler } from "./composerCommandKey";
+import { compactSlashEntry } from "./composerCompact.logic";
 
 function consumePasteAsTextShortcut(deadline: { current: number }): boolean {
   const armed = Date.now() <= deadline.current;
@@ -430,6 +431,10 @@ export interface ChatComposerProps {
   contextWindowLiveUsage: Parameters<typeof deriveLatestContextWindowSnapshot>[1];
   contextWindowProviderThread: Parameters<typeof deriveLatestContextWindowSnapshot>[2];
   compactThreadUnavailable: boolean;
+  isServerThread: boolean;
+  isWorking: boolean;
+  manualCompactionProviderAvailable: boolean;
+  hasCompactableConversation: boolean;
   compactDisabled: boolean;
   compactDisabledReason: string | null;
 
@@ -1124,16 +1129,29 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     elementContextCount: composerPreviewAnnotations.length + composerReviewComments.length,
   });
   const composerTriggerKind = composerTrigger?.kind ?? null;
-  const compactSlashCommandAvailable =
-    composerTrigger?.kind === "slash-command" &&
-    prompt.slice(0, composerTrigger.rangeStart).trim() === "" &&
-    !compactThreadUnavailable &&
-    prompt.slice(composerTrigger.rangeEnd).trim() === "" &&
-    composerImages.length + composerFiles.length === 0 &&
-    composerDraft.persistedAttachments.length === 0 &&
-    composerTerminalContexts.length === 0 &&
-    composerPreviewAnnotations.length === 0 &&
-    composerReviewComments.length === 0;
+  const compactEntry = compactSlashEntry({
+    providerListsCompact: compactCommandAvailable,
+    manualCompactionProviderAvailable: props.manualCompactionProviderAvailable,
+    hasActiveThread: Boolean(activeThread),
+    isServerThread: props.isServerThread,
+    hasCompactableConversation: props.hasCompactableConversation,
+    canOperateThread,
+    hasActiveProject: activeProjectId !== null,
+    hasPendingApproval: pendingApprovals.length > 0,
+    hasPendingUserInput: pendingUserInputs.length > 0,
+    isWorking: props.isWorking,
+    compactThreadUnavailable,
+    prompt,
+    trigger: composerTrigger,
+    hasComposerAttachments:
+      composerImages.length +
+        composerFiles.length +
+        composerDraft.persistedAttachments.length +
+        composerTerminalContexts.length +
+        composerPreviewAnnotations.length +
+        composerReviewComments.length >
+      0,
+  });
   const linkedEnvironments = useLinkedEnvironments(environmentId);
   const {
     items: composerMenuItems,
@@ -1151,7 +1169,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     planModeUiEnabled,
     sideChatAvailable: props.sideChatAvailable === true,
     sideChatDisabledReason: props.sideChatDisabledReason ?? null,
-    compactSlashCommandAvailable,
+    compactEntry,
     selectedProvider,
     selectedProviderSkills,
     selectedProviderSlashCommands,

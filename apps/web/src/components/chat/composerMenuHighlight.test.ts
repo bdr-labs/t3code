@@ -19,4 +19,22 @@ describe("resolveComposerMenuActiveItemId", () => {
       }),
     ).toBe("new-result");
   });
+
+  it("defaults past a disabled entry but keeps one the user moved to", () => {
+    const items = [{ id: "compact", disabledReason: "Wait." }, { id: "review" }];
+    const search = { currentSearchKey: "slash:c", highlightedSearchKey: "slash:c" };
+    expect(resolveComposerMenuActiveItemId({ ...search, items, highlightedItemId: null })).toBe(
+      "review",
+    );
+    expect(
+      resolveComposerMenuActiveItemId({ ...search, items, highlightedItemId: "compact" }),
+    ).toBe("compact");
+    expect(
+      resolveComposerMenuActiveItemId({
+        ...search,
+        items: [{ id: "compact", disabledReason: "Wait." }],
+        highlightedItemId: null,
+      }),
+    ).toBe("compact");
+  });
 });

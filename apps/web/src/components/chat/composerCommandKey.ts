@@ -234,8 +234,13 @@ export function composerCommandKeyHandler(input: {
         nudgeComposerMenuHighlight("ArrowUp");
         return true;
       }
-      if ((key === "Enter" || key === "Tab") && selectedItem) {
-        onSelectComposerItem(selectedItem);
+      // A fully typed /compact still sends, even while its menu entry is disabled.
+      const sendsTypedCompact =
+        key === "Enter" &&
+        selectedItem?.disabledReason !== undefined &&
+        promptRef.current.trim().toLowerCase() === "/compact";
+      if ((key === "Enter" || key === "Tab") && selectedItem && !sendsTypedCompact) {
+        if (!selectedItem.disabledReason) onSelectComposerItem(selectedItem);
         return true;
       }
     }
