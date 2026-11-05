@@ -459,6 +459,32 @@ export function AppearanceSettingsPanel() {
             />
           }
         />
+        <SettingsRow
+          {...searchableSetting("reasoning-expanded-by-default")}
+          description="Open reasoning and work groups in the timeline. A row you collapse stays collapsed until you reload."
+          resetAction={
+            settings.reasoningExpandedByDefault !==
+            DEFAULT_UNIFIED_SETTINGS.reasoningExpandedByDefault ? (
+              <SettingResetButton
+                label="reasoning expansion"
+                onClick={() =>
+                  updateSettings({
+                    reasoningExpandedByDefault: DEFAULT_UNIFIED_SETTINGS.reasoningExpandedByDefault,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.reasoningExpandedByDefault}
+              onCheckedChange={(checked) =>
+                updateSettings({ reasoningExpandedByDefault: Boolean(checked) })
+              }
+              aria-label="Expand reasoning by default"
+            />
+          }
+        />
         <AdvancedSettings
           targetIds={[
             searchableSetting("panel-animations").id,

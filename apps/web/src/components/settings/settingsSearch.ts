@@ -374,6 +374,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["latex tex katex equations formulas markdown"],
   },
   {
+    id: "reasoning-expanded-by-default",
+    title: "Expand reasoning by default",
+    to: "/settings/appearance",
+    searchTerms: ["thinking thoughts work groups timeline open collapse trace"],
+  },
+  {
     id: "panel-animations",
     title: "Panel animations",
     to: "/settings/appearance",

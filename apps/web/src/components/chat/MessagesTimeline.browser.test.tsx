@@ -46,7 +46,7 @@ import { collectThreadFindRanges } from "./threadFindHighlights";
 import { toastManager } from "../ui/toast";
 import type { CitedHistory } from "./citationProcedure";
 import type { TimelineNavigation } from "./timelineViewport";
-import { rememberTimelinePosition } from "./timelineScrollAnchoring";
+import { readTimelinePosition, rememberTimelinePosition } from "./timelineScrollAnchoring";
 import {
   COMPOSER_CONTEXT_CLIPBOARD_MIME,
   decodeComposerContextFragment,
@@ -80,6 +80,46 @@ vi.mock(import("~/assets/assetUrls"), async (original) => {
         ? { _tag: "Success", url: audioAsset.url }
         : actual.useAssetUrlState(...args)) as typeof actual.useAssetUrlState,
   };
+});
+
+const reasoningSetting = vi.hoisted(() => ({
+  on: false,
+  reads: 0,
+  timelineRenders: 0,
+  rowRenders: 0,
+}));
+vi.mock(import("../../hooks/useSettings"), async (original) => {
+  const actual = await original();
+  type Settings = ReturnType<typeof actual.getClientSettings>;
+  function useClientSettings<T = Settings>(select?: (settings: Settings) => T): T {
+    const settings = {
+      ...actual.getClientSettings(),
+      get reasoningExpandedByDefault() {
+        reasoningSetting.reads += 1;
+        return reasoningSetting.on;
+      },
+    };
+    return select ? select(settings) : (settings as T);
+  }
+  return { ...actual, useClientSettings };
+});
+// Every work row calls this hook on each render; the compiler cannot memoize a hook call.
+vi.mock(import("../../state/entities"), async (original) => {
+  const actual = await original();
+  const useThreadShell: typeof actual.useThreadShell = (ref) => {
+    reasoningSetting.rowRenders += 1;
+    return actual.useThreadShell(ref);
+  };
+  return { ...actual, useThreadShell };
+});
+// The timeline calls this once per render and no row does.
+vi.mock(import("./useTimelineRows"), async (original) => {
+  const actual = await original();
+  const useStableHandoffRuns: typeof actual.useStableHandoffRuns = (runs) => {
+    reasoningSetting.timelineRenders += 1;
+    return actual.useStableHandoffRuns(runs);
+  };
+  return { ...actual, useStableHandoffRuns };
 });
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
@@ -1571,5 +1611,584 @@ describe("MessagesTimeline thread links", () => {
     });
     expect(screen.text()).toContain("subagent of");
     expect(screen.text()).toContain("Architecture audit");
+  });
+});
+
+describe("MessagesTimeline reasoning expanded by default", () => {
+  const RUN = RunId.make("run-reasoning");
+  const FINISHED = {
+    runId: RUN,
+    status: "completed",
+    startedAt: CREATED_AT,
+    completedAt: CREATED_AT,
+  };
+  const RUNNING = { runId: RUN, status: "running", startedAt: CREATED_AT, completedAt: null };
+  const LONG_THOUGHT = Array.from({ length: 60 }, (_, line) => `Thought line ${line}.`).join(
+    "\n\n",
+  );
+
+  function expandReasoning() {
+    reasoningSetting.on = true;
+    return { [Symbol.dispose]: () => void (reasoningSetting.on = false) };
+  }
+  const thought = (id: string, detail = `${id} text`, entry: Record<string, unknown> = {}) =>
+    work(id, {
+      runId: RUN,
+      label: "Thinking",
+      tone: "thinking",
+      itemType: "reasoning",
+      detail,
+      ...entry,
+    });
+  const tool = (id: string, entry: Record<string, unknown> = {}) =>
+    work(id, {
+      runId: RUN,
+      label: `Ran ${id}`,
+      command: `rg ${id}`,
+      requestKind: "command",
+      tone: "tool",
+      toolLifecycleStatus: "completed",
+      detail: `${id} output`,
+      ...entry,
+    });
+  const filler = (count: number, name = "earlier") =>
+    Array.from({ length: count }, (_, index) =>
+      message(
+        `${name} ${index}\n\n${"line\n\n".repeat(6)}`,
+        { role: index % 2 === 0 ? "user" : "assistant" },
+        `${name}-${index}`,
+      ),
+    );
+  const turn = (...work: ReadonlyArray<Entry>) => [
+    message("Go", { runId: RUN }, "go"),
+    ...work,
+    message("Done", { role: "assistant", runId: RUN }, "final"),
+  ];
+  const settledTurn = (index: number) => {
+    const runId = RunId.make(`settled-${index}`);
+    return [
+      message(`Turn ${index}`, { runId }, `user-${index}`),
+      work(`settled-${index}`, {
+        runId,
+        label: "Thinking",
+        tone: "thinking",
+        itemType: "reasoning",
+        detail: `Settled thought ${index}`,
+      }),
+      message(`Reply ${index}`, { role: "assistant", runId }, `reply-${index}`),
+    ];
+  };
+  const settledTurns = (count: number) =>
+    Array.from({ length: count }, (_, index) => settledTurn(index)).flat();
+  const rowOf = (container: Element, id: string) =>
+    container.querySelector<HTMLElement>(`[data-timeline-row-id="${id}"]`);
+  const toggleOf = (container: Element, id: string) =>
+    rowOf(container, id)?.querySelector<HTMLElement>("[aria-expanded]") ?? null;
+  const expectOpen = (container: Element, id: string, open: boolean) =>
+    vi.waitFor(() =>
+      expect(toggleOf(container, id)?.getAttribute("aria-expanded")).toBe(String(open)),
+    );
+  const detailsOf = (row: Element | null | undefined) =>
+    row?.querySelector<HTMLElement>(".select-text") ?? null;
+  async function scrollTo(viewport: HTMLElement, top: number) {
+    await act(() => {
+      viewport.scrollTop = top;
+    });
+  }
+  // LegendList sees a scroll on the next frame, and a row keeps its container until another row
+  // of the same item type needs it, so a row only unmounts once the scroll has walked past others.
+  async function scrollListTo(list: LegendListRef, top: number) {
+    const viewport = list.getScrollableNode()!;
+    await scrollTo(viewport, top);
+    await vi.waitFor(() =>
+      expect(Math.abs(list.getState().scroll - viewport.scrollTop)).toBeLessThan(2),
+    );
+  }
+  async function scrollRowOut(list: LegendListRef, container: Element, id: string) {
+    const viewport = list.getScrollableNode()!;
+    for (
+      let top = viewport.scrollTop + 1000;
+      top < viewport.scrollHeight && rowOf(container, id);
+      top += 1000
+    ) {
+      await scrollListTo(list, top);
+    }
+    await vi.waitFor(() => expect(rowOf(container, id)).toBeNull());
+  }
+  // LegendList keeps rows click-through until its initial scroll settles, and that scroll can
+  // still pull the list back to the end before then.
+  const expectInitialScrollSettled = (row: () => HTMLElement | null | undefined) =>
+    vi.waitFor(() => expect(getComputedStyle(row()!).pointerEvents).toBe("auto"));
+
+  it("off, leaves a finished turn closed and its reasoning capped", async () => {
+    setup();
+    await using screen = await renderTimeline(turn(thought("thought-1", LONG_THOUGHT)), {
+      latestRun: FINISHED as never,
+    });
+    await vi.waitFor(() => expect(screen.buttons(/^Worked for/)).toHaveLength(1));
+    expect(rowOf(screen.container, "thought-1")).toBeNull();
+    await click(screen.button(/^Worked for/));
+    await expectOpen(screen.container, "thought-1", false);
+    expect(detailsOf(rowOf(screen.container, "thought-1"))).toBeNull();
+    await click(toggleOf(screen.container, "thought-1")!);
+    await expectOpen(screen.container, "thought-1", true);
+    const details = detailsOf(rowOf(screen.container, "thought-1"))!;
+    expect(getComputedStyle(details).maxHeight).toBe("384px");
+    expect(details.scrollHeight).toBeGreaterThan(details.clientHeight);
+  });
+
+  it("on, shows a finished turn's whole reasoning without a click", async () => {
+    setup();
+    using _on = expandReasoning();
+    await using screen = await renderTimeline(turn(thought("thought-1", LONG_THOUGHT)), {
+      latestRun: FINISHED as never,
+    });
+    await expectOpen(screen.container, "thought-1", true);
+    const details = detailsOf(rowOf(screen.container, "thought-1"))!;
+    expect(details.textContent).toContain("Thought line 59.");
+    expect(getComputedStyle(details).maxHeight).toBe("none");
+    expect(details.scrollHeight).toBeLessThanOrEqual(details.clientHeight);
+  });
+
+  it("re-seeds a mounted reasoning row when the setting changes, as when settings hydrate late", async () => {
+    setup();
+    onTestFinished(() => void (reasoningSetting.on = false));
+    const props = baseProps();
+    const timeline = () => (
+      <MessagesTimeline
+        {...props}
+        isWorking
+        runningRunId={RUN}
+        latestRun={RUNNING as never}
+        timelineEntries={[
+          message("Go", { runId: RUN }, "go"),
+          thought("thought-1"),
+          message("Writing", { role: "assistant", runId: RUN, streaming: true }, "reply"),
+        ]}
+      />
+    );
+    await using screen = await renderElement(timeline());
+    await expectOpen(screen.container, "thought-1", false);
+
+    reasoningSetting.on = true;
+    await screen.rerender(timeline());
+    await expectOpen(screen.container, "thought-1", true);
+
+    reasoningSetting.on = false;
+    await screen.rerender(timeline());
+    await expectOpen(screen.container, "thought-1", false);
+  });
+
+  it("on, a collapsed row stays collapsed across a scroll, a delta and a thread switch", async () => {
+    setup();
+    using _on = expandReasoning();
+    const props = baseProps();
+    const before = filler(3);
+    const after = settledTurns(60);
+    const timeline = (detail: string, next: Partial<TimelineProps> = {}) => (
+      <MessagesTimeline
+        {...props}
+        liveFollowEnabled={false}
+        latestRun={FINISHED as never}
+        timelineEntries={[...before, ...turn(thought("thought-1", detail)), ...after]}
+        {...next}
+      />
+    );
+    await using screen = await renderElement(timeline("first"));
+    const list = props.listRef.current!;
+    const lastRow = () => rowOf(screen.container, "entry-reply-59");
+    await vi.waitFor(() => expect(lastRow()).not.toBeNull());
+    await expectInitialScrollSettled(lastRow);
+    await scrollListTo(list, 0);
+    await expectOpen(screen.container, "thought-1", true);
+
+    await click(toggleOf(screen.container, "thought-1")!);
+    await expectOpen(screen.container, "thought-1", false);
+    expect(detailsOf(rowOf(screen.container, "thought-1"))).toBeNull();
+
+    await scrollRowOut(list, screen.container, "thought-1");
+    await scrollListTo(list, 0);
+    await expectOpen(screen.container, "thought-1", false);
+
+    await screen.rerender(timeline("first and a delta"));
+    await expectOpen(screen.container, "thought-1", false);
+
+    const leaveAndComeBack = async () => {
+      await screen.rerender(
+        timeline("first and a delta", {
+          routeThreadKey: `${props.routeThreadKey}-other`,
+          timelineEntries: [message("Another thread", {}, "other")],
+        }),
+      );
+      await vi.waitFor(() => expect(rowOf(screen.container, "thought-1")).toBeNull());
+      await screen.rerender(timeline("first and a delta"));
+    };
+    await leaveAndComeBack();
+    await expectOpen(screen.container, "thought-1", false);
+
+    await click(toggleOf(screen.container, "thought-1")!);
+    await expectOpen(screen.container, "thought-1", true);
+    await leaveAndComeBack();
+    await expectOpen(screen.container, "thought-1", true);
+  });
+
+  it("on, a collapsed live row stays collapsed through a delta and once it settles", async () => {
+    setup();
+    using _on = expandReasoning();
+    const props = baseProps();
+    const live = (detail: string) => (
+      <MessagesTimeline
+        {...props}
+        isWorking
+        runningRunId={RUN}
+        latestRun={RUNNING as never}
+        timelineEntries={[
+          message("Go", { runId: RUN }, "go"),
+          thought("thought-1", detail, { toolLifecycleStatus: "inProgress" }),
+        ]}
+      />
+    );
+    await using screen = await renderElement(live("Live thought"));
+    await expectOpen(screen.container, "live-activity-row", true);
+    await vi.waitFor(() =>
+      expect(detailsOf(rowOf(screen.container, "work-group:thought-1:details"))).not.toBeNull(),
+    );
+
+    await click(toggleOf(screen.container, "live-activity-row")!);
+    await expectOpen(screen.container, "live-activity-row", false);
+    await vi.waitFor(() =>
+      expect(rowOf(screen.container, "work-group:thought-1:details")).toBeNull(),
+    );
+
+    await screen.rerender(live("Live thought grows"));
+    await expectOpen(screen.container, "live-activity-row", false);
+    expect(rowOf(screen.container, "work-group:thought-1:details")).toBeNull();
+
+    await screen.rerender(
+      <MessagesTimeline
+        {...props}
+        latestRun={FINISHED as never}
+        timelineEntries={turn(thought("thought-1", "Live thought grows"))}
+      />,
+    );
+    await expectOpen(screen.container, "thought-1", false);
+  });
+
+  it("on, a mixed group opens with its tool rows closed and no inner scroll for reasoning", async () => {
+    setup();
+    using _on = expandReasoning();
+    await using screen = await renderTimeline(
+      turn(thought("thought-1", LONG_THOUGHT), tool("tool-1"), thought("thought-2")),
+      { latestRun: FINISHED as never },
+    );
+    await expectOpen(screen.container, "work-toggle:thought-1", true);
+    const group = () => screen.container.querySelector<HTMLElement>("[data-tool-group-scroll]");
+    const entry = (name: string) =>
+      [...(group()?.querySelectorAll<HTMLElement>("[aria-expanded]") ?? [])].find((row) =>
+        (row.getAttribute("aria-label") ?? "").includes(name),
+      );
+    await vi.waitFor(() => expect(entry("rg tool-1")).toBeDefined());
+    expect(entry("rg tool-1")!.getAttribute("aria-expanded")).toBe("false");
+    expect(group()!.textContent).not.toContain("tool-1 output");
+    await vi.waitFor(() => {
+      expect(group()!.textContent).toContain("Thought line 59.");
+      expect(group()!.scrollHeight).toBeLessThanOrEqual(group()!.clientHeight + 1);
+    });
+
+    // A tool row keeps its cap when the user opens it.
+    await click(entry("rg tool-1")!);
+    await vi.waitFor(() => expect(group()!.textContent).toContain("tool-1 output"));
+    expect(getComputedStyle(group()!.querySelector("pre")!).maxHeight).not.toBe("none");
+
+    await click(toggleOf(screen.container, "work-toggle:thought-1")!);
+    await vi.waitFor(() => expect(group()).toBeNull());
+    await click(toggleOf(screen.container, "work-toggle:thought-1")!);
+    await vi.waitFor(() => expect(group()).not.toBeNull());
+  });
+
+  const attempt = (id: string, attemptOrdinal: number, status: "superseded" | "running") => ({
+    id: RunAttemptId.make(id),
+    runId: RUN,
+    attemptOrdinal,
+    rootNodeId: `node-${id}` as never,
+    status,
+    completedAt: null,
+  });
+  const supersededAttempt = attempt("attempt-1", 1, "superseded");
+  const activeAttempt = attempt("attempt-2", 2, "running");
+  const inAttempt = (entry: Entry, entryAttempt: typeof supersededAttempt): Entry => ({
+    ...entry,
+    attempt: entryAttempt,
+  });
+  const supersededTurn = [
+    inAttempt(message("Build it", { runId: RUN }, "question"), supersededAttempt),
+    inAttempt(thought("old-thought"), supersededAttempt),
+    inAttempt(
+      message("the cited answer", { role: "assistant", runId: RUN }, "cited"),
+      supersededAttempt,
+    ),
+    inAttempt(message("Change direction", { runId: RUN }, "steer"), activeAttempt),
+    inAttempt(
+      message("Current response", { role: "assistant", runId: RUN }, "current"),
+      activeAttempt,
+    ),
+  ];
+
+  it.each([
+    {
+      name: "turn",
+      entries: turn(thought("thought-1")),
+      latestRun: FINISHED,
+      heading: /^Worked for/,
+      hidden: "thought-1",
+    },
+    {
+      name: "attempt",
+      entries: supersededTurn,
+      latestRun: RUNNING,
+      heading: /^Superseded attempt/,
+      hidden: "old-thought",
+    },
+  ])("on, a $name fold closes and reopens", async ({ entries, latestRun, heading, hidden }) => {
+    setup();
+    using _on = expandReasoning();
+    await using screen = await renderTimeline(entries, { latestRun: latestRun as never });
+    await expectOpen(screen.container, hidden, true);
+    await click(screen.button(heading));
+    await vi.waitFor(() => expect(rowOf(screen.container, hidden)).toBeNull());
+    await click(screen.button(heading));
+    await expectOpen(screen.container, hidden, true);
+  });
+
+  it("on, find opens the fold a user collapsed and leaves it open", async () => {
+    setup();
+    using _on = expandReasoning();
+    const props = baseProps();
+    const needle = message("Needle here", { role: "assistant", runId: RUN }, "needle");
+    const timeline = (next: Partial<TimelineProps> = {}) => (
+      <MessagesTimeline
+        {...props}
+        latestRun={FINISHED as never}
+        timelineEntries={turn(needle, thought("thought-1"))}
+        {...next}
+      />
+    );
+    await using screen = await renderElement(timeline());
+    await vi.waitFor(() => expect(rowOf(screen.container, "entry-needle")).not.toBeNull());
+    await click(screen.button(/^Worked for/));
+    await vi.waitFor(() => expect(rowOf(screen.container, "entry-needle")).toBeNull());
+    const finding = {
+      findOpen: true,
+      findExpanded: true,
+      findQuery: "Needle",
+      activeFindMatch: { entryId: "entry-needle", runId: null, occurrence: 0 },
+    };
+    await screen.rerender(timeline(finding));
+    await vi.waitFor(() => expect(rowOf(screen.container, "entry-needle")).not.toBeNull());
+    await screen.rerender(timeline());
+    await vi.waitFor(() => expect(screen.button(/^Worked for/)).toBeDefined());
+    expect(rowOf(screen.container, "entry-needle")).not.toBeNull();
+
+    // While find holds a match in the fold, closing it waits for find to let go, as it does off.
+    await screen.rerender(timeline(finding));
+    await click(screen.button(/^Worked for/));
+    await expectOpen(screen.container, "thought-1", true);
+    expect(rowOf(screen.container, "entry-needle")).not.toBeNull();
+    await screen.rerender(timeline());
+    await vi.waitFor(() => expect(rowOf(screen.container, "entry-needle")).toBeNull());
+  });
+
+  it("on, a collapsed fold stays collapsed after leaving the thread", async () => {
+    setup();
+    using _on = expandReasoning();
+    const props = baseProps();
+    const timeline = (next: Partial<TimelineProps> = {}) => (
+      <MessagesTimeline
+        {...props}
+        latestRun={FINISHED as never}
+        timelineEntries={turn(thought("thought-1"))}
+        {...next}
+      />
+    );
+    await using screen = await renderElement(timeline());
+    await expectOpen(screen.container, "thought-1", true);
+    await click(screen.button(/^Worked for/));
+    await vi.waitFor(() => expect(rowOf(screen.container, "thought-1")).toBeNull());
+    await vi.waitFor(() =>
+      expect(
+        readTimelinePosition(props.routeThreadKey)?.disclosures?.collapsedWorkGroups.has(RUN),
+      ).toBe(true),
+    );
+    await screen.rerender(
+      timeline({
+        routeThreadKey: `${props.routeThreadKey}-other`,
+        latestRun: null,
+        timelineEntries: [message("Another thread", {}, "other")],
+      }),
+    );
+    await vi.waitFor(() => expect(screen.text()).toContain("Another thread"));
+    await screen.rerender(timeline());
+    await vi.waitFor(() => expect(screen.button(/^Worked for/)).toBeDefined());
+    expect(screen.button(/^Worked for/).getAttribute("aria-expanded")).toBe("false");
+    expect(rowOf(screen.container, "thought-1")).toBeNull();
+  });
+
+  it("on, a citation opens the attempt fold a user collapsed", async () => {
+    setup();
+    using _on = expandReasoning();
+    const props = baseProps();
+    const timeline = (next: Partial<TimelineProps> = {}) => (
+      <MessagesTimeline
+        {...props}
+        latestRun={RUNNING as never}
+        timelineEntries={supersededTurn}
+        {...next}
+      />
+    );
+    await using screen = await renderElement(timeline());
+    await expectOpen(screen.container, "old-thought", true);
+    await click(screen.button(/^Superseded attempt/));
+    await vi.waitFor(() => expect(rowOf(screen.container, "old-thought")).toBeNull());
+    await screen.rerender(
+      timeline({ citationRequest: CITATION_REQUEST, citationHistory: { _tag: "found" } }),
+    );
+    await vi.waitFor(() =>
+      expect(document.querySelector("[data-citation-highlighted]")?.textContent).toContain(
+        "the cited answer",
+      ),
+    );
+  });
+
+  it("on, a long thread keeps its virtualized rows", async () => {
+    setup();
+    const thread = settledTurns(150);
+    const mountedRows = async () => {
+      await using screen = await renderTimeline(thread);
+      await vi.waitFor(() => expect(screen.text()).toContain("Reply 149"));
+      return screen.container.querySelectorAll("[data-timeline-row-id]").length;
+    };
+    const closed = await mountedRows();
+    using _on = expandReasoning();
+    const open = await mountedRows();
+    // Open reasoning is taller, so the view holds fewer rows per screen, never every row.
+    expect(open).toBeLessThanOrEqual(closed + 24);
+    expect(open).toBeLessThan(thread.length / 4);
+  });
+
+  it("on, streaming reasoning keeps the bottom anchor", async () => {
+    setup();
+    using _on = expandReasoning();
+    const props = baseProps();
+    const live = (detail: string) => (
+      <MessagesTimeline
+        {...props}
+        isWorking
+        runningRunId={RUN}
+        latestRun={RUNNING as never}
+        timelineEntries={[
+          ...filler(20),
+          message("Go", { runId: RUN }, "go"),
+          thought("thought-1", detail, { toolLifecycleStatus: "inProgress" }),
+        ]}
+      />
+    );
+    await using screen = await renderElement(live("Line 0."));
+    const viewport = props.listRef.current!.getScrollableNode()!;
+    const distanceFromEnd = () =>
+      viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
+    await vi.waitFor(() => expect(distanceFromEnd()).toBeLessThan(2));
+    let detail = "Line 0.";
+    for (let line = 1; line <= 8; line += 1) {
+      detail += `\n\nLine ${line}.\n\n${"more ".repeat(120)}`;
+      const height = viewport.scrollHeight;
+      await screen.rerender(live(detail));
+      await vi.waitFor(() => {
+        expect(viewport.scrollHeight).toBeGreaterThan(height);
+        expect(distanceFromEnd()).toBeLessThan(2);
+      });
+    }
+  });
+
+  it("on, streaming reasoning below a heading leaves the heading in place", async () => {
+    setup();
+    using _on = expandReasoning();
+    const props = baseProps();
+    const live = (detail: string) => (
+      <MessagesTimeline
+        {...props}
+        isWorking
+        runningRunId={RUN}
+        liveFollowEnabled={false}
+        latestRun={RUNNING as never}
+        timelineEntries={[
+          ...filler(20),
+          message("Go", { runId: RUN }, "go"),
+          thought("thought-1", detail, { toolLifecycleStatus: "inProgress" }),
+        ]}
+      />
+    );
+    await using screen = await renderElement(live("Line 0."));
+    const viewport = props.listRef.current!.getScrollableNode()!;
+    const heading = () => rowOf(screen.container, "entry-go");
+    await vi.waitFor(() => expect(heading()).not.toBeNull());
+    await expectInitialScrollSettled(heading);
+    await scrollListTo(props.listRef.current!, viewport.scrollHeight - viewport.clientHeight - 200);
+    const top = heading()!.getBoundingClientRect().top;
+    let detail = "Line 0.";
+    for (let line = 1; line <= 4; line += 1) {
+      detail += `\n\nLine ${line}.\n\n${"more ".repeat(120)}`;
+      await screen.rerender(live(detail));
+      await vi.waitFor(() =>
+        expect(
+          detailsOf(rowOf(screen.container, "work-group:thought-1:details"))?.textContent,
+        ).toContain(`Line ${line}.`),
+      );
+    }
+    expect(heading()!.getBoundingClientRect().top).toBeCloseTo(top, 0);
+  });
+
+  it("on, a delta renders no settled row and only the timeline reads the setting", async () => {
+    setup();
+    using _on = expandReasoning();
+    const props = baseProps();
+    const finishedRows = settledTurns(12);
+    const live = (detail: string) => (
+      <MessagesTimeline
+        {...props}
+        isWorking
+        runningRunId={RUN}
+        latestRun={RUNNING as never}
+        timelineEntries={[
+          ...finishedRows,
+          message("Go", { runId: RUN }, "go"),
+          thought("thought-1", detail, { toolLifecycleStatus: "inProgress" }),
+          tool("tool-1", { toolLifecycleStatus: "inProgress" }),
+        ]}
+      />
+    );
+    reasoningSetting.reads = 0;
+    reasoningSetting.timelineRenders = 0;
+    await using screen = await renderElement(live("Line 0."));
+    await expectOpen(screen.container, "settled-11", true);
+    await vi.waitFor(() =>
+      expect(screen.container.querySelector("[data-tool-group-scroll]")).not.toBeNull(),
+    );
+    expect(reasoningSetting.reads).toBe(reasoningSetting.timelineRenders);
+    const settledRows = screen.container.querySelectorAll(
+      '[data-timeline-row-kind="work"] section[aria-label="Activity"]',
+    ).length;
+    reasoningSetting.rowRenders = 0;
+
+    await screen.rerender(live("Line 0 and a delta."));
+    await vi.waitFor(() =>
+      expect(screen.container.querySelector("[data-tool-group-scroll]")?.textContent).toContain(
+        "Line 0 and a delta.",
+      ),
+    );
+
+    // The live row and its two entries, so a render of every mounted row would not fit.
+    expect(settledRows).toBeGreaterThan(3);
+    expect(reasoningSetting.rowRenders).toBeLessThanOrEqual(3);
+    expect(reasoningSetting.reads).toBe(reasoningSetting.timelineRenders);
   });
 });

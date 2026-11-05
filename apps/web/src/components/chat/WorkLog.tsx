@@ -133,7 +133,7 @@ export function WorkLogDetails({
   followLive = false,
 }: {
   children: ReactNode;
-  kind?: "text" | "panel" | "media";
+  kind?: "text" | "full-text" | "panel" | "media";
 
   followLive?: boolean;
 }) {
@@ -157,9 +157,11 @@ export function WorkLogDetails({
         "cursor-auto",
         kind === "text"
           ? "ms-7 flex max-h-96 flex-col gap-3 overflow-auto px-0.5 py-1 select-text"
-          : kind === "panel"
-            ? "mt-0.5 mb-1.5 pb-2"
-            : "mt-1",
+          : kind === "full-text"
+            ? "ms-7 flex flex-col gap-3 px-0.5 py-1 select-text"
+            : kind === "panel"
+              ? "mt-0.5 mb-1.5 pb-2"
+              : "mt-1",
       )}
       onClick={(event) => event.stopPropagation()}
       onPointerDown={(event) => event.stopPropagation()}

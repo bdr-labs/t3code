@@ -311,6 +311,22 @@ describe("ClientSettings notifications", () => {
   });
 });
 
+describe("ClientSettings reasoning expansion", () => {
+  it("defaults a stored blob without the key to off and stays out of server settings", () => {
+    expect(decodeClientSettings({ statsForNerdsEnabled: true }).reasoningExpandedByDefault).toBe(
+      false,
+    );
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("reasoningExpandedByDefault");
+    expect(
+      decodeClientSettingsPatch({ reasoningExpandedByDefault: true }).reasoningExpandedByDefault,
+    ).toBe(true);
+    expect(DEFAULT_SERVER_SETTINGS).not.toHaveProperty("reasoningExpandedByDefault");
+    expect(decodeServerSettings({ reasoningExpandedByDefault: true })).not.toHaveProperty(
+      "reasoningExpandedByDefault",
+    );
+  });
+});
+
 describe("ClientSettings quit confirmation", () => {
   it.each([
     [true, "hold"],

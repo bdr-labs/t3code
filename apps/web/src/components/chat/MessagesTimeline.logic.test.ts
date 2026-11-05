@@ -28,8 +28,11 @@ import {
   deriveMessagesTimelineRows,
   timelineTurnFoldRunIdsByEntryId,
   deriveMessagesTimelineRowsWithState,
+  isWorkDisclosureOpen,
+  reopenWorkDisclosure,
   shouldCollapseUserMessage,
   resolveAssistantMessageCopyState,
+  toggleWorkDisclosure,
   type MessagesTimelineRow,
   workEntryDisplayLabel,
 } from "./MessagesTimeline.logic";
@@ -4362,5 +4365,287 @@ describe("shouldCollapseUserMessage", () => {
 
     expect(shouldCollapseUserMessage(`${citation} Can you expand on this?`)).toBe(false);
     expect(shouldCollapseUserMessage(`${citation} ${"More text. ".repeat(60)}`)).toBe(true);
+  });
+});
+
+describe("reasoning expanded by default", () => {
+  type Input = Parameters<typeof deriveMessagesTimelineRows>[0];
+  const runId = RunId.make("run-1");
+  const at = "2026-01-01T00:00:00Z";
+  const common = { turnDiffSummaries: [], supportsConversationRollback: false };
+  const running = {
+    isWorking: true,
+    runningRunId: runId,
+    activeTurnStartedAt: at,
+    latestRun: { runId, status: "running" as const, startedAt: at, completedAt: null },
+  };
+  const finished = {
+    isWorking: false,
+    latestRun: { runId, status: "completed" as const, startedAt: at, completedAt: at },
+  };
+  const work = (
+    id: string,
+    entry: Partial<Extract<TimelineEntry, { kind: "work" }>["entry"]>,
+  ): TimelineEntry => ({
+    kind: "work",
+    id,
+    createdAt: at,
+    entry: { id, runId, createdAt: at, label: id, tone: "tool", ...entry },
+  });
+  const thought = (id: string, detail = `${id} detail`, status?: "inProgress") =>
+    work(id, {
+      tone: "thinking",
+      itemType: "reasoning",
+      detail,
+      ...(status ? { toolLifecycleStatus: status } : {}),
+    });
+  const tool = (id: string, toolLifecycleStatus: "inProgress" | "completed" | "failed") =>
+    work(id, { command: "rg x", requestKind: "command", toolLifecycleStatus });
+  const message = (
+    id: string,
+    role: "user" | "assistant",
+    messageRunId = runId,
+  ): TimelineEntry => ({
+    kind: "message",
+    id,
+    createdAt: at,
+    message: {
+      id: MessageId.make(id),
+      role,
+      text: id,
+      runId: messageRunId,
+      createdAt: at,
+      updatedAt: at,
+      streaming: false,
+    },
+  });
+  const attempt = (id: string, attemptOrdinal: number, status: "superseded" | "running") => ({
+    id: RunAttemptId.make(id),
+    runId,
+    attemptOrdinal,
+    rootNodeId: `node-${id}` as never,
+    status,
+    completedAt: null,
+  });
+  const inAttempt = (
+    entry: TimelineEntry,
+    entryAttempt: ReturnType<typeof attempt>,
+  ): TimelineEntry => ({ ...entry, attempt: entryAttempt });
+  const superseded = attempt("attempt-1", 1, "superseded");
+  const active = attempt("attempt-2", 2, "running");
+
+  it.each([
+    { expandedByDefault: false, expanded: true, collapsed: false, open: true },
+    { expandedByDefault: false, expanded: false, collapsed: true, open: false },
+    { expandedByDefault: false, expanded: false, collapsed: false, open: false },
+    { expandedByDefault: true, expanded: false, collapsed: false, open: true },
+    { expandedByDefault: true, expanded: true, collapsed: true, open: false },
+    { expandedByDefault: true, expanded: false, collapsed: true, open: false },
+  ])("isWorkDisclosureOpen %o", ({ expandedByDefault, expanded, collapsed, open }) => {
+    expect(
+      isWorkDisclosureOpen("id", {
+        expandedByDefault,
+        expandedIds: new Set(expanded ? ["id"] : []),
+        collapsedIds: new Set(collapsed ? ["id"] : []),
+      }),
+    ).toBe(open);
+  });
+
+  it("toggles an id and reopens only an id that is collapsed", () => {
+    const empty = new Set<string>();
+    const collapsed = toggleWorkDisclosure(empty, "id");
+    expect([...collapsed]).toEqual(["id"]);
+    expect([...toggleWorkDisclosure(collapsed, "id")]).toEqual([]);
+    expect(reopenWorkDisclosure(empty, "id")).toBe(empty);
+    expect(reopenWorkDisclosure(collapsed, undefined)).toBe(collapsed);
+    expect([...reopenWorkDisclosure(collapsed, "id")]).toEqual([]);
+  });
+
+  const readSites = [
+    {
+      name: "the active work row",
+      kind: "work-live",
+      id: "work-group:t1",
+      expandedKey: "expandedWorkGroupIds",
+      detailsId: "work-group:t1:details",
+      input: { ...running, timelineEntries: [message("go", "user"), tool("t1", "inProgress")] },
+    },
+    {
+      name: "an in-progress group before a message",
+      kind: "work-live",
+      id: "work-group:t1",
+      expandedKey: "expandedWorkGroupIds",
+      detailsId: "work-group:t1:details",
+      input: {
+        ...running,
+        timelineEntries: [
+          message("go", "user"),
+          tool("t1", "inProgress"),
+          message("progress", "assistant"),
+        ],
+      },
+    },
+    {
+      name: "a finished work group",
+      kind: "work-toggle",
+      id: "work-group:t1",
+      expandedKey: "expandedWorkGroupIds",
+      detailsId: "work-group:t1:details",
+      input: {
+        ...finished,
+        expandedRunIds: new Set([runId]),
+        timelineEntries: [
+          message("go", "user"),
+          tool("t1", "completed"),
+          tool("t2", "completed"),
+          message("final", "assistant"),
+        ],
+      },
+    },
+    {
+      name: "a failed group waiting on the agent",
+      kind: "thinking",
+      id: "work-group:t1",
+      expandedKey: "expandedWorkGroupIds",
+      detailsId: "work-group:t1:details",
+      input: { ...running, timelineEntries: [message("go", "user"), tool("t1", "failed")] },
+    },
+    {
+      name: "a turn fold",
+      kind: "turn-fold",
+      id: runId,
+      expandedKey: "expandedRunIds",
+      detailsId: "thought",
+      input: {
+        ...finished,
+        timelineEntries: [message("go", "user"), thought("thought"), message("final", "assistant")],
+      },
+    },
+    {
+      name: "an attempt fold",
+      kind: "attempt-fold",
+      id: superseded.id,
+      expandedKey: "expandedAttemptIds",
+      detailsId: "thought",
+      input: {
+        ...running,
+        timelineEntries: [
+          inAttempt(message("go", "user"), superseded),
+          inAttempt(thought("thought"), superseded),
+          inAttempt(message("old", "assistant"), superseded),
+          inAttempt(message("steer", "user"), active),
+          inAttempt(message("current", "assistant"), active),
+        ],
+      },
+    },
+  ] as const;
+
+  it.each(readSites)("$name reads the setting", ({ kind, id, expandedKey, detailsId, input }) => {
+    const rows = (extra: Partial<Input>) =>
+      deriveMessagesTimelineRows({ ...common, ...input, ...extra });
+    const expandedOf = (extra: Partial<Input>) =>
+      (rows(extra).find((row) => row.kind === kind) as { expanded?: boolean } | undefined)
+        ?.expanded;
+    const hasDetails = (extra: Partial<Input>) => rows(extra).some((row) => row.id === detailsId);
+    const opened = { [expandedKey]: new Set<string>([id]) } as Partial<Input>;
+    const collapsed = { collapsedWorkGroupIds: new Set<string>([id]) };
+
+    expect(rows({})).toEqual(rows({ expandedByDefault: false, ...collapsed }));
+    expect(expandedOf({})).toBe(false);
+    expect(hasDetails({})).toBe(false);
+    expect(expandedOf({ ...opened, expandedByDefault: false, ...collapsed })).toBe(true);
+    expect(hasDetails(opened)).toBe(true);
+
+    expect(expandedOf({ expandedByDefault: true })).toBe(true);
+    expect(hasDetails({ expandedByDefault: true })).toBe(true);
+    expect(expandedOf({ expandedByDefault: true, ...collapsed })).toBe(false);
+    expect(hasDetails({ expandedByDefault: true, ...collapsed })).toBe(false);
+  });
+
+  it("keeps empty reasoning hidden and a tool row a row", () => {
+    const rows = deriveMessagesTimelineRows({
+      ...common,
+      ...finished,
+      expandedByDefault: true,
+      timelineEntries: [
+        message("go", "user"),
+        thought("blank", "   "),
+        message("mid", "assistant"),
+        thought("also-blank", ""),
+        tool("t1", "completed"),
+        message("final", "assistant"),
+      ],
+    });
+    expect(rows.map((row) => row.id)).toEqual([
+      "go",
+      "turn-fold:run-1",
+      "mid",
+      "also-blank",
+      "final",
+    ]);
+    const toolRow = rows.find((row) => row.id === "also-blank");
+    expect(toolRow).toMatchObject({ kind: "work", isExpandedToolGroup: false });
+    expect(toolRow?.kind === "work" && toolRow.groupedEntries.map((entry) => entry.id)).toEqual([
+      "t1",
+    ]);
+  });
+
+  it("keeps every row but the live one when a reasoning delta arrives", () => {
+    const earlierRun = RunId.make("run-0");
+    const earlier = [
+      message("earlier", "user", earlierRun),
+      work("done", { runId: earlierRun, tone: "thinking", itemType: "reasoning", detail: "done" }),
+      message("earlier-final", "assistant", earlierRun),
+      message("go", "user"),
+    ];
+    const derive = (detail: string) =>
+      deriveMessagesTimelineRows({
+        ...common,
+        ...running,
+        expandedByDefault: true,
+        timelineEntries: [...earlier, thought("live", detail, "inProgress")],
+      });
+    const first = computeStableMessagesTimelineRows(derive("a"), { byId: new Map(), result: [] });
+    const next = computeStableMessagesTimelineRows(derive("ab"), first);
+    expect(next.result.map((row) => row.id)).toEqual(first.result.map((row) => row.id));
+    const changed = next.result.filter((row, index) => row !== first.result[index]);
+    expect(changed.map((row) => row.id)).toEqual(["live-activity-row", "work-group:live:details"]);
+  });
+
+  it("patches a streamed message without deriving again, and derives on a real collapse", () => {
+    const streaming = (text: string): TimelineEntry => ({
+      kind: "message",
+      id: "reply",
+      createdAt: at,
+      message: {
+        id: MessageId.make("reply"),
+        role: "assistant",
+        text,
+        runId,
+        createdAt: at,
+        updatedAt: at,
+        streaming: true,
+      },
+    });
+    const settled = [message("go", "user"), tool("t1", "completed"), tool("t2", "completed")];
+    const input = (text: string, collapsed: ReadonlyArray<string>): Input => ({
+      ...common,
+      ...running,
+      expandedByDefault: true,
+      collapsedWorkGroupIds: new Set(collapsed),
+      timelineEntries: [...settled, streaming(text)],
+    });
+    const first = deriveMessagesTimelineRowsWithState(input("a", []));
+    const toggle = (rows: ReadonlyArray<MessagesTimelineRow>) =>
+      rows.find((row) => row.kind === "work-toggle");
+    expect(toggle(first.rows)).toMatchObject({ expanded: true });
+
+    const delta = deriveMessagesTimelineRowsWithState(input("ab", []), first);
+    expect(toggle(delta.rows)).toBe(toggle(first.rows));
+    expect(delta.rows).toEqual(deriveMessagesTimelineRows(input("ab", [])));
+
+    const collapsed = deriveMessagesTimelineRowsWithState(input("ab", ["work-group:t1"]), delta);
+    expect(toggle(collapsed.rows)).toMatchObject({ expanded: false });
+    expect(collapsed.rows).toEqual(deriveMessagesTimelineRows(input("ab", ["work-group:t1"])));
   });
 });

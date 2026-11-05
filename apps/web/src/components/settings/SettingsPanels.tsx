@@ -537,6 +537,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled
       ? ["Stats for nerds"]
       : []),
+    ...(settings.reasoningExpandedByDefault !== DEFAULT_UNIFIED_SETTINGS.reasoningExpandedByDefault
+      ? ["Expand reasoning by default"]
+      : []),
     ...(settings.contextWindowMeterEnabled !== DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled
       ? ["Context window indicator"]
       : []),
@@ -655,6 +658,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut,
       followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
       statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
+      reasoningExpandedByDefault: DEFAULT_UNIFIED_SETTINGS.reasoningExpandedByDefault,
       contextWindowMeterEnabled: DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled,
       environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
       glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity,

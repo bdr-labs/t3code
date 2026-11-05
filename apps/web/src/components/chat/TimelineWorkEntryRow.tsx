@@ -122,7 +122,10 @@ export function ReasoningTraceContent({ entries }: { entries: ReadonlyArray<Time
   const isStreaming = (entry: TimelineWorkEntry) =>
     isWorking && entry.runId === latestRunId && entry.toolLifecycleStatus === "inProgress";
   return (
-    <WorkLogDetails followLive={entries.some(isStreaming)}>
+    <WorkLogDetails
+      kind={ctx.reasoningExpandedByDefault ? "full-text" : "text"}
+      followLive={!ctx.reasoningExpandedByDefault && entries.some(isStreaming)}
+    >
       {entries.map((entry) => (
         <ChatMarkdown
           key={entry.id}
@@ -155,7 +158,10 @@ export const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: WorkEn
   const childThreadId =
     item?.type === "notification" ? notificationChildThreadId(item.source) : undefined;
   if (item?.type !== "notification" || childThreadId === undefined) {
-    return <WorkEntryLogRow {...props} />;
+    // Client settings hydrate after mount, and a reasoning row seeds its disclosure from them.
+    const seedKey =
+      props.workEntry.itemType === "reasoning" ? String(ctx.reasoningExpandedByDefault) : undefined;
+    return <WorkEntryLogRow key={seedKey} {...props} />;
   }
   return (
     <SubagentNotificationLink
@@ -186,11 +192,19 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       ? notificationChildThreadId(workEntry.projectedItem.item.source)
       : undefined;
   const groupView = use(WorkGroupViewCtx);
-  const [expanded, setExpanded] = useState(
-    () => groupView?.state.expandedEntries.has(workEntry.id) ?? false,
+  const { collapsedEntries } = ctx.workGroupViewState;
+  const opensByDefault = ctx.reasoningExpandedByDefault && workEntry.itemType === "reasoning";
+  const [expanded, setExpanded] = useState(() =>
+    opensByDefault
+      ? !collapsedEntries.has(workEntry.id)
+      : (groupView?.state.expandedEntries.has(workEntry.id) ?? false),
   );
   const toggleExpanded = () => {
     const next = !expanded;
+    if (opensByDefault) {
+      if (next) collapsedEntries.delete(workEntry.id);
+      else collapsedEntries.add(workEntry.id);
+    }
     if (groupView) {
       groupView.onToggleEntry(!next);
       if (next) groupView.state.expandedEntries.add(workEntry.id);

@@ -73,6 +73,18 @@ describe("searchSettings", () => {
     }
   });
 
+  it.each(["expand reasoning", "reasoning", "thinking timeline", "work groups"])(
+    "finds the reasoning expansion setting for %s",
+    (query) => {
+      expect(searchSettings(query).map((item) => item.id)).toContain(
+        "reasoning-expanded-by-default",
+      );
+      expect(
+        searchSettings(query).find((item) => item.id === "reasoning-expanded-by-default"),
+      ).toMatchObject({ title: "Expand reasoning by default", to: "/settings/appearance" });
+    },
+  );
+
   it("hides the Secrets page from nav and search while the secrets feature is disabled", () => {
     expect(SETTINGS_NAV_GROUPS.flatMap((group) => group.paths)).not.toContain("/settings/secrets");
     expect(searchSettings("1password").map((item) => item.to)).not.toContain("/settings/secrets");

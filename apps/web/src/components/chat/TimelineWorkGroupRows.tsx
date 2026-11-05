@@ -133,7 +133,11 @@ function ExpandedWorkGroupEntries({
   entries: TimelineWorkEntry[];
   workspaceRoot: string | undefined;
 }) {
-  const { workGroupViewState: viewState, onToggleWorkEntry } = use(TimelineRowCtx);
+  const {
+    workGroupViewState: viewState,
+    onToggleWorkEntry,
+    reasoningExpandedByDefault,
+  } = use(TimelineRowCtx);
   const [initialScrollIndex] = useState(() =>
     resolveWorkGroupScrollIndex(entries, viewState.scrollPositions.get(anchorKey)),
   );
@@ -218,7 +222,14 @@ function ExpandedWorkGroupEntries({
   const updateExpandedContentHeight = () => {
     const state = listRef.current?.getState();
     let height = 0;
-    for (const entryId of viewState.expandedEntries) {
+    const openByDefault = reasoningExpandedByDefault
+      ? entries.flatMap((entry) =>
+          entry.itemType === "reasoning" && !viewState.collapsedEntries.has(entry.id)
+            ? [entry.id]
+            : [],
+        )
+      : [];
+    for (const entryId of new Set([...viewState.expandedEntries, ...openByDefault])) {
       if (state?.indexByKey(entryId) === undefined) continue;
       height += Math.max(
         0,
@@ -517,7 +528,17 @@ export function LiveWorkEntryTimelineRow({
           : undefined
       }
       aria-expanded={row.expanded}
-      onClick={() => ctx.onToggleWorkGroup(row.groupId, row.id)}
+      onClick={() => {
+        // A live group that settles into one reasoning row hands its collapse to that row.
+        if (ctx.reasoningExpandedByDefault) {
+          for (const { id, itemType } of row.groupedEntries) {
+            if (itemType !== "reasoning") continue;
+            if (row.expanded) ctx.workGroupViewState.collapsedEntries.add(id);
+            else ctx.workGroupViewState.collapsedEntries.delete(id);
+          }
+        }
+        ctx.onToggleWorkGroup(row.groupId, row.id);
+      }}
     >
       {thoughtLine ? (
         <WorkLogRow
