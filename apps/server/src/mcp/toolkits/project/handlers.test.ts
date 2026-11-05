@@ -37,6 +37,7 @@ import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { liveThreadShell } from "../../McpToolAccess.testkit.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -113,11 +114,30 @@ it.effect("attributes a launched thread and its first message to the calling thr
     expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
     expect(launchedSender).toBe(sourceThreadId);
     expect(launchedOpener).toBe(sourceThreadId);
+
+    // A caller at full access may name another opener; the message stays its own.
+    const namedOpener = ThreadId.make("named-opener");
+    yield* toolkit
+      .handle("t3_thread_launch", {
+        title: "Audit",
+        message: "Review the change",
+        openedByThreadId: namedOpener,
+      })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+    expect(launchedSender).toBe(sourceThreadId);
+    expect(launchedOpener).toBe(namedOpener);
   }),
 );
 
 const clientLaunchHarness = (input: {
-  readonly runtimeModeCeiling: RuntimeMode;
+  readonly runtimeModeCeiling: McpInvocationContext.McpClientCaller["access"];
+  readonly narrowedTo?: McpInvocationContext.ClientModes;
+  /** Calls as this thread's agent instead of as an outside client. */
+  readonly callerThread?: OrchestrationV2ThreadShell;
+  /** Threads the environment already has, such as an opener. */
+  readonly threads?: ReadonlyArray<OrchestrationV2ThreadShell>;
+  /** Gets one entry per Scratch project a launch asks for. */
+  readonly scratchProjects?: Array<ProjectId>;
   readonly defaultRuntimeMode?: RuntimeMode;
   readonly fallbackModel?: ModelSelection;
   readonly providers?: readonly ServerProvider[];
@@ -129,6 +149,8 @@ const clientLaunchHarness = (input: {
   readonly hostedAppUrl?: string;
   /** The orchestrator refuses the new thread's mode, as under a managed ceiling. */
   readonly refusedByCeiling?: true;
+  /** The thread is claimed, then a tag dispatch fails, so the launch fails with its thread live. */
+  readonly diesOnTag?: boolean;
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = {
@@ -160,19 +182,34 @@ const clientLaunchHarness = (input: {
     Layer.succeed(McpInvocationContext.McpInvocationContext, {
       environmentId: EnvironmentId.make("environment"),
       requestNamespace: "client:session-1",
-      thread: undefined,
-      client: {
-        sessionId: "session-1",
-        label: "Claude Code",
-        access: input.runtimeModeCeiling,
-        hostedAppUrl: input.hostedAppUrl,
-      },
+      thread:
+        input.callerThread === undefined
+          ? undefined
+          : {
+              threadId: input.callerThread.id,
+              providerSessionId: "session",
+              providerInstanceId: input.callerThread.providerInstanceId,
+            },
+      client:
+        input.callerThread === undefined
+          ? {
+              sessionId: "session-1",
+              label: "Claude Code",
+              access: input.runtimeModeCeiling,
+              hostedAppUrl: input.hostedAppUrl,
+              narrowedTo: input.narrowedTo,
+            }
+          : undefined,
       issuedAt: 0,
       capabilities: new Set(["orchestration" as const]),
     }),
     Layer.mock(ThreadManagement.ThreadManagementService)({
       // A thread exists once a launch started it.
       getThreadShell: (threadId) => {
+        const existing = [...(input.threads ?? []), input.callerThread].find(
+          (candidate) => candidate?.id === threadId,
+        );
+        if (existing !== undefined) return Effect.succeed(existing);
         const launch = input.launched.find((candidate) => candidate.threadId === threadId);
         return Effect.succeed(
           launch === undefined
@@ -190,6 +227,16 @@ const clientLaunchHarness = (input: {
       checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),
       launch: (launch) => {
         input.launched.push(launch);
+        if (input.diesOnTag) {
+          return Effect.fail(
+            new ThreadLaunch.ThreadLaunchError({
+              operation: "update-thread",
+              commandId: launch.commandId,
+              projectId: launch.projectId,
+              cause: "The tag dispatch failed.",
+            }),
+          );
+        }
         if (input.refusedByCeiling) {
           return Effect.fail(
             new ThreadLaunch.ThreadLaunchError({
@@ -235,7 +282,13 @@ const clientLaunchHarness = (input: {
         ),
     }),
     Layer.mock(PeerForwarding.PeerForwarding)({}),
-    Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
+    Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+      namedProjectsRoot: "/projects",
+      ensureScratchProject: Effect.sync(() => {
+        input.scratchProjects?.push(projectId);
+        return { projectId };
+      }),
+    }),
     DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer)),
   ).pipe(
     Layer.provideMerge(GitVcsDriver.layer),
@@ -302,12 +355,15 @@ it.effect(
       expect(belowCeiling.launched[0]?.runtimeMode).toBe("approval-required");
       expect(belowCeiling.launched[0]?.initialMessage?.senderThreadId).toBeUndefined();
       expect(belowCeiling.launched[0]?.openedByThreadId).toBeUndefined();
+      expect(belowCeiling.launched[0]).not.toHaveProperty("tags");
 
       const aboveCeiling = yield* launchWith("auto-accept-edits", "full-access", {
         title: "Fix",
         hostedAppUrl: "https://t3.example.com",
       });
       expect(aboveCeiling.launched[0]?.runtimeMode).toBe("auto-accept-edits");
+      expect(aboveCeiling.launched[0]).not.toHaveProperty("openedByThreadId");
+      expect(aboveCeiling.launched[0]).not.toHaveProperty("tags");
       expect(aboveCeiling.result).toMatchObject({
         link: `https://t3.example.com/threads/environment/${encodeURIComponent(aboveCeiling.launched[0]?.threadId ?? "")}`,
       });
@@ -351,6 +407,286 @@ it.effect(
         message: "Example Corp limits threads to Supervised.",
       });
     }),
+);
+
+/** One launch through the real tool, parameter decoding included. */
+const launchAs = Effect.fn("test.launchAs")(function* (
+  session: Pick<
+    Parameters<typeof clientLaunchHarness>[0],
+    "runtimeModeCeiling" | "narrowedTo" | "callerThread" | "threads" | "diesOnTag"
+  >,
+  params: {
+    readonly openedByThreadId?: string;
+    readonly tags?: ReadonlyArray<string>;
+    readonly scratch?: true;
+    readonly clientRequestId?: string;
+  },
+  /** Shared by the attempts of one retried launch, so its thread is live on the second. */
+  launched: Array<ThreadLaunch.ThreadLaunchInput> = [],
+) {
+  const scratchProjects: Array<ProjectId> = [];
+  const { projectId, dependencies } = clientLaunchHarness({
+    ...session,
+    launched,
+    scratchProjects,
+  });
+  const toolkit = yield* ProjectToolkit.pipe(
+    Effect.provide(
+      McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+    ),
+  );
+  const parts = yield* toolkit
+    .handle("t3_thread_launch", {
+      title: "Mate",
+      message: "Do the work",
+      ...(params.scratch === true ? {} : { projectId }),
+      ...params,
+    } as never)
+    .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+  const last = parts.at(-1);
+  return { result: last?.result, failureOrigin: last?.failureOrigin, launched, scratchProjects };
+});
+
+const narrowed = { runtimeMode: "auto", interactionMode: "default" } as const;
+const captain = liveThreadShell(ThreadId.make("thread:captain"));
+
+it.effect.each([
+  { name: "auto", mode: "auto", session: { runtimeModeCeiling: "auto" } },
+  {
+    name: "auto-accept-edits",
+    mode: "auto-accept-edits",
+    session: { runtimeModeCeiling: "auto-accept-edits" },
+  },
+  {
+    name: "approval-required",
+    mode: "approval-required",
+    session: { runtimeModeCeiling: "approval-required" },
+  },
+  {
+    name: "narrowed",
+    mode: "auto",
+    session: { runtimeModeCeiling: "full-access", narrowedTo: narrowed },
+  },
+  {
+    name: "a thread at auto",
+    mode: "auto",
+    session: {
+      runtimeModeCeiling: "full-access",
+      callerThread: liveThreadShell(ThreadId.make("thread:auto"), { runtimeMode: "auto" }),
+    },
+  },
+] as const)(
+  "refuses an opener or tags below full access and creates nothing: $name",
+  ({ session, mode }) =>
+    Effect.gen(function* () {
+      for (const fields of [
+        { openedByThreadId: captain.id },
+        { tags: ["group:fleet"] },
+        { openedByThreadId: captain.id, tags: ["group:fleet"] },
+        { tags: [] },
+      ]) {
+        // Scratch creates its project first, so it shows a check that came too late.
+        const { result, launched, scratchProjects } = yield* launchAs(
+          { ...session, threads: [captain] },
+          { ...fields, scratch: true },
+        );
+        expect(result, JSON.stringify(fields)).toMatchObject({
+          code: "runtime_mode_escalation_denied",
+          message: `Naming an opener or tags needs full access; this caller has ${mode}`,
+        });
+        expect(launched).toEqual([]);
+        expect(scratchProjects).toEqual([]);
+      }
+    }),
+);
+
+it.effect("refuses a read-only client naming an opener or tags and creates nothing", () =>
+  Effect.gen(function* () {
+    for (const fields of [{ openedByThreadId: captain.id }, { tags: ["group:fleet"] }]) {
+      const { result, launched, scratchProjects } = yield* launchAs(
+        { runtimeModeCeiling: "read-only", threads: [captain] },
+        { ...fields, scratch: true },
+      );
+      expect(result).toMatchObject({ code: "capability_denied" });
+      expect(launched).toEqual([]);
+      expect(scratchProjects).toEqual([]);
+    }
+  }),
+);
+
+it.effect("refuses an opener that does not resolve and creates nothing", () =>
+  Effect.gen(function* () {
+    const deleted = {
+      ...liveThreadShell(ThreadId.make("thread:deleted")),
+      deletedAt: captain.updatedAt,
+    };
+    for (const openedByThreadId of [ThreadId.make("thread:unknown"), deleted.id]) {
+      const { result, launched, scratchProjects } = yield* launchAs(
+        { runtimeModeCeiling: "full-access", threads: [deleted] },
+        { openedByThreadId, scratch: true },
+      );
+      expect(result).toMatchObject({ code: "thread_not_found" });
+      expect(launched).toEqual([]);
+      expect(scratchProjects).toEqual([]);
+    }
+  }),
+);
+
+it.effect("refuses a tag or tag list the schema does not allow and creates nothing", () =>
+  Effect.gen(function* () {
+    for (const tags of [
+      ["x".repeat(65)],
+      ["group:\nfleet"],
+      ["group:\u0000fleet"],
+      ["group:\ud800"],
+      ["   "],
+      Array.from({ length: 17 }, (_, index) => `tag-${index}`),
+    ]) {
+      const { failureOrigin, launched, scratchProjects } = yield* launchAs(
+        { runtimeModeCeiling: "full-access" },
+        { tags, scratch: true },
+      );
+      expect(failureOrigin, JSON.stringify(tags)).toBe("parameters");
+      expect(launched).toEqual([]);
+      expect(scratchProjects).toEqual([]);
+    }
+  }),
+);
+
+it.effect("records a named opener and tags from a full-access outside session", () =>
+  Effect.gen(function* () {
+    const atLimit = Array.from({ length: 16 }, (_, index) => `${index}`.padEnd(64, "x"));
+    const { result, launched } = yield* launchAs(
+      { runtimeModeCeiling: "full-access", threads: [captain] },
+      { openedByThreadId: captain.id, tags: atLimit },
+    );
+    expect(result).toMatchObject({ threadId: launched[0]?.threadId });
+    expect(launched).toHaveLength(1);
+    expect(launched[0]?.openedByThreadId).toBe(captain.id);
+    expect(launched[0]?.tags).toEqual(atLimit);
+    expect(launched[0]?.initialMessage?.senderThreadId).toBeUndefined();
+  }),
+);
+
+it.effect("lets a full-access session in plan mode name an opener and tags", () =>
+  Effect.gen(function* () {
+    const { result, launched } = yield* launchAs(
+      {
+        runtimeModeCeiling: "full-access",
+        narrowedTo: { runtimeMode: "full-access", interactionMode: "plan" },
+        threads: [captain],
+      },
+      { openedByThreadId: captain.id, tags: ["group:fleet"] },
+    );
+    expect(result).toMatchObject({ threadId: launched[0]?.threadId });
+    expect(launched[0]).toMatchObject({
+      openedByThreadId: captain.id,
+      tags: ["group:fleet"],
+      runtimeMode: "full-access",
+      interactionMode: "plan",
+    });
+  }),
+);
+
+const deletedCaptain = { ...captain, deletedAt: captain.updatedAt };
+
+it.effect.each([
+  { name: "an accepted launch whose reply was lost", diesOnTag: false },
+  { name: "a launch that died on a tag", diesOnTag: true },
+] as const)("a retry of $name survives its opener being deleted", ({ diesOnTag }) =>
+  Effect.gen(function* () {
+    const params = {
+      openedByThreadId: captain.id,
+      tags: ["group:fleet"],
+      clientRequestId: "launch-once",
+    };
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const first = yield* launchAs(
+      { runtimeModeCeiling: "full-access", threads: [captain], diesOnTag },
+      params,
+      launched,
+    );
+    expect(first.result).toMatchObject(diesOnTag ? { code: "orchestration_error" } : {});
+
+    const retried = yield* launchAs(
+      { runtimeModeCeiling: "full-access", threads: [deletedCaptain] },
+      params,
+      launched,
+    );
+    // The same command again, so the launch service replays it rather than starting a thread.
+    expect(retried.result).toMatchObject({ threadId: launched[0]?.threadId });
+    expect(launched).toHaveLength(2);
+    expect(launched[1]?.commandId).toBe(launched[0]?.commandId);
+    expect(launched[1]?.tags).toEqual(["group:fleet"]);
+  }),
+);
+
+it.effect("a retry with no live thread of its own still answers for its opener", () =>
+  Effect.gen(function* () {
+    const { result, launched, scratchProjects } = yield* launchAs(
+      { runtimeModeCeiling: "full-access", threads: [deletedCaptain] },
+      { openedByThreadId: captain.id, clientRequestId: "launch-never-landed", scratch: true },
+    );
+    expect(result).toMatchObject({ code: "thread_not_found" });
+    expect(launched).toEqual([]);
+    expect(scratchProjects).toEqual([]);
+
+    // Whatever the retry finds, the mode answers first.
+    const retried: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    yield* launchAs(
+      { runtimeModeCeiling: "full-access", threads: [captain] },
+      { openedByThreadId: captain.id, clientRequestId: "launch-once" },
+      retried,
+    );
+    const below = yield* launchAs(
+      { runtimeModeCeiling: "auto", threads: [deletedCaptain] },
+      { openedByThreadId: captain.id, clientRequestId: "launch-once" },
+      retried,
+    );
+    expect(below.result).toMatchObject({ code: "runtime_mode_escalation_denied" });
+    expect(retried).toHaveLength(1);
+  }),
+);
+
+it.effect("forwards an opener and tags for the linked environment to check", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const forwarded: Array<unknown> = [];
+    const harness = clientLaunchHarness({ runtimeModeCeiling: "full-access", launched });
+    const dependencies = Layer.merge(
+      harness.dependencies,
+      Layer.mock(PeerForwarding.PeerForwarding)({
+        call: (_scope, _tool, _target, params) =>
+          Effect.sync(() => {
+            forwarded.push(params);
+            return {
+              threadId: "thread:there",
+              projectId: harness.projectId,
+              modelSelection: harness.modelSelection,
+              runId: null,
+              status: null,
+            } as never;
+          }),
+      }),
+    );
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    // The opener lives there, so this side cannot resolve it.
+    const params = {
+      projectId: harness.projectId,
+      title: "Mate",
+      openedByThreadId: ThreadId.make("thread:only-there"),
+      tags: ["group:fleet"],
+    };
+    yield* toolkit
+      .handle("t3_thread_launch", { ...params, environmentId: EnvironmentId.make("there") })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(forwarded).toEqual([expect.objectContaining(params)]);
+    expect(launched).toEqual([]);
+  }),
 );
 
 it.effect("a launch steps an inherited mode down to the provider's, and refuses one it lacks", () =>

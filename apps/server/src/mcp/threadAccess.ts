@@ -120,6 +120,18 @@ export const assertTargetWithinLimits = (
     Effect.asVoid,
   );
 
+/** Naming a launch's opener or changing tags: the runtime mode decides, so plan mode passes. */
+export const assertMayNameOpenerOrTags = (limits: CallerLimits) =>
+  resolveRuntimeMode(limits.runtimeMode, "full-access").pipe(
+    Effect.mapError(
+      () =>
+        new OrchestratorMcpFailure({
+          code: "runtime_mode_escalation_denied",
+          message: `Naming an opener or tags needs full access; this caller has ${limits.runtimeMode}`,
+        }),
+    ),
+  );
+
 /** Background subagents retain credentials until provider exit; archived threads and other instances cannot act. */
 export const isLiveCallerShell = (
   shell: Pick<

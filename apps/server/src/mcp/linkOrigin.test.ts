@@ -6,6 +6,7 @@ import {
   CommandId,
   ContextTransferId,
   EnvironmentId,
+  MessageId,
   NodeId,
   type OrchestrationV2Run,
   ProjectId,
@@ -216,6 +217,8 @@ const laptop = clientScope("laptop", true, "auto");
 const desk = clientScope("desk", true, "auto");
 const trusted = clientScope("trusted", true, "full-access");
 const claudeCode = clientScope("claude-code", false, "full-access");
+const supervised = clientScope("supervised", false, "auto");
+const readOnly = clientScope("read-only", false, "read-only");
 
 const call = (
   scope: McpInvocationContext.McpInvocationScope,
@@ -380,6 +383,174 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
       // Reads are not fenced.
       const read = yield* call(laptop, "t3_thread_read", { threadId: users });
       assert.equal(read.isError, false);
+    }),
+  );
+
+  it.effect("tags a thread only at full access, and never across a fence", () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const users = yield* usersOwnThread;
+      const ownLaunch = yield* launch(laptop, "The laptop's, untagged");
+      const tagsOf = (threadId: ThreadId) =>
+        projections.getThreadShell(threadId).pipe(Effect.map((shell) => shell?.tags ?? []));
+      const before = yield* tagsOf(users);
+      const tag = (scope: McpInvocationContext.McpInvocationScope, threadId: ThreadId) =>
+        call(scope, "t3_thread_update", { threadId, action: "tag", addTags: ["group:fenced"] });
+      const narrowed = {
+        ...claudeCode,
+        client: {
+          ...claudeCode.client!,
+          narrowedTo: { runtimeMode: "auto", interactionMode: "default" },
+        },
+      } as const;
+
+      // The fence answers first: a link below full access is told so, not told its mode.
+      assert.equal(failureCode(yield* tag(laptop, users)), "capability_denied");
+      assert.equal(failureCode(yield* tag(desk, ownLaunch)), "capability_denied");
+      // Inside its fence, or with no fence at all, the mode still decides.
+      assert.equal(failureCode(yield* tag(laptop, ownLaunch)), "runtime_mode_escalation_denied");
+      assert.equal(failureCode(yield* tag(supervised, users)), "runtime_mode_escalation_denied");
+      assert.equal(failureCode(yield* tag(narrowed, users)), "runtime_mode_escalation_denied");
+      assert.equal(failureCode(yield* tag(readOnly, users)), "capability_denied");
+      assert.deepEqual(yield* tagsOf(users), before);
+      assert.deepEqual(yield* tagsOf(ownLaunch), []);
+
+      // A field that does not fit the action fails on the decode a real call goes through.
+      for (const args of [
+        { action: "rename", title: "New", addTags: ["group:fenced"] },
+        { action: "regenerate_title", removeTags: ["group:fenced"] },
+        { action: "tag", title: "New", addTags: ["group:fenced"] },
+        { action: "tag", addTags: [] },
+        { action: "tag", addTags: ["x".repeat(65)] },
+      ]) {
+        const refused = yield* call(claudeCode, "t3_thread_update", {
+          threadId: users,
+          ...args,
+        }).pipe(Effect.flip);
+        assert.instanceOf(refused, McpSchema.InvalidParams, JSON.stringify(args));
+      }
+      assert.deepEqual(yield* tagsOf(users), before);
+
+      // A thread's own modes decide for an agent inside it.
+      const runningAt = (id: string, runtimeMode: "auto" | "full-access") =>
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const threadId = ThreadId.make(id);
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`create:${id}`),
+            threadId,
+            projectId,
+            title: id,
+            modelSelection: { instanceId, model: "gpt-5" },
+            runtimeMode,
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`message:${id}`),
+            threadId,
+            messageId: MessageId.make(`message:${id}`),
+            text: "Work",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          return threadId;
+        });
+      const asThread = (threadId: ThreadId): McpInvocationContext.McpInvocationScope => ({
+        ...claudeCode,
+        requestNamespace: `provider:${threadId}`,
+        thread: {
+          threadId,
+          providerSessionId: `provider:${threadId}`,
+          providerInstanceId: instanceId,
+        },
+        client: undefined,
+      });
+      const atAuto = yield* runningAt("thread:tagging-at-auto", "auto");
+      const refused = yield* tag(asThread(atAuto), atAuto);
+      assert.equal(failureCode(refused), "runtime_mode_escalation_denied");
+      assert.include(
+        JSON.stringify(refused.content),
+        "Naming an opener or tags needs full access; this caller has auto",
+      );
+      assert.deepEqual(yield* tagsOf(atAuto), []);
+      const atFullAccess = yield* runningAt("thread:tagging-at-full-access", "full-access");
+      const taggedOwn = yield* tag(asThread(atFullAccess), atFullAccess);
+      assert.equal(taggedOwn.isError, false, JSON.stringify(taggedOwn.content));
+      assert.deepEqual(yield* tagsOf(atFullAccess), ["group:fenced"]);
+
+      // Full access is not fenced.
+      const tagged = yield* tag(trusted, users);
+      assert.equal(tagged.isError, false, JSON.stringify(tagged.content));
+      assert.include(
+        (tagged.structuredContent as { readonly tags: ReadonlyArray<string> }).tags,
+        "group:fenced",
+      );
+      assert.include(yield* tagsOf(users), "group:fenced");
+    }),
+  );
+
+  it.effect("list and read show an opener and tags, and no such key where there are none", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const opener = yield* usersOwnThread;
+      const threadId = ThreadId.make("thread:opened-and-tagged");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create:opened-and-tagged"),
+        threadId,
+        projectId,
+        title: "Opened and tagged",
+        modelSelection: { instanceId, model: "gpt-5" },
+        runtimeMode: "auto",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        openedByThreadId: opener,
+        createdBy: "agent",
+        creationSource: "mcp",
+      });
+      const tagged = yield* call(claudeCode, "t3_thread_update", {
+        threadId,
+        action: "tag",
+        addTags: ["group:listed"],
+      });
+      assert.equal(tagged.isError, false, JSON.stringify(tagged.content));
+      const plain = yield* launch(claudeCode, "Plain and untagged");
+
+      const listed = (titleContains: string) =>
+        call(claudeCode, "t3_thread_list", { projectId, titleContains }).pipe(
+          Effect.map(
+            (result) =>
+              (
+                result.structuredContent as {
+                  readonly threads: ReadonlyArray<Record<string, unknown>>;
+                }
+              ).threads[0],
+          ),
+        );
+      const read = (id: ThreadId) =>
+        call(claudeCode, "t3_thread_read", { threadId: id }).pipe(
+          Effect.map(
+            (result) =>
+              (result.structuredContent as { readonly thread: Record<string, unknown> }).thread,
+          ),
+        );
+      for (const shown of [yield* listed("Opened and tagged"), yield* read(threadId)]) {
+        assert.equal(shown?.openedByThreadId, opener);
+        assert.deepEqual(shown?.tags, ["group:listed"]);
+      }
+      for (const shown of [yield* listed("Plain and untagged"), yield* read(plain)]) {
+        assert.notProperty(shown, "openedByThreadId");
+        assert.notProperty(shown, "tags");
+      }
     }),
   );
 

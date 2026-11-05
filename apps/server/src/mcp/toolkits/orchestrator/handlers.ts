@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../../../peer/PeerLinks.ts";
-import { readCaller } from "../../threadAccess.ts";
+import { assertMayNameOpenerOrTags, readCaller } from "../../threadAccess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
@@ -165,6 +165,10 @@ const handlers = {
       Effect.gen(function* () {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const service = yield* ThreadMetadataMcpService.ThreadMetadataMcpService;
+        if (input.action === "tag") {
+          const { limits } = yield* readCaller();
+          yield* assertMayNameOpenerOrTags(limits);
+        }
         return yield* service.update(scope, input);
       }),
   ),

@@ -62,7 +62,9 @@ function commandId(input: {
 function metadataCommand(input: {
   readonly commandId: CommandId;
   readonly threadId: ThreadId;
-  readonly update: ThreadMetadataMcpUpdateInput;
+  readonly update: ThreadMetadataMcpUpdateInput & {
+    readonly action: Exclude<ThreadMetadataMcpAction, "tag">;
+  };
 }): Extract<OrchestrationV2Command, { readonly type: "thread.metadata.update" }> {
   switch (input.update.action) {
     case "rename":
@@ -80,6 +82,26 @@ function metadataCommand(input: {
         regenerateTitle: true,
       };
   }
+}
+
+/** Only real changes: the orchestrator emits an event for every tag command, even one that changes nothing. */
+function tagCommands(input: {
+  readonly commandId: CommandId;
+  readonly threadId: ThreadId;
+  readonly current: ReadonlyArray<string>;
+  readonly update: ThreadMetadataMcpUpdateInput;
+}): ReadonlyArray<Extract<OrchestrationV2Command, { readonly type: "thread.tag.set" }>> {
+  const changes = (tags: ReadonlyArray<string> | undefined, tagged: boolean) =>
+    [...new Set(tags)]
+      .filter((tag) => input.current.includes(tag) !== tagged)
+      .map((tag) => ({
+        type: "thread.tag.set" as const,
+        commandId: CommandId.make(`${input.commandId}:${tagged ? "add" : "remove"}:${tag}`),
+        threadId: input.threadId,
+        tag,
+        tagged,
+      }));
+  return [...changes(input.update.addTags, true), ...changes(input.update.removeTags, false)];
 }
 
 function resultFromThread(input: {
@@ -152,12 +174,53 @@ const make = Effect.gen(function* () {
       action: input.action,
       requestKey,
     });
+    if (input.action === "tag") {
+      const commands = tagCommands({
+        commandId: updateCommandId,
+        threadId,
+        current: shell.tags ?? [],
+        update: input,
+      });
+      // 0 when nothing changed, so nothing was committed.
+      let sequence = 0;
+      for (const command of commands) {
+        const tagged = yield* threadManagement
+          .dispatch(command)
+          .pipe(
+            Effect.mapError((error) =>
+              failure(
+                "orchestration_error",
+                `Unable to set tag ${command.tag} on thread ${threadId}: ${errorMessage(error)}`,
+              ),
+            ),
+          );
+        sequence = tagged.sequence;
+      }
+      const thread = yield* threadManagement
+        .getThreadShell(threadId)
+        .pipe(Effect.mapError((error) => failure("orchestration_error", errorMessage(error))));
+      if (thread === null) {
+        return yield* failure(
+          "orchestration_error",
+          `Thread ${threadId} tag update completed without a resultant state.`,
+        );
+      }
+      return {
+        ...resultFromThread({
+          action: input.action,
+          commandId: updateCommandId,
+          sequence,
+          thread,
+        }),
+        tags: thread.tags ?? [],
+      };
+    }
     const dispatched = yield* threadManagement
       .dispatch(
         metadataCommand({
           commandId: updateCommandId,
           threadId,
-          update: input,
+          update: { ...input, action: input.action },
         }),
       )
       .pipe(

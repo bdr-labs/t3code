@@ -20,6 +20,7 @@ import {
   type RuntimeMode,
   type ScheduledTaskId,
   ThreadId,
+  type ThreadTag,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -91,6 +92,7 @@ export interface ThreadLaunchInput {
   readonly initialMessage?: ThreadLaunchInitialMessage;
   /** Thread whose agent launched this one, recorded on the new thread. */
   readonly openedByThreadId?: ThreadId;
+  readonly tags?: ReadonlyArray<ThreadTag>;
   readonly importedNativeThread?: {
     readonly ref: {
       readonly driver: ProviderDriverKind;
@@ -970,6 +972,25 @@ const make = Effect.gen(function* () {
             .threadId ?? candidateThreadId;
         if (project.id !== input.projectId) {
           return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
+        }
+        // Before the first message, so no turn starts on a thread without its tags. Every tag
+        // command emits an event, even one that changes nothing, so send only what is missing.
+        if (input.tags !== undefined && input.tags.length > 0) {
+          const shell = yield* threads
+            .getThreadShell(threadId)
+            .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
+          for (const tag of new Set(input.tags)) {
+            if (shell?.tags?.includes(tag)) continue;
+            yield* threads
+              .dispatch({
+                type: "thread.tag.set",
+                commandId: CommandId.make(`${input.commandId}:tag:${tag}`),
+                threadId,
+                tag,
+                tagged: true,
+              })
+              .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
+          }
         }
         let runId: RunId | null = null;
         let messageSequence: number | undefined;

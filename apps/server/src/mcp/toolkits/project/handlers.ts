@@ -29,7 +29,14 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
-import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
+import {
+  assertMayNameOpenerOrTags,
+  newCommandId,
+  readCaller,
+  resolveProjectId,
+  threadNotFound,
+  unavailable,
+} from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
@@ -89,6 +96,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const context = yield* readCaller();
         const { caller } = context;
+        // First of all: a Scratch launch below creates its project before it creates a thread.
+        if (input.openedByThreadId !== undefined || input.tags !== undefined) {
+          yield* assertMayNameOpenerOrTags(context.limits);
+        }
         // A retry with the same key replays the first launch: the ids derive
         // from the caller and the key, and the launch service replays a
         // command it already accepted.
@@ -98,6 +109,26 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             : yield* launchCommandId(scope.requestNamespace, input.clientRequestId);
         const threadId = ThreadId.make(commandId);
         const messageId = MessageId.make(commandId);
+        if (input.openedByThreadId !== undefined) {
+          // A replay cannot change the opener its thread stored, and that opener may be gone now.
+          const replayed =
+            input.clientRequestId === undefined
+              ? null
+              : yield* context.threads.getThreadShell(threadId).pipe(Effect.mapError(unavailable));
+          if (replayed === null || replayed.deletedAt !== null) {
+            const opener = yield* context.threads
+              .getThreadShell(input.openedByThreadId)
+              .pipe(Effect.mapError(unavailable));
+            if (opener === null || opener.deletedAt !== null) {
+              return yield* threadNotFound(
+                context.threads,
+                input.openedByThreadId,
+                "The opener thread was not found.",
+              );
+            }
+          }
+        }
+        const openedByThreadId = input.openedByThreadId ?? caller?.id;
         const attachments = input.attachments ?? [];
         if (attachments.some((attachment) => !Claims.attachmentIsPendingUpload(attachment)))
           return yield* new OrchestratorMcpFailure({
@@ -242,7 +273,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   attachments,
                 },
               }),
-          ...(caller === undefined ? {} : { openedByThreadId: caller.id }),
+          ...(openedByThreadId === undefined ? {} : { openedByThreadId }),
+          ...(input.tags === undefined ? {} : { tags: input.tags }),
           createdBy: "agent",
           creationSource: "mcp",
           ...(linkOrigin === undefined ? {} : { linkOrigin }),

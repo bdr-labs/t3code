@@ -8,6 +8,10 @@ import * as FileSystem from "effect/FileSystem";
 import * as ServerConfig from "../config.ts";
 import { createPendingAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as McpToolAccess from "../mcp/McpToolAccess.ts";
+import * as ProjectHandlers from "../mcp/toolkits/project/handlers.ts";
+import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
@@ -16,6 +20,7 @@ import {
   type ChatAttachment,
   CommandId,
   DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
   GitCommandError,
   MessageId,
   ProjectId,
@@ -47,6 +52,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ScheduledTasks from "../scheduledTasks/ScheduledTaskService.ts";
@@ -295,6 +301,24 @@ function makeHarness(options: HarnessOptions = {}) {
   };
 }
 
+/** The stored-event stream tails forever, so a test that counts events reads the table. */
+const storedEventTypes = (threadId?: ThreadId) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{ readonly event_type: string }>`
+      SELECT event_type FROM orchestration_events
+      WHERE aggregate_kind = 'thread'
+        AND ${threadId === undefined ? sql`1 = 1` : sql`stream_id = ${threadId}`}
+      ORDER BY sequence
+    `;
+    return rows.map((row) => row.event_type);
+  });
+
+const tagEventCount = (threadId: ThreadId) =>
+  storedEventTypes(threadId).pipe(
+    Effect.map((types) => types.filter((type) => type === "thread.tags-updated").length),
+  );
+
 function launchInput(input: {
   readonly command: string;
   readonly thread: string;
@@ -540,6 +564,261 @@ it.effect("records the launching thread on the new thread and its shell", () => 
     assert.equal(projection.thread.openedByThreadId, openedByThreadId);
     const shell = yield* threads.getThreadShell(launched.threadId);
     assert.equal(shell?.openedByThreadId, openedByThreadId);
+    // A launch that names no tags sends no tag command.
+    assert.isUndefined(shell?.tags);
+    assert.equal(yield* tagEventCount(launched.threadId), 0);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect.each(["new", "reused"] as const)(
+  "sets a %s thread's tags before its first message, each once",
+  (target) => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const threadId = ThreadId.make(`thread:tagged-${target}`);
+      if (target === "reused") {
+        yield* threads.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`command:tagged-${target}:draft`),
+          threadId,
+          projectId,
+          title: "Draft",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        // Already there, so the launch has nothing to send for it.
+        yield* threads.dispatch({
+          type: "thread.tag.set",
+          commandId: CommandId.make(`command:tagged-${target}:draft-tag`),
+          threadId,
+          tag: "hide",
+          tagged: true,
+        });
+      }
+      const launched = yield* launches.launch({
+        ...launchInput({
+          command: `command:tagged-${target}`,
+          thread: threadId,
+          message: "Do the work",
+        }),
+        ...(target === "reused" ? { reuseExistingThread: true } : {}),
+        tags: ["group:fleet", "hide", "group:fleet"],
+      });
+      const expected = target === "reused" ? ["hide", "group:fleet"] : ["group:fleet", "hide"];
+      assert.deepEqual(launched.projection.thread.tags, expected);
+      assert.deepEqual((yield* threads.getThreadShell(threadId))?.tags, expected);
+      assert.equal(yield* tagEventCount(threadId), 2);
+      const types = yield* storedEventTypes(threadId);
+      const firstMessageEvent = types.findIndex((type) => !type.startsWith("thread."));
+      assert.isAbove(firstMessageEvent, types.lastIndexOf("thread.tags-updated"));
+      assert.equal(launched.projection.messages.length, 1);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect("a retried launch keeps one thread and sets no tag twice", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const input = {
+      ...launchInput({ command: "command:tag-retry", thread: "thread:tag-retry", message: "Go" }),
+      tags: ["group:fleet", "hide"],
+    };
+    const first = yield* launches.launch(input);
+    const retry = yield* launches.launch(input);
+    assert.equal(retry.threadId, first.threadId);
+    assert.isTrue(retry.resumed);
+    assert.deepEqual(retry.projection.thread.tags, ["group:fleet", "hide"]);
+    assert.equal(yield* tagEventCount(first.threadId), 2);
+    assert.equal(retry.projection.messages.length, 1);
+    assert.equal(
+      (yield* threads.listProjectThreads({ projectId, includeSubagents: false })).length,
+      1,
+    );
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("a retry sets the tags an earlier attempt did not reach", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const input = launchInput({
+      command: "command:tag-partial",
+      thread: "thread:tag-partial",
+      message: "Go",
+    });
+    // The earlier attempt: the thread exists and one tag landed, then the call died.
+    const { initialMessage: _unsent, ...claimOnly } = input;
+    const { threadId } = yield* launches.launch(claimOnly);
+    yield* threads.dispatch({
+      type: "thread.tag.set",
+      commandId: CommandId.make(`${input.commandId}:tag:group:fleet`),
+      threadId,
+      tag: "group:fleet",
+      tagged: true,
+    });
+
+    const retry = yield* launches.launch({ ...input, tags: ["group:fleet", "hide"] });
+    assert.deepEqual(retry.projection.thread.tags, ["group:fleet", "hide"]);
+    assert.equal(yield* tagEventCount(threadId), 2);
+    assert.equal(retry.projection.messages.length, 1);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("a tag that cannot be set fails the launch before its first message", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const input = {
+      ...launchInput({ command: "command:tag-fails", thread: "thread:tag-fails", message: "Go" }),
+      tags: ["group:fleet", "hide"],
+    };
+    // This command id is taken by another thread, so the orchestrator refuses the second tag.
+    const elsewhere = yield* launches.launch(
+      launchInput({ command: "command:tag-fails:elsewhere", thread: "thread:tag-fails:elsewhere" }),
+    );
+    yield* threads.dispatch({
+      type: "thread.pin",
+      commandId: CommandId.make(`${input.commandId}:tag:hide`),
+      threadId: elsewhere.threadId,
+    });
+
+    const failed = yield* launches.launch(input).pipe(Effect.flip);
+    if (failed._tag !== "ThreadLaunchError") {
+      assert.fail(`expected ThreadLaunchError, got ${failed._tag}`);
+    }
+    assert.equal(failed.operation, "update-thread");
+    const projection = yield* threads.getThreadProjection(ThreadId.make("thread:tag-fails"));
+    assert.deepEqual(projection.thread.tags, ["group:fleet"]);
+    assert.isEmpty(projection.messages);
+    assert.isEmpty(projection.runs);
+    assert.isEmpty(
+      yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:initial-message`)),
+    );
+  }).pipe(Effect.provide(harness.layer));
+});
+
+/** The real tool in front of the real launch service, as an outside MCP client calls it. */
+const launchOverMcp = Effect.fn("test.launchOverMcp")(function* (
+  access: McpInvocationContext.McpClientCaller["access"],
+  params: {
+    readonly openedByThreadId?: ThreadId;
+    readonly tags?: ReadonlyArray<string>;
+    readonly clientRequestId?: string;
+  },
+) {
+  const services = yield* Effect.context<
+    | ThreadLaunch.ThreadLaunchService
+    | ThreadManagement.ThreadManagementService
+    | ProjectService.ProjectService
+    | ProjectCloneTracker.ProjectCloneTracker
+    | ManagedProjectFolders.ManagedProjectFolders
+    | ServerSettings.ServerSettingsService
+    | ProviderRegistry.ProviderRegistry
+  >();
+  const dependencies = Layer.mergeAll(
+    Layer.succeedContext(services),
+    Layer.succeed(McpInvocationContext.McpInvocationContext, {
+      environmentId: EnvironmentId.make("environment"),
+      requestNamespace: "client:ship",
+      thread: undefined,
+      client: { sessionId: "ship", label: "The Ship", access },
+      issuedAt: 0,
+      capabilities: new Set(["orchestration" as const]),
+    }),
+    Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+    DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer)),
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3-launch-mcp-" }).pipe(
+      Layer.provide(NodeServices.layer),
+    ),
+    NodeCrypto.layer,
+  );
+  const toolkit = yield* ProjectToolkit.pipe(
+    Effect.provide(
+      McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+    ),
+  );
+  const parts = yield* toolkit
+    .handle("t3_thread_launch", {
+      projectId,
+      title: "Mate",
+      modelSelection,
+      runtimeMode: "approval-required",
+      message: "Do the work",
+      ...params,
+    })
+    .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+  return parts.at(-1)?.result as { readonly threadId?: ThreadId; readonly code?: string };
+});
+
+it.effect("records the opener and tags of a full-access outside session on the shell", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const captain = yield* launchOverMcp("full-access", {});
+    assert.isDefined(captain.threadId);
+    const openedByThreadId = captain.threadId!;
+    assert.isUndefined((yield* threads.getThreadShell(openedByThreadId))?.openedByThreadId);
+
+    const params = {
+      openedByThreadId,
+      tags: ["group:fleet", "hide"],
+      clientRequestId: "mate-1",
+    };
+    const mate = yield* launchOverMcp("full-access", params);
+    const shell = yield* threads.getThreadShell(mate.threadId!);
+    assert.equal(shell?.openedByThreadId, openedByThreadId);
+    assert.deepEqual(shell?.tags, ["group:fleet", "hide"]);
+
+    const retried = yield* launchOverMcp("full-access", params);
+    assert.equal(retried.threadId, mate.threadId);
+    assert.deepEqual((yield* threads.getThreadShell(mate.threadId!))?.tags, [
+      "group:fleet",
+      "hide",
+    ]);
+    assert.equal(yield* tagEventCount(mate.threadId!), 2);
+    assert.equal(
+      (yield* threads.listProjectThreads({ projectId, includeSubagents: false })).length,
+      2,
+    );
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("leaves no thread behind a refused launch", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const unknown = ThreadId.make("thread:unknown");
+    const deleted = (yield* launchOverMcp("full-access", {})).threadId!;
+    yield* threads.dispatch({
+      type: "thread.delete",
+      commandId: CommandId.make("command:delete-opener"),
+      threadId: deleted,
+    });
+    const before = yield* storedEventTypes();
+    for (const [access, params, code] of [
+      ["auto", { tags: ["group:fleet"] }, "runtime_mode_escalation_denied"],
+      ["auto", { openedByThreadId: unknown }, "runtime_mode_escalation_denied"],
+      ["read-only", { tags: ["group:fleet"] }, "capability_denied"],
+      ["full-access", { openedByThreadId: unknown }, "thread_not_found"],
+      ["full-access", { openedByThreadId: deleted }, "thread_not_found"],
+    ] as const) {
+      const refused = yield* launchOverMcp(access, params);
+      assert.equal(refused.code, code);
+    }
+    assert.isEmpty(yield* threads.listProjectThreads({ projectId, includeSubagents: false }));
+    assert.deepEqual(yield* storedEventTypes(), before);
   }).pipe(Effect.provide(harness.layer));
 });
 
