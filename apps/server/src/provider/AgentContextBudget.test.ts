@@ -130,7 +130,7 @@ it.effect("only request_secret and schedule_task ask Claude Code to load them up
 
 it("the schedule line reaches Claude and Codex whole", () => {
   const line =
-    "- Work at a set time, on a schedule or on a webhook: `schedule_task`; a provider's own timers end with its session. Asked only to schedule, do not run the prompt.";
+    "- Work at a set time, on a schedule, on a webhook or on a usage limit: `schedule_task`; a provider's own timers end with its session. Asked only to schedule, do not run the prompt.";
   expect(claudeSystemAppend()).toContain(line);
   expect(codexAdditionalContext()).toContain(line);
 });

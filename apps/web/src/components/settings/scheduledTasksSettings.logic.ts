@@ -6,6 +6,11 @@ import {
   ScheduledTaskId,
   type ScheduledTask,
   type ScheduledTaskUpsertSchedule,
+  type ScheduledTaskUsageSchedule,
+  type ServerProviderUsageWindow,
+  ProviderInstanceId,
+  resolveUsageWindow,
+  usageWindowName,
   type ModelSelection,
   type RuntimeMode,
   type ProviderInteractionMode,
@@ -52,7 +57,8 @@ export function validateScheduledTasksSearch(raw: Record<string, unknown>) {
   };
 }
 
-export type ScheduleMode = "fixed" | "once" | "interval" | "webhook";
+export type ScheduleMode = "fixed" | "once" | "interval" | "webhook" | "usage";
+export type UsageOn = ScheduledTaskUsageSchedule["on"];
 export type WorkspaceMode = "root" | "worktree" | "existing_worktree";
 
 export interface DraftState {
@@ -92,6 +98,39 @@ export interface DraftState {
   readonly filters: ReadonlyArray<WebhookFilterDraft>;
   /** The filter rows the form opened with. */
   readonly savedFilters: ReadonlyArray<WebhookFilterDraft>;
+  /** Empty means the task's model's instance. */
+  readonly usageInstanceId: string;
+  readonly usageWindow: string;
+  readonly usageOn: UsageOn;
+  readonly usagePercent: string;
+}
+
+export const USAGE_PERCENT_DEFAULT = "80";
+
+function parseUsagePercent(value: string): number | null {
+  const percent = Number(value.trim());
+  return value.trim() !== "" && Number.isInteger(percent) && percent >= 1 && percent <= 99
+    ? percent
+    : null;
+}
+
+/** What a task watches once its instance changes: the server refuses a window that one lacks. */
+export function usageWindowOnInstance(
+  windows: ReadonlyArray<ServerProviderUsageWindow>,
+  current: string,
+): string {
+  return resolveUsageWindow(windows, current) === undefined ? (windows[0]?.id ?? "") : current;
+}
+
+/** The live windows, and a stored window the instance no longer reports, so an edit can keep it. */
+export function usageWindowOptions(
+  windows: ReadonlyArray<ServerProviderUsageWindow>,
+  stored: string,
+): ReadonlyArray<{ readonly value: string; readonly label: string }> {
+  const options = windows.map((window) => ({ value: window.id, label: window.label }));
+  return stored === "" || resolveUsageWindow(windows, stored) !== undefined
+    ? options
+    : [...options, { value: stored, label: usageWindowName(windows, stored) }];
 }
 
 export const WEBHOOK_SIGNATURE_DEFAULTS = {
@@ -107,6 +146,14 @@ export function toDateTimeLocalValue(date: Date): string {
 }
 
 export function scheduleDraftErrors(draft: DraftState) {
+  if (draft.scheduleMode === "usage") {
+    const errors: Array<{ title: string; description: string }> = [];
+    if (!draft.usageWindow.trim())
+      errors.push({ title: "Pick a usage window", description: "Choose the window to watch." });
+    if (draft.usageOn !== "reset" && parseUsagePercent(draft.usagePercent) === null)
+      errors.push({ title: "Invalid percent", description: "Enter a whole number from 1 to 99." });
+    return errors;
+  }
   if (draft.scheduleMode === "once") {
     const runAt = new Date(draft.runAt);
     if (Number.isNaN(runAt.getTime()))
@@ -166,6 +213,18 @@ export function webhookDeliveryLabel(delivery: {
 
 export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedule | null {
   if (scheduleDraftErrors(draft).length > 0) return null;
+  if (draft.scheduleMode === "usage") {
+    const usedPercent = parseUsagePercent(draft.usagePercent);
+    return {
+      type: "usage",
+      ...(draft.usageInstanceId
+        ? { instanceId: ProviderInstanceId.make(draft.usageInstanceId) }
+        : {}),
+      window: draft.usageWindow.trim(),
+      on: draft.usageOn,
+      ...(draft.usageOn === "reset" || usedPercent === null ? {} : { usedPercent }),
+    };
+  }
   if (draft.scheduleMode === "once") {
     const saved = draft.savedRunAt ? new Date(draft.savedRunAt) : null;
     if (saved !== null && toDateTimeLocalValue(saved) === draft.runAt)
@@ -289,6 +348,13 @@ export function taskToDraft(task: ScheduledTask): DraftState {
         : "",
     filters,
     savedFilters: filters,
+    usageInstanceId: schedule.type === "usage" ? (schedule.instanceId ?? "") : "",
+    usageWindow: schedule.type === "usage" ? schedule.window : "",
+    usageOn: schedule.type === "usage" ? schedule.on : "reset",
+    usagePercent:
+      schedule.type === "usage" && schedule.usedPercent !== undefined
+        ? String(schedule.usedPercent)
+        : USAGE_PERCENT_DEFAULT,
   };
 }
 

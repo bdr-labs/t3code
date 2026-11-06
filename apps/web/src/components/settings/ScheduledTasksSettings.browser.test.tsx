@@ -8,6 +8,7 @@ import {
   ScheduledTaskId,
   ThreadId,
   type ScheduledTask,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
@@ -47,7 +48,62 @@ const threadFamilyRead = {
   threads: [{ id: task.threadId, title: "Fix login bug" }],
 };
 
-const state = vi.hoisted(() => ({ connected: true, tasksLoaded: true, secondary: false }));
+const codexProvider = {
+  instanceId: task.modelSelection.instanceId,
+  driver: "codex",
+  displayName: "Codex",
+  enabled: true,
+  installed: true,
+  version: null,
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: task.createdAt,
+  models: [{ slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: null }],
+  slashCommands: [],
+  skills: [],
+  usageLimits: {
+    checkedAt: task.createdAt,
+    windows: [
+      { id: "seven_day", kind: "weekly", label: "Weekly", usedPercent: 40 },
+      { id: "seven_day_opus", kind: "weekly", label: "Weekly · Opus", usedPercent: 10 },
+    ],
+  },
+} as unknown as ServerProvider;
+const otherProvider = {
+  ...codexProvider,
+  instanceId: ProviderInstanceId.make("claudeAgent"),
+  driver: "claudeAgent",
+  displayName: "Claude",
+  models: [{ slug: "fable", name: "Fable", isCustom: false, capabilities: null }],
+  usageLimits: {
+    checkedAt: task.createdAt,
+    windows: [{ id: "five_hour", kind: "session", label: "Session", usedPercent: 40 }],
+  },
+} as unknown as ServerProvider;
+const unsupportedProvider = {
+  ...codexProvider,
+  instanceId: ProviderInstanceId.make("opencode"),
+  driver: "opencode",
+  displayName: "OpenCode",
+  usageLimits: {
+    checkedAt: task.createdAt,
+    windows: [],
+    unavailable: { reason: "unsupported" },
+  },
+} as unknown as ServerProvider;
+const providersAtom = Atom.make<ReadonlyArray<ServerProvider>>([
+  codexProvider,
+  otherProvider,
+  unsupportedProvider,
+]);
+
+const state = vi.hoisted(() => ({
+  connected: true,
+  tasksLoaded: true,
+  secondary: false,
+  usageSchedule: null as ScheduledTask["schedule"] | null,
+  saved: [] as ReadonlyArray<ScheduledTask["schedule"]>,
+}));
 const secondaryId = EnvironmentId.make("secondary");
 const permissions = new Map<string, Atom.Writable<boolean>>();
 
@@ -55,6 +111,8 @@ function setup() {
   state.connected = true;
   state.tasksLoaded = true;
   state.secondary = false;
+  state.usageSchedule = null;
+  state.saved = [];
   permissions.clear();
   permissions.set(environmentId, Atom.make(true));
   permissions.set(secondaryId, Atom.make(true));
@@ -104,6 +162,7 @@ vi.mock(import("../../state/server"), async (original) => {
     ...actual,
     serverEnvironment: {
       ...actual.serverEnvironment,
+      providersValueAtom: (() => providersAtom) as never,
       upsertScheduledTask: {
         ...actual.serverEnvironment.upsertScheduledTask,
         permissionAtom: (id: string | null) => permissions.get(id ?? "")!,
@@ -125,7 +184,11 @@ vi.mock(import("../../state/query"), async (original) => ({
     data:
       request === null || request === threadFamilyRead
         ? request
-        : { tasks: state.tasksLoaded ? [task] : [] },
+        : {
+            tasks: state.tasksLoaded
+              ? [state.usageSchedule ? { ...task, schedule: state.usageSchedule } : task]
+              : [],
+          },
     error: null,
     isPending: false,
     refresh: vi.fn(),
@@ -139,6 +202,16 @@ vi.mock(import("../../state/environments"), async (original) => ({
 vi.mock(import("../../state/entities"), async (original) => ({
   ...(await original()),
   useProjects: (() => [{ id: projectId, environmentId, title: "Project" }]) as never,
+}));
+vi.mock(import("~/state/session"), async (original) => ({
+  ...(await original()),
+  readEnvironmentScope: () => true,
+}));
+vi.mock(import("../../state/use-atom-command"), () => ({
+  useAtomCommand: (() => async (call: { input: { schedule: ScheduledTask["schedule"] } }) => {
+    state.saved = [...state.saved, call.input.schedule];
+    return { _tag: "Success" };
+  }) as never,
 }));
 vi.mock(import("../../hooks/useSettings"), async (original) => ({
   ...(await original()),
@@ -214,5 +287,114 @@ describe("ScheduledTasksSettings", () => {
 
     await expect.element(dialog.getByRole("heading", { name: "New task" })).toBeInTheDocument();
     await expect.element(name).toHaveValue("My draft");
+  });
+
+  it("creates a usage task from the instance's live windows", async () => {
+    setup();
+    await using screen = await render(<ScheduledTasksSettings />);
+    await screen.getByRole("button", { name: "New task" }).click();
+    const dialog = page.getByRole("dialog");
+    await userEvent.fill(dialog.getByRole("textbox", { name: "Name" }), "Near the limit");
+    await userEvent.fill(dialog.getByRole("textbox", { name: "Prompt" }), "Wrap up");
+    await dialog.getByRole("button", { name: "On usage" }).click();
+    await expect.element(dialog.getByLabelText("Usage window")).toHaveTextContent("Weekly");
+
+    await dialog.getByLabelText("Usage window").click();
+    await page.getByRole("option", { name: "Weekly · Opus" }).click();
+    await dialog.getByRole("button", { name: "Above" }).click();
+    await userEvent.fill(dialog.getByLabelText("Percent used"), "75");
+    await dialog.getByRole("button", { name: "Create task" }).click();
+
+    await vi.waitFor(() =>
+      expect(state.saved).toEqual([
+        { type: "usage", window: "seven_day_opus", on: "above", usedPercent: 75 },
+      ]),
+    );
+  });
+
+  it("a model change moves a trigger on the task's model to that instance's windows", async () => {
+    setup();
+    state.usageSchedule = { type: "usage", window: "seven_day", on: "reset" };
+    await using _screen = await render(<ScheduledTasksSettings taskId={task.id} />);
+    const dialog = page.getByRole("dialog");
+    await expect.element(dialog.getByLabelText("Usage window")).toHaveTextContent("Weekly");
+
+    await dialog.getByRole("button", { name: "GPT-5.4" }).click();
+    await page.getByRole("button", { name: "Claude", exact: true }).click();
+    await page.getByRole("option", { name: /Fable/ }).click();
+
+    await expect.element(dialog.getByLabelText("Usage window")).toHaveTextContent("Session");
+    await dialog.getByRole("button", { name: "Save task" }).click();
+    await vi.waitFor(() =>
+      expect(state.saved).toEqual([{ type: "usage", window: "five_hour", on: "reset" }]),
+    );
+  });
+
+  it("says an instance that reports no usage cannot be watched", async () => {
+    setup();
+    state.usageSchedule = {
+      type: "usage",
+      instanceId: ProviderInstanceId.make("opencode"),
+      window: "weekly",
+      on: "reset",
+    };
+    await using _screen = await render(<ScheduledTasksSettings taskId={task.id} />);
+    await expect
+      .element(
+        page.getByRole("dialog").getByText("This provider does not report usage", { exact: false }),
+      )
+      .toBeVisible();
+  });
+
+  it.each([
+    {
+      name: "every field of a live window",
+      stored: {
+        type: "usage",
+        instanceId: ProviderInstanceId.make("codex"),
+        window: "seven_day",
+        on: "below",
+        usedPercent: 20,
+      },
+      provider: "Codex",
+      window: "Weekly",
+      pressed: "Below",
+      label: "When Weekly is below 20%",
+    },
+    {
+      name: "a kind an agent named, on the task's model",
+      stored: { type: "usage", window: "weekly", on: "reset" },
+      provider: "The task's model",
+      window: "Weekly",
+      pressed: "Renews",
+      label: "When Weekly renews",
+    },
+    {
+      name: "a window the provider no longer reports",
+      stored: { type: "usage", window: "seven_day_sonnet", on: "above", usedPercent: 80 },
+      provider: "The task's model",
+      window: "Seven day sonnet",
+      pressed: "Above",
+      label: "When Seven day sonnet is above 80%",
+    },
+  ] as const)("an edit round-trips $name, with no server state", async (row) => {
+    setup();
+    state.usageSchedule = { ...row.stored, state: { armed: false } };
+    await using screen = await render(<ScheduledTasksSettings taskId={task.id} />);
+    const dialog = page.getByRole("dialog");
+    await expect.element(dialog.getByLabelText("Provider")).toHaveTextContent(row.provider);
+    await expect.element(dialog.getByLabelText("Usage window")).toHaveTextContent(row.window);
+    await expect
+      .element(dialog.getByRole("button", { name: row.pressed }))
+      .toHaveAttribute("aria-pressed", "true");
+    if ("usedPercent" in row.stored) {
+      await expect
+        .element(dialog.getByLabelText("Percent used"))
+        .toHaveValue(row.stored.usedPercent);
+    }
+    await expect.element(screen.getByText(row.label, { exact: false })).toBeInTheDocument();
+
+    await dialog.getByRole("button", { name: "Save task" }).click();
+    await vi.waitFor(() => expect(state.saved).toEqual([row.stored]));
   });
 });

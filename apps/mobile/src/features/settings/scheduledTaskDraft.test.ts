@@ -5,13 +5,45 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProjectId,
+  type ScheduledTask,
 } from "@t3tools/contracts";
 import {
   scheduledTaskDefaultModel,
   DEFAULT_SCHEDULE,
+  editDraft,
   scheduleDraftForTask,
   scheduleFromDraft,
 } from "./scheduledTaskDraft";
+
+describe("editDraft", () => {
+  const task = {
+    id: "task",
+    title: "Check in",
+    prompt: "Check progress",
+    enabled: true,
+    projectId: ProjectId.make("project"),
+    threadId: null,
+    workspaceStrategy: { type: "root" },
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+    runtimeMode: "full-access",
+  } as unknown as ScheduledTask;
+
+  it("has no draft for a usage task, so no save can replace its trigger", () => {
+    expect(
+      editDraft({
+        ...task,
+        schedule: { type: "usage", window: "weekly", on: "above", usedPercent: 80 },
+      }),
+    ).toBeNull();
+  });
+
+  it("opens every other schedule", () => {
+    expect(editDraft({ ...task, schedule: { type: "interval", everyMs: 60_000 } })).toMatchObject({
+      task: { id: "task" },
+      schedule: { mode: "interval" },
+    });
+  });
+});
 
 describe("scheduleDraftForTask", () => {
   it("opens legacy sub-minute schedules at the writable minimum", () => {

@@ -30,6 +30,10 @@ import {
   type PullRequestComment,
   PullRequestOperationError,
   ProviderDriverKind,
+  type ScheduledTaskSchedule,
+  type ScheduledTaskUpsertSchedule,
+  type ScheduledTaskUsageSchedule,
+  type ServerProvider,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
@@ -99,7 +103,7 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ScratchThreadPromotion from "../project/ScratchThreadPromotion.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
-import { layerNewThreadModelTest } from "../scheduledTasks/testLayers.ts";
+import { layerNewThreadModelTest, layerProvidersTest } from "../scheduledTasks/testLayers.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -8723,7 +8727,10 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
 );
 
 // Per test, so the real due-task worker sweeps only that test's task.
-const layerScheduledFireTest = (workers: Map<string, Effect.Effect<void>>) =>
+const layerScheduledFireTest = (
+  workers: Map<string, Effect.Effect<void>>,
+  providers = layerNewThreadModelTest,
+) =>
   ScheduledTaskService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -8734,7 +8741,7 @@ const layerScheduledFireTest = (workers: Map<string, Effect.Effect<void>>) =>
           namedProjectsRoot: "/projects",
           isScratchProject: () => Effect.succeed(false),
         }),
-        layerNewThreadModelTest,
+        providers,
         Layer.succeed(Scheduler.Scheduler, {
           register: <E, R>(name: string, work: Effect.Effect<void, E, R>) =>
             Effect.gen(function* () {
@@ -8973,9 +8980,11 @@ describe("a scheduled fire on the real orchestrator", () => {
 
   // A real tick: the sources in the order they register, so fires come before auto-resume.
   const tick = (workers: Map<string, Effect.Effect<void>>) =>
-    Effect.forEach(["scheduled-tasks", "usage-limit-recovery"], (name) => workers.get(name)!, {
-      discard: true,
-    });
+    Effect.forEach(
+      ["scheduled-tasks", "usage-tasks", "usage-limit-recovery"],
+      (name) => workers.get(name)!,
+      { discard: true },
+    );
   const continuationThenFire = (threadId: ThreadId, task: { readonly id: string }) =>
     Effect.gen(function* () {
       const { messages, runs } = yield* Effect.flatMap(
@@ -9147,6 +9156,241 @@ describe("a scheduled fire on the real orchestrator", () => {
       assert.equal(fired[0]?.status, "starting");
       assert.equal(fired[0]?.providerInstanceId, alternateInstanceId);
     }).pipe(Effect.provide(layerScheduledFireTest(workers)));
+  });
+
+  describe("on a usage crossing", () => {
+    // The fake's stream is silent, so the hint's age is what brings the sweep back to a new reading.
+    const setReading = (
+      readings: { current: ReadonlyArray<ServerProvider> },
+      usedPercent: number,
+      resetsAt: string,
+    ) =>
+      Effect.gen(function* () {
+        const now = DateTime.formatIso(yield* DateTime.now);
+        readings.current = [
+          {
+            instanceId: modelSelection.instanceId,
+            driver,
+            enabled: true,
+            installed: true,
+            version: null,
+            status: "ready",
+            auth: { status: "authenticated" },
+            checkedAt: now,
+            models: [],
+            slashCommands: [],
+            skills: [],
+            usageLimits: {
+              checkedAt: now,
+              windows: [
+                { id: "seven_day", kind: "weekly", label: "Weekly", usedPercent, resetsAt },
+              ],
+            },
+          },
+        ];
+      });
+    const nextReading = (
+      readings: { current: ReadonlyArray<ServerProvider> },
+      usedPercent: number,
+    ) =>
+      Effect.gen(function* () {
+        const reset = DateTime.formatIso(DateTime.add(yield* DateTime.now, { days: 7 }));
+        yield* setReading(readings, usedPercent, reset);
+        yield* TestClock.adjust("11 minutes");
+      });
+    const ABOVE = { type: "usage", window: "weekly", on: "above", usedPercent: 80 } as const;
+    const saveUsageTask = (threadId: ThreadId, schedule: ScheduledTaskUpsertSchedule = ABOVE) =>
+      Effect.flatMap(ScheduledTaskService.ScheduledTaskService, (tasks) =>
+        tasks.upsert({
+          id: ScheduledTaskId.make(`${threadId}:task`),
+          title: "Check in",
+          prompt: "Check progress",
+          enabled: true,
+          schedule,
+          projectId: ProjectId.make(`${threadId}:project`),
+          threadId,
+          workspaceStrategy: { type: "root" },
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        }),
+      ).pipe(Effect.map(({ task }) => task));
+
+    it.effect("an idle thread starts one run, however many readings follow", () => {
+      const workers = new Map<string, Effect.Effect<void>>();
+      const readings: { current: ReadonlyArray<ServerProvider> } = { current: [] };
+      return Effect.gen(function* () {
+        const threadId = ThreadId.make("usage-fire-idle");
+        yield* createThread(threadId);
+        const task = yield* saveUsageTask(threadId);
+        const sweep = workers.get("usage-tasks")!;
+
+        yield* nextReading(readings, 50);
+        yield* sweep;
+        assert.deepEqual((yield* firesOf(threadId, task)).fired, []);
+
+        yield* nextReading(readings, 85);
+        yield* sweep;
+        yield* nextReading(readings, 90);
+        yield* sweep;
+
+        const { fired } = yield* firesOf(threadId, task);
+        assert.deepEqual(
+          fired.map((run) => run?.status),
+          ["starting"],
+        );
+        const stored = yield* storedTask(task.id);
+        assert.equal(stored.lastRunStatus, "succeeded");
+        assert.equal(stored.runCount, 1);
+        assert.isNull(stored.nextRunAt);
+      }).pipe(
+        Effect.provide(
+          layerScheduledFireTest(workers, layerProvidersTest(Effect.sync(() => readings.current))),
+        ),
+      );
+    });
+
+    it.effect("a limit-stopped thread gets nothing, and the reason, with no postponement", () => {
+      const workers = new Map<string, Effect.Effect<void>>();
+      const readings: { current: ReadonlyArray<ServerProvider> } = { current: [] };
+      return Effect.gen(function* () {
+        const threadId = ThreadId.make("usage-fire-stopped");
+        const { resetAt } = yield* limitStoppedThread(threadId);
+        const before = (yield* firesOf(threadId, { id: "none" })).runs;
+        const task = yield* saveUsageTask(threadId);
+        const sweep = workers.get("usage-tasks")!;
+
+        yield* nextReading(readings, 50);
+        yield* sweep;
+        yield* nextReading(readings, 85);
+        yield* sweep;
+
+        const { fired, runs } = yield* firesOf(threadId, task);
+        assert.deepEqual(fired, []);
+        assert.deepEqual(runs, before);
+        const stored = yield* storedTask(task.id);
+        assert.equal(stored.lastRunStatus, "failed");
+        assert.isTrue(stored.lastRunError?.includes(resetAt));
+        assert.equal(stored.runCount, 0);
+        assert.isNull(stored.nextRunAt);
+      }).pipe(
+        Effect.provide(
+          layerScheduledFireTest(workers, layerProvidersTest(Effect.sync(() => readings.current))),
+        ),
+      );
+    });
+
+    describe("beside an armed auto-resume", () => {
+      const layerOver = (
+        workers: Map<string, Effect.Effect<void>>,
+        readings: { current: ReadonlyArray<ServerProvider> },
+      ) =>
+        layerAutoResumeFireTest(
+          workers,
+          layerScheduledFireTest(workers, layerProvidersTest(Effect.sync(() => readings.current))),
+        );
+      const scheduleOf = (task: { readonly schedule: ScheduledTaskSchedule }) => {
+        assert.equal(task.schedule.type, "usage");
+        return task.schedule as ScheduledTaskUsageSchedule;
+      };
+
+      it.effect("a `reset` fire on a late tick goes behind the continuation, once", () => {
+        const workers = new Map<string, Effect.Effect<void>>();
+        const readings: { current: ReadonlyArray<ServerProvider> } = { current: [] };
+        return Effect.gen(function* () {
+          const threadId = ThreadId.make("usage-fire-late-reset");
+          const { resetAt } = yield* limitStoppedThread(threadId);
+          const task = yield* saveUsageTask(threadId, {
+            type: "usage",
+            window: "weekly",
+            on: "reset",
+          });
+          yield* setReading(readings, 90, resetAt);
+          yield* tick(workers);
+
+          yield* TestClock.setTime(Date.parse(resetAt) + 2 * 3_600_000);
+          yield* tick(workers);
+          assert.deepEqual((yield* firesOf(threadId, task)).fired, []);
+          assert.isUndefined(scheduleOf(yield* storedTask(task.id)).state?.firedFor);
+
+          yield* TestClock.adjust("5 seconds");
+          yield* tick(workers);
+          yield* continuationThenFire(threadId, task);
+          assert.equal(scheduleOf(yield* storedTask(task.id)).state?.firedFor, resetAt);
+
+          yield* TestClock.adjust("5 seconds");
+          yield* tick(workers);
+          assert.lengthOf((yield* firesOf(threadId, task)).fired, 1);
+        }).pipe(Effect.provide(layerOver(workers, readings)));
+      });
+
+      it.effect("a `below` just after the reset goes behind the continuation, once", () => {
+        const workers = new Map<string, Effect.Effect<void>>();
+        const readings: { current: ReadonlyArray<ServerProvider> } = { current: [] };
+        return Effect.gen(function* () {
+          const threadId = ThreadId.make("usage-fire-below-armed");
+          const { resetAt } = yield* limitStoppedThread(threadId);
+          const task = yield* saveUsageTask(threadId, {
+            type: "usage",
+            window: "weekly",
+            on: "below",
+            usedPercent: 20,
+          });
+          yield* setReading(readings, 90, resetAt);
+          yield* tick(workers);
+          assert.deepEqual(scheduleOf(yield* storedTask(task.id)).state, { armed: true });
+
+          yield* TestClock.setTime(Date.parse(resetAt) + 2_000);
+          const nextPeriod = DateTime.formatIso(DateTime.add(yield* DateTime.now, { hours: 5 }));
+          yield* setReading(readings, 5, nextPeriod);
+          yield* tick(workers);
+          assert.deepEqual((yield* firesOf(threadId, task)).fired, []);
+          // Unspent, and the sweep is due again without another reading.
+          assert.deepEqual(scheduleOf(yield* storedTask(task.id)).state, { armed: true });
+
+          yield* TestClock.adjust("5 seconds");
+          yield* tick(workers);
+          yield* continuationThenFire(threadId, task);
+          assert.deepEqual(scheduleOf(yield* storedTask(task.id)).state, { armed: false });
+        }).pipe(Effect.provide(layerOver(workers, readings)));
+      });
+
+      it.effect("a recovery that cannot deliver holds a crossing 15 seconds, no more", () => {
+        const workers = new Map<string, Effect.Effect<void>>();
+        const readings: { current: ReadonlyArray<ServerProvider> } = { current: [] };
+        return Effect.gen(function* () {
+          const threadId = ThreadId.make("usage-fire-undeliverable");
+          const { resetAt } = yield* limitStoppedThread(threadId);
+          const task = yield* saveUsageTask(threadId, {
+            type: "usage",
+            window: "weekly",
+            on: "below",
+            usedPercent: 20,
+          });
+          yield* setReading(readings, 90, resetAt);
+          yield* tick(workers);
+          yield* Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+            orchestrator.dispatch({
+              type: "thread.settle",
+              commandId: CommandId.make(`${threadId}:settle`),
+              threadId,
+            }),
+          );
+
+          yield* TestClock.setTime(Date.parse(resetAt) + 3_600_000);
+          const nextPeriod = DateTime.formatIso(DateTime.add(yield* DateTime.now, { hours: 5 }));
+          yield* setReading(readings, 5, nextPeriod);
+          yield* tick(workers);
+          yield* TestClock.adjust("14 seconds");
+          yield* tick(workers);
+          assert.deepEqual((yield* firesOf(threadId, task)).fired, []);
+
+          yield* TestClock.adjust("1 second");
+          yield* tick(workers);
+          assert.equal((yield* firesOf(threadId, task)).fired[0]?.status, "starting");
+        }).pipe(Effect.provide(layerOver(workers, readings)));
+      });
+    });
   });
 
   it.effect("an idle thread starts and a running thread queues, and both succeed", () => {

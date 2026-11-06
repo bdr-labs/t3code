@@ -171,6 +171,38 @@ returns. Leave it off if you don't want request bodies stored outside your
 machine. To skip requests that waited too long, set **Skip requests older
 than** on the task.
 
+## Usage automations
+
+In **Settings → Scheduled tasks** on web or desktop, choose **On usage** as a
+task's schedule to run it when a provider's usage crosses a line or its window
+renews. Pick the provider, one of the windows it reports, and **Renews**, or
+**Above** or **Below** with a percent. The list reads it back, such as "When Weekly
+is above 80%".
+
+A task runs once per crossing. One that is already past its line when you save it
+waits for usage to come back and cross again, and its own run can't start it a
+second time. For **Above**, a new period counts as a new crossing, so it runs again
+if usage is still over the line after the window renews. A renewal runs about a minute after the window's reset time, or when
+the provider credits an early reset. A window with no reset time never renews, so
+use a line for those, and one that was at 0% has nothing to renew, so it doesn't
+run. Editing the name or prompt keeps the task's place. Changing what it watches
+starts it over, and so does resuming a paused task, so a crossing it missed doesn't
+run.
+
+A line waits for a new reading: if a read of the provider's limits fails, the last
+reading stays and nothing crosses. A renewal doesn't wait, and still runs by the
+clock at the reset time it saw. Nothing runs at all while the provider is signed
+out or doesn't report that window, and a provider that reports no usage at all can't
+be picked. **Below** only sees usage fall in a new reading. Claude is read with no
+client open and Codex while a session is open; on others, a task can wait until you
+next open T3 Code or run that provider.
+A task that posts into a thread stopped on a usage limit with a known reset time
+sends nothing and shows why as a failed last run; that crossing is used, so it runs
+again at the next one.
+
+Mobile lists these tasks and can pause, resume, run or delete them. Edit them on web
+or desktop.
+
 ## Defaults and inheritance
 
 Threads contains the model and workspace for new threads. Browser controls agent browser

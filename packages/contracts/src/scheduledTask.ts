@@ -11,6 +11,11 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { ProviderInstanceId } from "./providerInstance.ts";
+import type {
+  ServerProviderUsageLimits,
+  ServerProviderUsageWindow,
+} from "./providerUsageLimits.ts";
 import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
@@ -190,12 +195,93 @@ const ScheduledTaskUpsertWebhookSchedule = Schema.Struct({
     "Run per webhook request. Prompt can use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}}, {{request}}.",
 });
 
+const ScheduledTaskUsageFields = {
+  type: Schema.Literal("usage"),
+  instanceId: Schema.optional(ProviderInstanceId).annotate({
+    description: "Default: the task's model's instance.",
+  }),
+  window: TrimmedNonEmptyString.annotate({
+    description: "A window's `id` or `kind` from `t3_usage_limits`.",
+  }),
+  on: Schema.Literals(["reset", "above", "below"]),
+  usedPercent: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 99 })),
+  ).annotate({ description: "1 to 99. For `above` and `below`; refused for `reset`." }),
+};
+
+/** Written only by the server's sweep: `armed` for a line, with `resetsAt` for `above`; else a reset's. */
+const ScheduledTaskUsageState = Schema.Struct({
+  armed: Schema.optional(Schema.Boolean),
+  resetsAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  usedPercent: Schema.optional(Schema.Number),
+  firedFor: Schema.optional(IsoDateTime),
+});
+
+const ScheduledTaskUsageSchedule = Schema.Struct({
+  ...ScheduledTaskUsageFields,
+  state: Schema.optional(ScheduledTaskUsageState),
+});
+export type ScheduledTaskUsageSchedule = typeof ScheduledTaskUsageSchedule.Type;
+export type ScheduledTaskUsageState = typeof ScheduledTaskUsageState.Type;
+
+type UsageWindowIdentity = Pick<ServerProviderUsageWindow, "id" | "kind" | "label">;
+
+/** A window `id`, or a `kind`, which means that kind's first window in the sorted order. */
+export function resolveUsageWindow<TWindow extends UsageWindowIdentity>(
+  windows: ReadonlyArray<TWindow>,
+  window: string,
+): TWindow | undefined {
+  return (
+    windows.find((candidate) => candidate.id === window) ??
+    // `filter` returned a new array; Hermes has no `toSorted`.
+    windows
+      .filter((candidate) => candidate.kind === window)
+      .sort((left, right) => left.id.localeCompare(right.id))[0]
+  );
+}
+
+/** Usage windows of one instance, out of the list a client or the server already holds. */
+export function usageWindowsOf(
+  providers: ReadonlyArray<{
+    readonly instanceId: string;
+    readonly usageLimits?: Pick<ServerProviderUsageLimits, "windows"> | undefined;
+  }>,
+  instanceId: string,
+): ReadonlyArray<ServerProviderUsageWindow> {
+  return (
+    providers.find((provider) => provider.instanceId === instanceId)?.usageLimits?.windows ?? []
+  );
+}
+
+/** A window's live label, or the stored name in words when the instance does not report it. */
+export function usageWindowName(
+  windows: ReadonlyArray<UsageWindowIdentity>,
+  window: string,
+): string {
+  const stored = window.replace(/[_-]+/g, " ");
+  return (
+    resolveUsageWindow(windows, window)?.label ??
+    `${stored.charAt(0).toUpperCase()}${stored.slice(1)}`
+  );
+}
+
+export function usageScheduleLabel(
+  schedule: Pick<ScheduledTaskUsageSchedule, "window" | "on" | "usedPercent">,
+  windows: ReadonlyArray<UsageWindowIdentity> = [],
+): string {
+  const name = usageWindowName(windows, schedule.window);
+  return schedule.on === "reset"
+    ? `When ${name} renews`
+    : `When ${name} is ${schedule.on} ${schedule.usedPercent}%`;
+}
+
 /** Accept legacy sub-minute schedules so users can still manage them. */
 export const ScheduledTaskSchedule = Schema.Union([
   ScheduledTaskIntervalSchedule,
   ScheduledTaskFixedTimeSchedule,
   ScheduledTaskOnceSchedule,
   ScheduledTaskWebhookSchedule,
+  ScheduledTaskUsageSchedule,
 ]);
 export type ScheduledTaskSchedule = typeof ScheduledTaskSchedule.Type;
 
@@ -211,6 +297,8 @@ export const ScheduledTaskUpsertSchedule = Schema.Union([
   ScheduledTaskFixedTimeSchedule,
   ScheduledTaskOnceSchedule,
   ScheduledTaskUpsertWebhookSchedule,
+  // No `state`: decoding drops it, so a client or an agent cannot set it.
+  Schema.Struct(ScheduledTaskUsageFields),
 ]);
 export type ScheduledTaskUpsertSchedule = typeof ScheduledTaskUpsertSchedule.Type;
 

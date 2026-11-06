@@ -24,6 +24,7 @@ import {
   type ScheduledTaskRunNowResult,
   type ScheduledTaskSetEnabledInput,
   type ScheduledTaskUpsertInput,
+  type ServerProvider,
   managedPolicyDeniedMessage,
   managedRuntimeModeDenial,
 } from "@t3tools/contracts";
@@ -54,6 +55,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as Struct from "effect/Struct";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
@@ -67,7 +69,16 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as DueHint from "../scheduling/DueHint.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
+import { forkParked } from "../serverActivation.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
+import {
+  evaluateUsageTrigger,
+  usageLimitsForTrigger,
+  usageScheduleProblem,
+  usageScheduleToSave,
+  usageTriggerDueAtMs,
+  usageWindowProblem,
+} from "./usageTrigger.ts";
 import {
   redactHeaders,
   redactQuery,
@@ -187,6 +198,9 @@ const webhookFilters = (filters: ReadonlyArray<ScheduledTaskWebhookFilter> | und
 const decodeTask = Schema.decodeUnknownEffect(ScheduledTask);
 const decodeTaskId = Schema.decodeUnknownOption(ScheduledTaskId);
 const decodeScheduleJson = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ScheduledTask.fields.schedule),
+);
+const encodeScheduleJson = Schema.encodeEffect(
   Schema.fromJsonString(ScheduledTask.fields.schedule),
 );
 const decodeWorkspaceStrategyJson = Schema.decodeUnknownEffect(
@@ -542,8 +556,10 @@ export const layer = Layer.effect(
     const changesPubSub = yield* PubSub.sliding<void>(1);
     const dueTasks = DueHint.make();
     const pendingWebhooks = DueHint.make();
+    const usageTasks = DueHint.make();
     // Every scheduled_tasks write that can change next_run_at, enabled or run state notifies.
     const notifyChanged = dueTasks.invalidate.pipe(
+      Effect.andThen(usageTasks.invalidate),
       Effect.andThen(PubSub.publish(changesPubSub, undefined)),
       Effect.asVoid,
     );
@@ -722,7 +738,14 @@ export const layer = Layer.effect(
           title = excluded.title,
           prompt = excluded.prompt,
           enabled = excluded.enabled,
-          schedule_json = excluded.schedule_json,
+          -- A sweep can move a kept usage trigger's state during this save; the newer state stands.
+          schedule_json = CASE
+            WHEN ${task.schedule.type === "usage" && task.schedule.state !== undefined ? 1 : 0} = 1
+              AND json_remove(scheduled_tasks.schedule_json, '$.state')
+                = json_remove(excluded.schedule_json, '$.state')
+            THEN scheduled_tasks.schedule_json
+            ELSE excluded.schedule_json
+          END,
           project_id = excluded.project_id,
           thread_id = excluded.thread_id,
           workspace_strategy_json = excluded.workspace_strategy_json,
@@ -866,7 +889,7 @@ export const layer = Layer.effect(
     // start, and nothing here ran, so run_count stays too.
     const recordUnsentFire = Effect.fn("ScheduledTaskService.recordUnsentFire")(function* (
       active: ScheduledTask,
-      trigger: "scheduled" | "manual",
+      trigger: "scheduled" | "manual" | "usage",
       resetAt: string,
       startedAt: DateTime.DateTime,
     ) {
@@ -884,18 +907,20 @@ export const layer = Layer.effect(
         // Each period re-checks, so a thread that was moved or resumed fires at the next one.
         const natural = current.schedule.type === "once" ? null : nextRunAt(current, startedAt);
         const nextRun =
-          trigger === "manual" || edited
+          trigger !== "scheduled" || edited
             ? current.nextRunAt
             : natural !== null && Date.parse(natural) < Date.parse(resetAt)
               ? natural
               : resetAt;
         // Run now leaves a postponement's record alone, so a late sweep still knows it.
         const error =
-          trigger !== "manual"
+          trigger === "scheduled"
             ? postponedFireError(resetAt)
             : isPostponedFire(current)
               ? current.lastRunError
-              : `Not sent because the thread stopped on a usage limit that resets at ${resetAt}.`;
+              : trigger === "usage"
+                ? `Not sent because the thread stopped on a usage limit that resets at ${resetAt}. This crossing is used, so the task waits for the next one.`
+                : `Not sent because the thread stopped on a usage limit that resets at ${resetAt}.`;
         yield* sql`
           UPDATE scheduled_tasks
           SET updated_at = ${startedAtIso},
@@ -966,7 +991,7 @@ export const layer = Layer.effect(
 
     const runTask = Effect.fn("ScheduledTaskService.runTask")(function* (
       task: ScheduledTask,
-      trigger: "scheduled" | "manual" | "webhook",
+      trigger: "scheduled" | "manual" | "webhook" | "usage",
       webhook?: {
         readonly deliveryId: string;
         readonly prompt: string;
@@ -985,7 +1010,7 @@ export const layer = Layer.effect(
               reason: "The task was deleted before this delivery ran.",
             });
           }
-          if (trigger !== "scheduled") {
+          if (trigger !== "scheduled" && trigger !== "usage") {
             return yield* taskError("Schedule task not found.", { taskId: task.id });
           }
           return { task, threadId: null, dispatchFailed: false };
@@ -1009,6 +1034,9 @@ export const layer = Layer.effect(
             Option.isNone(parsedNextRunAt) ||
             DateTime.toEpochMillis(parsedNextRunAt.value) > DateTime.toEpochMillis(startedAt))
         ) {
+          return { task: active, threadId: null, dispatchFailed: false };
+        }
+        if (trigger === "usage" && (!active.enabled || active.schedule.type !== "usage")) {
           return { task: active, threadId: null, dispatchFailed: false };
         }
         // Reject queued deliveries after pause, same-id recreation or trigger changes.
@@ -1260,7 +1288,7 @@ export const layer = Layer.effect(
         (reserved) =>
           reserved
             ? run
-            : trigger !== "scheduled"
+            : trigger !== "scheduled" && trigger !== "usage"
               ? Effect.fail(taskError("Schedule task is already running.", { taskId: task.id }))
               : Effect.succeed({ task, threadId: null, dispatchFailed: false }),
         (reserved) =>
@@ -1343,6 +1371,74 @@ export const layer = Layer.effect(
       );
     });
 
+    // Runs per usage task; runUsageTasks owns the span and runTask has its own.
+    const evaluateUsageTask = Effect.fnUntraced(
+      function* (row: ScheduledTaskRow, providers: ReadonlyArray<ServerProvider>, nowMs: number) {
+        const task = yield* decodeRow(row);
+        if (task.schedule.type !== "usage") return Infinity;
+        const instanceId = task.schedule.instanceId ?? task.modelSelection.instanceId;
+        const { fire, state } = evaluateUsageTrigger({
+          schedule: task.schedule,
+          limits: usageLimitsForTrigger(
+            providers.find((provider) => provider.instanceId === instanceId),
+          ),
+          nowMs,
+        });
+        if (fire && task.threadId !== null) {
+          const records = yield* threadManagement
+            .getThreadRecords(ThreadId.make(task.threadId), ["runs"])
+            .pipe(Effect.orElseSucceed(() => null));
+          // The crossing stays unspent and the sweep due, so the next tick retries.
+          if (records !== null && (yield* autoResumeGoesFirst(task.id, records, nowMs))) {
+            return nowMs;
+          }
+        }
+        const schedule = state === undefined ? task.schedule : { ...task.schedule, state };
+        if (state !== task.schedule.state) {
+          // The state lands before the fire, so a crash or a restart cannot fire this crossing twice.
+          const written = yield* sql`
+            UPDATE scheduled_tasks SET schedule_json = ${yield* encodeScheduleJson(schedule)}
+            WHERE task_id = ${row.task_id} AND schedule_json = ${row.schedule_json} AND enabled = 1
+            RETURNING task_id
+          `;
+          if (written.length === 0) return Infinity;
+        }
+        if (fire) yield* runTask(task, "usage");
+        return usageTriggerDueAtMs(schedule, nowMs);
+      },
+      (effect, row) =>
+        effect.pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("Usage task evaluation failed", { taskId: row.task_id, cause }).pipe(
+              Effect.as(Infinity),
+            ),
+          ),
+        ),
+    );
+
+    const runUsageTasks = Effect.fn("ScheduledTaskService.runUsageTasks")(function* () {
+      const nowMs = DateTime.toEpochMillis(yield* localNow);
+      if (yield* usageTasks.isIdle(nowMs)) return;
+      const readVersion = yield* usageTasks.version;
+      // json_extract raises on malformed JSON, and one bad row must not stop the rest.
+      const rows = yield* sql<ScheduledTaskRow>`
+        SELECT * FROM scheduled_tasks
+        WHERE enabled = 1
+          AND CASE WHEN json_valid(schedule_json) THEN json_extract(schedule_json, '$.type') END = 'usage'
+        ORDER BY task_id ASC
+      `.pipe(
+        NodeSqliteClient.readOnly,
+        Effect.mapError((cause) => taskError("Could not list usage tasks.", { cause })),
+      );
+      const providers = yield* providerRegistry.getProviders;
+      const dueAts = yield* Effect.forEach(
+        rows,
+        (row) => evaluateUsageTask(row, providers, nowMs),
+        { concurrency: 1 },
+      );
+      yield* usageTasks.record(readVersion, Math.min(Infinity, ...dueAts), nowMs);
+    });
+
     // Recover crash-left running rows that the due-task filter would otherwise skip forever.
     yield* Effect.gen(function* () {
       const rows = yield* selectAllRows();
@@ -1397,6 +1493,10 @@ export const layer = Layer.effect(
     );
 
     yield* scheduler.register("scheduled-tasks", runDueTasks());
+    yield* forkParked(
+      Stream.runForEach(providerRegistry.streamChanges, () => usageTasks.invalidate),
+    );
+    yield* scheduler.register("usage-tasks", runUsageTasks());
 
     const list: ScheduledTaskService["Service"]["list"] = () =>
       listRows().pipe(
@@ -1435,6 +1535,11 @@ export const layer = Layer.effect(
           : undefined;
       if (modeDenial !== undefined) {
         return yield* taskError(modeDenial, input.id === undefined ? {} : { taskId: input.id });
+      }
+      const usageProblem =
+        input.schedule.type === "usage" ? usageScheduleProblem(input.schedule) : null;
+      if (usageProblem !== null) {
+        return yield* taskError(usageProblem, input.id === undefined ? {} : { taskId: input.id });
       }
       const now = yield* localNow;
       const uuid =
@@ -1489,7 +1594,45 @@ export const layer = Layer.effect(
             }
           : input.schedule.type === "once"
             ? { type: "once", runAt: iso(DateTime.makeUnsafe(input.schedule.runAt)) }
-            : input.schedule;
+            : input.schedule.type === "usage"
+              ? usageScheduleToSave({
+                  schedule: input.schedule,
+                  enabled: input.enabled,
+                  modelInstanceId: input.modelSelection.instanceId,
+                  existing: existingTask,
+                })
+              : input.schedule;
+      // A task whose instance was removed since can still be renamed or paused.
+      if (
+        schedule.type === "usage" &&
+        schedule.instanceId !== undefined &&
+        (existingTask?.schedule.type !== "usage" ||
+          existingTask.schedule.instanceId !== schedule.instanceId)
+      ) {
+        const { instanceId } = schedule;
+        const providers = yield* providerRegistry.getProviders;
+        if (!providers.some((provider) => provider.instanceId === instanceId)) {
+          return yield* taskError(`Unknown provider instance: ${instanceId}.`, { taskId: id });
+        }
+      }
+      // A new or changed trigger only: a window that went away since can't stop a rename or a pause.
+      if (schedule.type === "usage") {
+        const instanceId = schedule.instanceId ?? input.modelSelection.instanceId;
+        const keptTrigger =
+          existingTask?.schedule.type === "usage" &&
+          isSameSchedule(existingTask.schedule, schedule) &&
+          (existingTask.schedule.instanceId ?? existingTask.modelSelection.instanceId) ===
+            instanceId;
+        if (!keptTrigger) {
+          const providers = yield* providerRegistry.getProviders;
+          const windowProblem = usageWindowProblem(
+            schedule,
+            instanceId,
+            providers.find((provider) => provider.instanceId === instanceId)?.usageLimits,
+          );
+          if (windowProblem !== null) return yield* taskError(windowProblem, { taskId: id });
+        }
+      }
       const webhook =
         input.schedule.type === "webhook"
           ? yield* Effect.gen(function* () {
@@ -1606,11 +1749,17 @@ export const layer = Layer.effect(
         input.id,
       );
       const next = nextRunAt({ enabled: input.enabled, schedule: existing.schedule }, now);
+      // Re-enabling forgets where a usage trigger stood, so a crossing while paused does not fire.
+      const clearsUsageState = input.enabled && existing.schedule.type === "usage";
       // RETURNING so a task deleted between the load and this UPDATE is a
       // visible not-found error, not a false success.
       const updated = yield* sql<{ task_id: string }>`
           UPDATE scheduled_tasks
           SET enabled = ${input.enabled ? 1 : 0},
+              schedule_json = CASE
+                WHEN ${clearsUsageState ? 1 : 0} = 1 THEN json_remove(schedule_json, '$.state')
+                ELSE schedule_json
+              END,
               next_run_at = ${next},
               updated_at = ${iso(now)}
           WHERE task_id = ${input.id}
@@ -1625,7 +1774,16 @@ export const layer = Layer.effect(
       }
       yield* notifyChanged;
       return {
-        task: { ...existing, enabled: input.enabled, nextRunAt: next, updatedAt: iso(now) },
+        task: {
+          ...existing,
+          enabled: input.enabled,
+          nextRunAt: next,
+          updatedAt: iso(now),
+          schedule:
+            clearsUsageState && existing.schedule.type === "usage"
+              ? Struct.omit(existing.schedule, ["state"])
+              : existing.schedule,
+        },
       };
     });
 

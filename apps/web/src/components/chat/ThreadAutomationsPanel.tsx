@@ -16,7 +16,7 @@ import {
 
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { cn } from "../../lib/utils";
-import { ScheduledRelativeLabel, scheduleLabel } from "../settings/ScheduledTasksSettings";
+import { ScheduledRelativeLabel, TaskScheduleLabel } from "../settings/ScheduledTasksSettings";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -37,12 +37,14 @@ const STATUS_DOT_CLASS: Record<ScheduledTask["lastRunStatus"], string> = {
   failed: "bg-destructive",
 };
 
-function taskScheduleLine(task: ScheduledTask) {
+function taskScheduleLine(task: ScheduledTask, environmentId: EnvironmentId) {
   return (
     <>
-      {scheduleLabel(task.schedule)}
+      <TaskScheduleLabel environmentId={environmentId} task={task} />
       {task.blockedByPolicy !== undefined ? (
         ` · ${task.blockedByPolicy}`
+      ) : task.enabled && task.schedule.type === "usage" ? (
+        " · Watching usage"
       ) : task.enabled && task.nextRunAt !== null ? (
         <>
           {" · next "}
@@ -179,11 +181,15 @@ export function ThreadAutomationsPanel(props: {
                 <span className="block truncate text-sm font-medium text-foreground/80">
                   {task.title}
                 </span>
-                <p className="truncate text-2xs text-muted-foreground">{taskScheduleLine(task)}</p>
+                <p className="truncate text-2xs text-muted-foreground">
+                  {taskScheduleLine(task, props.environmentId)}
+                </p>
               </TooltipTrigger>
               <TooltipPopup side="left">
                 <p className="font-medium">{task.title}</p>
-                <p className="text-muted-foreground">{taskScheduleLine(task)}</p>
+                <p className="text-muted-foreground">
+                  {taskScheduleLine(task, props.environmentId)}
+                </p>
               </TooltipPopup>
             </Tooltip>
             <Tooltip>

@@ -21,7 +21,9 @@ import type {
   ScheduledTaskId,
   ScheduledTaskSchedule,
   ScheduledTaskUpsertInput,
+  ScheduledTaskUsageSchedule,
   ScheduledTaskWebhookDeliverySummary,
+  ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -38,6 +40,9 @@ import {
   MIN_SCHEDULED_TASK_INTERVAL_MS,
   ProviderInstanceId,
   resolveEnvironmentMachineKind,
+  resolveUsageWindow,
+  usageScheduleLabel,
+  usageWindowsOf,
 } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
@@ -47,7 +52,7 @@ import {
 import { formatRelativeTime } from "../../timestampFormat";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
-import { providerInstanceEntriesFor } from "../../providerInstances";
+import { providerInstanceEntriesFor, type ProviderInstanceEntry } from "../../providerInstances";
 import { usePrimaryCloudLinkState } from "../../cloud/cloudLinkState";
 import { requestConfirmDialog } from "../../confirmDialog";
 import { webhookAddress } from "@t3tools/client-runtime/webhook-address";
@@ -83,6 +88,7 @@ import { EnvironmentRow, useEnvironmentTransportLabel } from "./EnvironmentRow";
 import { SettingsGroup } from "./SettingsGroup";
 import { settingsScopeEnvironmentLabel, settingsScopeEnvironmentLabels } from "./settingsScopeAxis";
 import {
+  USAGE_PERCENT_DEFAULT,
   WEBHOOK_SIGNATURE_DEFAULTS,
   scheduleDraftErrors,
   toDateTimeLocalValue,
@@ -92,8 +98,11 @@ import {
   scheduleFromDraft,
   scheduledTaskDefaultModel,
   taskToDraft,
+  usageWindowOnInstance,
+  usageWindowOptions,
   type DraftState,
   type ScheduleMode,
+  type UsageOn,
   type WorkspaceMode,
 } from "./scheduledTasksSettings.logic";
 import { Label } from "../ui/label";
@@ -166,6 +175,10 @@ const EMPTY_DRAFT: DraftState = {
   coalesceWindowSeconds: "",
   filters: [],
   savedFilters: [],
+  usageInstanceId: "",
+  usageWindow: "",
+  usageOn: "reset",
+  usagePercent: USAGE_PERCENT_DEFAULT,
 };
 
 function WebhookFiltersField({
@@ -285,6 +298,145 @@ function Field({
   );
 }
 
+// Not an instance id: those are slugs.
+const USAGE_INSTANCE_OF_MODEL = "@model";
+
+function UsageTriggerFields({
+  draft,
+  setDraft,
+  instanceEntries,
+  providers,
+  modelInstanceId,
+}: {
+  readonly draft: DraftState;
+  readonly setDraft: (update: (current: DraftState) => DraftState) => void;
+  readonly instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly modelInstanceId: string;
+}) {
+  const windowsOn = (instanceId: string) =>
+    usageWindowsOf(providers, instanceId || modelInstanceId);
+  const windows = windowsOn(draft.usageInstanceId);
+  const windowOptions = usageWindowOptions(windows, draft.usageWindow);
+  // A stored kind shows as the window it means, and stays a kind until another is picked.
+  const selectedWindow = resolveUsageWindow(windows, draft.usageWindow)?.id ?? draft.usageWindow;
+  const instanceOptions = [
+    { value: USAGE_INSTANCE_OF_MODEL, label: "The task's model" },
+    ...instanceEntries
+      .filter(
+        (entry) =>
+          entry.instanceId === draft.usageInstanceId ||
+          (entry.enabled && (entry.snapshot.usageLimits?.windows.length ?? 0) > 0),
+      )
+      .map((entry) => ({ value: entry.instanceId as string, label: entry.displayName })),
+  ];
+  const selectedInstance = draft.usageInstanceId || USAGE_INSTANCE_OF_MODEL;
+  if (!instanceOptions.some((option) => option.value === selectedInstance)) {
+    instanceOptions.push({ value: selectedInstance, label: selectedInstance });
+  }
+  const windowLabel = windowOptions.find((option) => option.value === selectedWindow)?.label;
+  return (
+    <div className="space-y-3">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Provider" htmlFor="scheduled-task-usage-instance">
+          <Select
+            value={selectedInstance}
+            onValueChange={(value) => {
+              const usageInstanceId =
+                value === null || value === USAGE_INSTANCE_OF_MODEL ? "" : value;
+              setDraft((current) => ({
+                ...current,
+                usageInstanceId,
+                usageWindow: usageWindowOnInstance(windowsOn(usageInstanceId), current.usageWindow),
+              }));
+            }}
+          >
+            <SelectTrigger size="sm" id="scheduled-task-usage-instance">
+              <SelectValue>
+                {instanceOptions.find((option) => option.value === selectedInstance)?.label}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup>
+              {instanceOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value} label={option.label}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        </Field>
+        <Field label="Usage window" htmlFor="scheduled-task-usage-window">
+          <Select
+            value={selectedWindow}
+            onValueChange={(usageWindow) =>
+              setDraft((current) => ({ ...current, usageWindow: usageWindow ?? "" }))
+            }
+          >
+            <SelectTrigger size="sm" id="scheduled-task-usage-window">
+              <SelectValue placeholder="Select a window">{windowLabel}</SelectValue>
+            </SelectTrigger>
+            <SelectPopup>
+              {windowOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value} label={option.label}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        </Field>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <ToggleGroup
+          variant="outline"
+          size="sm"
+          aria-label="Run when the window"
+          value={[draft.usageOn]}
+          onValueChange={(values) => {
+            const usageOn = values[0] as UsageOn | undefined;
+            if (usageOn) setDraft((current) => ({ ...current, usageOn }));
+          }}
+        >
+          <Toggle value="reset">Renews</Toggle>
+          <Toggle value="above">Above</Toggle>
+          <Toggle value="below">Below</Toggle>
+        </ToggleGroup>
+        {draft.usageOn === "reset" ? null : (
+          <div className="flex items-center gap-2">
+            <Input
+              type="number"
+              id="scheduled-task-usage-percent"
+              aria-label="Percent used"
+              nativeInput
+              min={1}
+              max={99}
+              step={1}
+              className="w-20"
+              value={draft.usagePercent}
+              onChange={(event) =>
+                setDraft((current) => ({ ...current, usagePercent: event.target.value }))
+              }
+            />
+            <span className="text-xs text-muted-foreground">% used</span>
+          </div>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {providers.find(
+          (provider) => provider.instanceId === (draft.usageInstanceId || modelInstanceId),
+        )?.usageLimits?.unavailable?.reason === "unsupported"
+          ? "This provider does not report usage, so a task can't watch it. Pick another."
+          : windowOptions.length === 0
+            ? "This provider reports no usage windows yet. Pick another, or come back once it has read its limits."
+            : draft.usageWindow && resolveUsageWindow(windows, draft.usageWindow) === undefined
+              ? "This provider does not report that window right now, so the task waits until it does."
+              : draft.usageOn === "reset"
+                ? "Runs about a minute after the window renews. A window with no reset time never does."
+                : "Runs when usage crosses the line. Already past it, the task waits for it to come back and cross again."}
+      </p>
+    </div>
+  );
+}
+
 function splitModelKey(value: string): ModelSelection | null {
   const index = value.indexOf(":");
   if (index <= 0 || index === value.length - 1) return null;
@@ -299,7 +451,8 @@ const ONCE_FORMATTER = new Intl.DateTimeFormat(undefined, {
   timeStyle: "short",
 });
 
-export function scheduleLabel(schedule: ScheduledTaskSchedule): string {
+function scheduleLabel(schedule: ScheduledTaskSchedule): string {
+  if (schedule.type === "usage") return usageScheduleLabel(schedule);
   if (schedule.type === "webhook") return "On webhook";
   if (schedule.type === "once") return `Once, ${ONCE_FORMATTER.format(new Date(schedule.runAt))}`;
   if (schedule.type === "interval") {
@@ -316,6 +469,33 @@ export function scheduleLabel(schedule: ScheduledTaskSchedule): string {
         ? "Weekdays"
         : weekdays.map((day) => WEEKDAY_LABELS[day]).join(", ");
   return `${days} at ${schedule.timeOfDay}`;
+}
+
+// Its own component, so only a usage task's row follows provider updates.
+function UsageTaskLabel(props: {
+  readonly environmentId: EnvironmentId;
+  readonly task: ScheduledTask;
+  readonly schedule: ScheduledTaskUsageSchedule;
+}) {
+  const providers =
+    useAtomValue(serverEnvironment.providersValueAtom(props.environmentId)) ??
+    EMPTY_SERVER_PROVIDERS;
+  return usageScheduleLabel(
+    props.schedule,
+    usageWindowsOf(providers, props.schedule.instanceId ?? props.task.modelSelection.instanceId),
+  );
+}
+
+export function TaskScheduleLabel(props: {
+  readonly environmentId: EnvironmentId;
+  readonly task: ScheduledTask;
+}) {
+  const { schedule } = props.task;
+  return schedule.type === "usage" ? (
+    <UsageTaskLabel environmentId={props.environmentId} task={props.task} schedule={schedule} />
+  ) : (
+    scheduleLabel(schedule)
+  );
 }
 
 /** formatRelativeTime handles only the past; upcoming runs need future labels. */
@@ -767,13 +947,15 @@ function ScheduledTaskRow({
       status={
         <div className="flex flex-wrap items-center gap-2">
           <span>
-            {scheduleLabel(task.schedule)} ·{" "}
+            <TaskScheduleLabel environmentId={environmentId} task={task} /> ·{" "}
             {task.blockedByPolicy !== undefined ? (
               task.blockedByPolicy
             ) : !task.enabled ? (
               "Paused"
             ) : isWebhook ? (
               "Listening"
+            ) : task.schedule.type === "usage" ? (
+              "Watching usage"
             ) : task.nextRunAt ? (
               <>
                 Next run <ScheduledRelativeLabel value={task.nextRunAt} />
@@ -1263,6 +1445,7 @@ function ScheduledTaskEditorForm({
     activeInstanceId,
     activeModel,
   );
+  const usageWindows = usageWindowsOf(providers, draft.usageInstanceId || activeInstanceId);
 
   const reportFailure = (title: string, error: unknown) => {
     toastManager.add(
@@ -1385,8 +1568,8 @@ function ScheduledTaskEditorForm({
       <DialogHeader>
         <DialogTitle>{draft.editingId ? "Edit task" : "New task"}</DialogTitle>
         <DialogDescription>
-          Run a prompt automatically on an interval, at a fixed time, once at a set date, or when a
-          webhook is called.
+          Run a prompt automatically on an interval, at a fixed time, once at a set date, when a
+          webhook is called, or when a provider's usage crosses a line or renews.
         </DialogDescription>
       </DialogHeader>
 
@@ -1412,6 +1595,8 @@ function ScheduledTaskEditorForm({
                   baseRef: "main",
                   startFromOrigin: true,
                   existingWorktreePath: "",
+                  usageInstanceId: "",
+                  usageWindow: "",
                 }));
               }}
             >
@@ -1595,7 +1780,17 @@ function ScheduledTaskEditorForm({
                 isComposerOwned={false}
                 triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
                 onInstanceModelChange={(instanceId, model) =>
-                  setDraft((current) => ({ ...current, modelKey: `${instanceId}:${model}` }))
+                  setDraft((current) => ({
+                    ...current,
+                    modelKey: `${instanceId}:${model}`,
+                    // A trigger on the task's model follows it to the new instance's windows.
+                    usageWindow: current.usageInstanceId
+                      ? current.usageWindow
+                      : usageWindowOnInstance(
+                          usageWindowsOf(providers, instanceId),
+                          current.usageWindow,
+                        ),
+                  }))
                 }
               />
             </div>
@@ -1614,6 +1809,7 @@ function ScheduledTaskEditorForm({
               <Label>Schedule</Label>
               <ToggleGroup
                 aria-label="Schedule type"
+                className="max-w-full flex-wrap"
                 value={[draft.scheduleMode]}
                 onValueChange={(values) => {
                   const mode = values[0] as ScheduleMode | undefined;
@@ -1621,7 +1817,8 @@ function ScheduledTaskEditorForm({
                     mode === "fixed" ||
                     mode === "once" ||
                     mode === "interval" ||
-                    mode === "webhook"
+                    mode === "webhook" ||
+                    mode === "usage"
                   )
                     setDraft((current) => {
                       const suggested =
@@ -1631,6 +1828,7 @@ function ScheduledTaskEditorForm({
                       return {
                         ...current,
                         scheduleMode: mode,
+                        usageWindow: current.usageWindow || (usageWindows[0]?.id ?? ""),
                         // Keep the instant too, so an hour that repeats when clocks go back stays exact.
                         ...(suggested === null
                           ? {}
@@ -1657,6 +1855,7 @@ function ScheduledTaskEditorForm({
                 >
                   On webhook
                 </Toggle>
+                <Toggle value="usage">On usage</Toggle>
               </ToggleGroup>
             </div>
 
@@ -1842,6 +2041,14 @@ function ScheduledTaskEditorForm({
                   </div>
                 ) : null}
               </div>
+            ) : draft.scheduleMode === "usage" ? (
+              <UsageTriggerFields
+                draft={draft}
+                setDraft={setDraft}
+                instanceEntries={instanceEntries}
+                providers={providers}
+                modelInstanceId={activeInstanceId}
+              />
             ) : draft.scheduleMode === "once" ? (
               <div className="flex items-center gap-2">
                 <Label htmlFor="scheduled-task-run-at">Run on</Label>

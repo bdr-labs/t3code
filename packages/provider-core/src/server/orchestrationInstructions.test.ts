@@ -12,7 +12,7 @@ import {
 describe("T3 opener and schedule instructions", () => {
   it.each([
     "- `openedByThreadId` names the thread that opened yours: not your parent for delegation, not a subagent. Report to it with `t3_thread_send` only when your task says so, and mention it by its link.\n",
-    "- Work at a set time, on a schedule or on a webhook: `schedule_task`; a provider's own timers end with its session. Asked only to schedule, do not run the prompt.\n",
+    "- Work at a set time, on a schedule, on a webhook or on a usage limit: `schedule_task`; a provider's own timers end with its session. Asked only to schedule, do not run the prompt.\n",
   ])("reach every provider's prompt path word for word, once: %s", (line) => {
     const state = { interactionMode: "default", hasT3Mcp: true, hasDeviceTools: false } as const;
     for (const [surface, text] of [

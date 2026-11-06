@@ -488,9 +488,9 @@ API key's plan reads "API key", since the key's name is its owner's to choose.
 recurring and one-time work in the app scheduler; `schedule_task` with a
 `scheduledTaskId` updates an existing task. A schedule
 runs its prompt on an interval, at a fixed time in the server's local time
-zone, once at a future `runAt`, or on each qualifying webhook request, even when
-no turn is active. A `once` task missed while the server was down runs when it
-is back.
+zone, once at a future `runAt`, on each qualifying webhook request, or when a
+usage window crosses a line or renews, even when no turn is active. A `once` task
+missed while the server was down runs when it is back.
 Without a signature, anyone with the webhook URL can trigger a run.
 Signature checks, filters, and dedupe can skip a webhook request.
 `bindToCurrentThread` defaults to `true` only when the caller has a thread in
@@ -508,6 +508,26 @@ now leaves `nextRunAt` alone. A limit with no reset time, or a reset no later th
 the failure, holds nothing back: the run sends as usual and may hit the limit.
 Bound webhook runs always send as usual. An unbound run on an exhausted model,
 webhook runs included, launches on the fallback model when that one is usable.
+
+A `usage` schedule names a `window` (an `id` or a `kind` from `t3_usage_limits`, a
+`kind` being that kind's first window in the sorted order) and `on`: `reset`, or
+`above` or `below` with `usedPercent`. `instanceId` defaults to the task's model's
+instance. It has no `nextRunAt`: a sweep evaluates it on each `ProviderRegistry`
+change and when a recorded reset comes due. What the sweep has learned lives in the
+stored schedule's `state`, which no client or agent can set, and lands before the
+run starts, so a restart cannot fire one crossing twice and a failed send does not
+retry it. A task already past its line waits for a crossing; an edit that changes
+the trigger, or re-enabling, starts it over, and for `above` so does a new period.
+A new or changed trigger naming a window the instance does not report is refused
+with the ids and kinds it does, and an instance with `unavailable: unsupported` is
+refused; no readings yet, or any other `unavailable`, saves. A window whose reset has passed is skipped for
+a line, since its percent is a placeholder or from before the reset, unless it was
+read after that reset: the registry's merge keeps the old time when an idle window
+reads `0, null`. A failed probe keeps the last reading, so a line waits, while a
+recorded reset still fires by the clock, unless it was recorded at 0. A signed-out
+provider keeps its last windows, so it reads as no reading at all. On a
+limit-stopped thread with a reset ahead the crossing sends nothing, records why and
+is used, with no postponement. A window with no reset time never fires `reset`.
 
 ## Delegated Task Lifecycle
 

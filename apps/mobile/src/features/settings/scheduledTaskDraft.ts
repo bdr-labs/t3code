@@ -82,7 +82,11 @@ export const DEFAULT_SCHEDULE: ScheduleDraft = {
   savedFilters: [],
 };
 
-export function scheduleDraftForTask(task: Pick<ScheduledTask, "schedule">): ScheduleDraft {
+type EditableSchedule = Exclude<ScheduledTask["schedule"], { readonly type: "usage" }>;
+
+export const USAGE_TASK_EDIT_REFUSAL = "Edit this task's usage trigger on web or desktop.";
+
+export function scheduleDraftForTask(task: { readonly schedule: EditableSchedule }): ScheduleDraft {
   switch (task.schedule.type) {
     case "fixed_time":
       return {
@@ -269,7 +273,9 @@ export function createDraft(
   };
 }
 
-export function editDraft(task: ScheduledTask): ScheduledTaskDraft {
+/** Null for a usage task: this editor has no usage mode, so a save here would replace the trigger. */
+export function editDraft(task: ScheduledTask): ScheduledTaskDraft | null {
+  if (task.schedule.type === "usage") return null;
   return {
     task,
     title: task.title,
@@ -277,7 +283,7 @@ export function editDraft(task: ScheduledTask): ScheduledTaskDraft {
     projectId: task.projectId,
     modelSelection: task.modelSelection,
     modelSelectionIsExplicit: true,
-    schedule: scheduleDraftForTask(task),
+    schedule: scheduleDraftForTask({ schedule: task.schedule }),
     workspace: task.workspaceStrategy.type,
     baseRef: task.workspaceStrategy.type === "worktree" ? task.workspaceStrategy.baseRef : "main",
     checkoutPath:

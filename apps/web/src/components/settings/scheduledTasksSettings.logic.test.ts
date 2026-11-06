@@ -20,8 +20,11 @@ import {
   scheduledTaskDefaultModel,
   defaultScheduledTaskProjectId,
   matchesScheduledTaskScope,
+  scheduleDraftErrors,
   scheduleFromDraft,
   taskToDraft,
+  usageWindowOnInstance,
+  usageWindowOptions,
 } from "./scheduledTasksSettings.logic";
 
 const laptopId = EnvironmentId.make("laptop");
@@ -310,6 +313,90 @@ describe("webhook scheduled tasks", () => {
         filters: [{ id: "f1", path: "body.action", op: "in", value: " , " }],
       }),
     ).toBeNull();
+  });
+});
+
+describe("usage scheduled tasks", () => {
+  const usageDraft = (schedule: ScheduledTask["schedule"]) =>
+    taskToDraft({ ...legacyTask, schedule });
+
+  it.each<ScheduledTask["schedule"]>([
+    { type: "usage", window: "weekly", on: "reset" },
+    { type: "usage", window: "seven_day_opus", on: "above", usedPercent: 80 },
+    {
+      type: "usage",
+      instanceId: ProviderInstanceId.make("codex_alternate"),
+      window: "session",
+      on: "below",
+      usedPercent: 1,
+    },
+  ])("round-trips $window on $on", (schedule) => {
+    expect(scheduleFromDraft(usageDraft(schedule))).toEqual(schedule);
+  });
+
+  it("never sends the server's state back", () => {
+    const trigger = { type: "usage", window: "weekly", on: "above", usedPercent: 80 } as const;
+    expect(scheduleFromDraft(usageDraft({ ...trigger, state: { armed: false } }))).toEqual(trigger);
+  });
+
+  it("does not send a percent for a renewal, though the field still holds one", () => {
+    const draft = usageDraft({ type: "usage", window: "weekly", on: "above", usedPercent: 80 });
+    expect(scheduleFromDraft({ ...draft, usageOn: "reset" })).toEqual({
+      type: "usage",
+      window: "weekly",
+      on: "reset",
+    });
+  });
+
+  it.each(["", " ", "0", "100", "12.5", "abc"])("refuses a percent of %j", (usagePercent) => {
+    const draft = {
+      ...usageDraft({ type: "usage", window: "weekly", on: "above", usedPercent: 80 }),
+      usagePercent,
+    };
+    expect(scheduleFromDraft(draft)).toBeNull();
+    expect(scheduleDraftErrors(draft)).toEqual([
+      expect.objectContaining({ title: "Invalid percent" }),
+    ]);
+  });
+
+  it("needs a window", () => {
+    const draft = {
+      ...usageDraft({ type: "usage", window: "weekly", on: "reset" }),
+      usageWindow: "",
+    };
+    expect(scheduleFromDraft(draft)).toBeNull();
+    expect(scheduleDraftErrors(draft)).toEqual([
+      expect.objectContaining({ title: "Pick a usage window" }),
+    ]);
+  });
+
+  it("keeps a window the new instance reports, and otherwise moves to its first", () => {
+    const windows = [
+      { id: "five_hour", kind: "session", label: "Session", usedPercent: 20 },
+      { id: "seven_day", kind: "weekly", label: "Weekly", usedPercent: 10 },
+    ] as const;
+    expect(usageWindowOnInstance(windows, "seven_day")).toBe("seven_day");
+    expect(usageWindowOnInstance(windows, "weekly")).toBe("weekly");
+    expect(usageWindowOnInstance(windows, "primary")).toBe("five_hour");
+    expect(usageWindowOnInstance([], "seven_day")).toBe("");
+  });
+
+  it("offers a stored window the instance no longer reports, and no copy of one it does", () => {
+    const windows = [
+      { id: "seven_day", kind: "weekly", label: "Weekly", usedPercent: 10 },
+      { id: "five_hour", kind: "session", label: "Session", usedPercent: 20 },
+    ] as const;
+    const live = [
+      { value: "seven_day", label: "Weekly" },
+      { value: "five_hour", label: "Session" },
+    ];
+    expect(usageWindowOptions(windows, "")).toEqual(live);
+    expect(usageWindowOptions(windows, "seven_day")).toEqual(live);
+    expect(usageWindowOptions(windows, "weekly")).toEqual(live);
+    expect(usageWindowOptions(windows, "seven_day_opus")).toEqual([
+      ...live,
+      { value: "seven_day_opus", label: "Seven day opus" },
+    ]);
   });
 });
 

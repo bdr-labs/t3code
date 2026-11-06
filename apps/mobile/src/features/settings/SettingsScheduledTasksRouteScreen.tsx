@@ -12,11 +12,14 @@ import type {
   ProjectId,
   ScheduledTask,
   ScheduledTaskUpsertInput,
+  ScheduledTaskUsageSchedule,
 } from "@t3tools/contracts";
 import {
   MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
   MAX_WEBHOOK_FILTERS,
   resolveEnvironmentMachineKind,
+  usageScheduleLabel,
+  usageWindowsOf,
 } from "@t3tools/contracts";
 import type { MenuAction } from "@react-native-menu/menu";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
@@ -74,6 +77,7 @@ import { SettingsSection } from "./components/SettingsSection";
 import { useSettingsEnvironmentFilter, type SettingsTarget } from "./settings-environment-filter";
 import {
   editDraft,
+  USAGE_TASK_EDIT_REFUSAL,
   parseIntervalMinutes,
   scheduledTaskDefaultModel,
   scheduleFromDraft,
@@ -109,7 +113,24 @@ const DAYS = [
   { index: 0, label: "Sun" },
 ] as const;
 
+// Its own component, so only a usage task's row follows server config updates.
+function UsageScheduleText(props: {
+  readonly environmentId: EnvironmentId;
+  readonly task: ScheduledTask;
+  readonly schedule: ScheduledTaskUsageSchedule;
+}) {
+  const config = useEnvironmentServerConfig(props.environmentId);
+  return usageScheduleLabel(
+    props.schedule,
+    usageWindowsOf(
+      config?.providers ?? [],
+      props.schedule.instanceId ?? props.task.modelSelection.instanceId,
+    ),
+  );
+}
+
 function describeSchedule(task: ScheduledTask): string {
+  if (task.schedule.type === "usage") return usageScheduleLabel(task.schedule);
   if (task.schedule.type === "webhook") return "On webhook";
   if (task.schedule.type === "once") {
     const runAt = new Date(task.schedule.runAt);
@@ -461,10 +482,15 @@ export function SettingsScheduledTasksRouteScreen() {
                         .map((member) => member.project.id) ?? [])
                 }
                 onEdit={(task) => {
+                  const draft = editDraft(task);
+                  if (draft === null) {
+                    Dialog.alert("Not editable here", USAGE_TASK_EDIT_REFUSAL);
+                    return;
+                  }
                   startEditor({
                     environmentId: environment.environmentId,
                     environmentLabel: environment.label,
-                    draft: editDraft(task),
+                    draft,
                   });
                   navigation.navigate("SettingsScheduledTaskEdit");
                 }}
@@ -734,6 +760,11 @@ function TaskForm({
       return;
     // Preserve signatures edited on other clients by sending the task's current value.
     const liveTask = tasks.data?.tasks.find((task) => task.id === draft.task?.id);
+    // Turned into a usage task elsewhere since this editor opened.
+    if (liveTask?.schedule.type === "usage") {
+      Dialog.alert("Not editable here", USAGE_TASK_EDIT_REFUSAL);
+      return;
+    }
     const schedule = scheduleFromDraft(
       draft.schedule.mode === "webhook" && liveTask?.schedule.type === "webhook"
         ? { ...draft.schedule, signature: liveTask.schedule.signature }
@@ -1470,7 +1501,15 @@ function EnvironmentTasks({
                 {task.title}
               </Text>
               <Text className="text-sm text-foreground-muted" numberOfLines={2}>
-                {describeSchedule(task)}
+                {task.schedule.type === "usage" ? (
+                  <UsageScheduleText
+                    environmentId={environmentId}
+                    task={task}
+                    schedule={task.schedule}
+                  />
+                ) : (
+                  describeSchedule(task)
+                )}
                 {!task.enabled
                   ? " · Paused"
                   : task.nextRunAt

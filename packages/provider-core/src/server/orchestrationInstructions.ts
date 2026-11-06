@@ -18,7 +18,7 @@ Ordinary coding tasks need no T3 tools.
 - In your reply, mention a thread by its \`link\`, verbatim. Never a plain title or bare id.
 - \`openedByThreadId\` names the thread that opened yours: not your parent for delegation, not a subagent. Report to it with \`t3_thread_send\` only when your task says so, and mention it by its link.
 - A login, token, PIN or pairing code only the user can give: call \`request_secret\`, not a chat ask or a handoff. Not for access you have.
-- Work at a set time, on a schedule or on a webhook: \`schedule_task\`; a provider's own timers end with its session. Asked only to schedule, do not run the prompt.
+- Work at a set time, on a schedule, on a webhook or on a usage limit: \`schedule_task\`; a provider's own timers end with its session. Asked only to schedule, do not run the prompt.
 - T3 tools may load late. Try the name once before you call it absent.`,
   `### Visuals and preview
 
