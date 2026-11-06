@@ -58,6 +58,18 @@ in a new thread's model picker to add or remove them. A regular click returns to
 single model. Choose a base branch and send. Each selection starts a separate thread
 and worktree while you stay in the new thread composer. This requires a Git project.
 
+## See references to a thread
+
+On web and desktop, hover a thread link or focus it with the keyboard to highlight
+its row in the sidebar, with a second, quieter highlight on visible threads that
+mention it or wait for it. Click the link to open the thread and keep those highlights
+while you move between threads. Each clicked link becomes a chip below the search box,
+and you can keep several at once. Mentions of a highlighted thread also stand out inside
+any thread you open. Select a chip to return to that thread, or its **×** to stop
+highlighting it. Hover a highlighted thread's own row for its counts, including matches
+in collapsed sections. Offline machines may leave results incomplete. On mobile, touch
+and hold a thread link and choose **Show references** to see the related threads.
+
 ## Pin and reorder threads
 
 Pin a thread from its menu to keep it above your active work.

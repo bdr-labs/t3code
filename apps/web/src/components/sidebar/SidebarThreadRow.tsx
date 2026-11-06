@@ -1,3 +1,4 @@
+import { useReferenceHighlightRole, useReferenceMatches } from "../../threadReferenceHighlight";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadTerminalStatusButton } from "../ThreadStatusIndicators";
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
@@ -269,6 +270,9 @@ function SidebarThreadTooltip({
   terminalStatus: TerminalStatusIndicator | null;
   terminalProcessCount: number;
 }) {
+  const referenceMatches = useReferenceMatches(
+    scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+  );
   const driverKind = providerEntry?.driverKind ?? null;
   const previousProviderNames = thread.providerInstanceHistory
     .filter((instanceId) => instanceId !== modelInstanceId)
@@ -286,6 +290,21 @@ function SidebarThreadTooltip({
           ) : null
         }
       >
+        {referenceMatches &&
+        (!referenceMatches.pending ||
+          referenceMatches.mentions.size > 0 ||
+          referenceMatches.waits.size > 0) ? (
+          <div>
+            {referenceMatches.mentions.size}{" "}
+            {referenceMatches.mentions.size === 1 ? "mention" : "mentions"} ·{" "}
+            {referenceMatches.waits.size} waiting
+            {referenceMatches.unavailable
+              ? " · some machines unavailable"
+              : referenceMatches.pending
+                ? " · checking"
+                : ""}
+          </div>
+        ) : null}
         {projectDisplayName ? (
           <div className="flex min-w-0 items-center gap-2">
             {project ? <ProjectFavicon project={project} className="size-3 shrink-0" /> : null}
@@ -721,6 +740,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const isRegeneratingTitle = thread.titleRegeneration != null;
   const localLastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
   const lastVisitedAt = resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAt);
+  const referenceRole = useReferenceHighlightRole(threadKey);
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
   const openPrLink = useOpenPrLink();
   const runningTerminalIds = useThreadRunningTerminalIds({
@@ -1047,6 +1067,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     shouldRecede &&
       (status === "preparing" || status === "working") &&
       "opacity-70 transition-opacity hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none",
+    // A gradient tints over the row's own background, so an active row still reads as active.
+    referenceRole === "target" &&
+      "bg-linear-to-b from-(--context-chip-thread)/15 to-(--context-chip-thread)/15 ring-2 ring-inset ring-(--context-chip-thread) light:ring-2 light:ring-(--context-chip-thread)",
+    referenceRole === "related" && "ring-1 ring-inset ring-primary/50 light:ring-primary/50",
+    referenceRole === "related" && !props.isActive && !isSelected && "bg-sidebar-row-hover",
     isFileDragOver && "ring-1 ring-inset ring-primary/70",
     isFileDragOver && !props.isActive && !isSelected && "bg-sidebar-row-hover",
     props.sortable?.isDragging &&
@@ -1133,6 +1158,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     : "text-secondary-label/70",
             ),
         isRegeneratingTitle && "opacity-55",
+        referenceRole === "target" && "font-medium text-foreground",
       )}
       dir={textDirection(thread.title)}
     >
@@ -1351,6 +1377,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   inFolder && "ps-4",
                   props.nested && cn("gap-1.5", nestedRowLevelOf(props.depth ?? 1).indent),
                 )}
+                data-reference-highlight={referenceRole ?? undefined}
                 onClick={handleClick}
                 onDoubleClick={handleDoubleClick}
                 onKeyDown={handleKeyDown}
@@ -1655,6 +1682,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               data-testid="sidebar-row-card"
               aria-busy={isRegeneratingTitle || undefined}
               className={rowSurfaceClassName}
+              data-reference-highlight={referenceRole ?? undefined}
               onClick={handleClick}
               onDoubleClick={handleDoubleClick}
               onKeyDown={handleKeyDown}
