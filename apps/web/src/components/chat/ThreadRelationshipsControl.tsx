@@ -2,10 +2,15 @@ import { useAtomValue } from "@effect/atom-react";
 import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import {
+  deriveLineageFamily,
   deriveLineageGroup,
-  foldLineageRows,
+  isLineageRowFolded,
   lineageThreadKindOf,
   relationshipLabel,
+  useLineageFoldStore,
+  type LineageFamily,
+  type LineageFamilyBranch,
+  type LineageFamilyFold,
   type LineageGroup,
 } from "./ThreadRelationshipsControl.logic";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
@@ -26,12 +31,15 @@ import {
 } from "@t3tools/client-runtime/state/subagent-display";
 import { deriveProviderSubagentStatus } from "@t3tools/client-runtime/state/thread-execution";
 import {
+  deriveThreadFamilyTree,
   deriveThreadRelationshipGraph,
   immediateThreadRelationships,
   isParentThreadRelationship,
   threadRelationshipRowStatus,
   orderWebThreadLineageRows,
   resolveMergeBackTargetThreadId,
+  THREAD_FAMILY_DEPTH_CAP,
+  withProjectedThread,
   type ThreadRelationshipEdge,
   type ThreadRelationshipWalkRow,
 } from "@t3tools/client-runtime/state/thread-relationships";
@@ -95,6 +103,7 @@ import { useEnvironmentQuery } from "../../state/query";
 import { AgentElapsed } from "./AgentElapsed";
 import { ThreadRelationshipIcon, threadRelationshipStatusLabel } from "./ThreadRelationshipIcon";
 import { ThreadLineageWorkflowRow } from "./ThreadLineageWorkflowRow";
+import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
 import { openSideChatTab } from "../../lib/sideChatPane";
 
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
@@ -152,8 +161,6 @@ function ThreadLineageRowList(props: {
 
 function ThreadLineageGroup(props: {
   readonly label: string | null;
-  /** The label already names the count, so the collapsed row does not repeat it. */
-  readonly labelCounts?: boolean;
   readonly rows: ReadonlyArray<ThreadRelationshipWalkRow>;
   readonly expanded: boolean;
   readonly children: (rows: ReadonlyArray<ThreadRelationshipWalkRow>) => ReactNode;
@@ -174,7 +181,7 @@ function ThreadLineageGroup(props: {
             {props.label}
           </span>
           {failedCount > 0 ? <SectionHeaderStatus>{failedCount} failed</SectionHeaderStatus> : null}
-          {expanded || props.labelCounts ? null : (
+          {expanded ? null : (
             <span className="shrink-0 text-xs font-normal tabular-nums text-muted-foreground">
               {props.rows.length}
             </span>
@@ -328,6 +335,250 @@ function ThreadLineageLinkRow(props: {
         </TooltipPopup>
       </Tooltip>
     </li>
+  );
+}
+
+const familyRowIndent = (depth: number, extraRem = 0) => ({
+  paddingInlineStart: `${Math.min(depth, THREAD_FAMILY_DEPTH_CAP) * 0.625 + extraRem}rem`,
+});
+
+// Lines a tree row without an arrow up with the icons of the rows that have one.
+const FAMILY_ARROW_WIDTH_REM = 1.5;
+
+function ThreadFamilyRow(props: {
+  readonly title: string;
+  readonly status: string | null;
+  readonly icon: LucideIcon;
+  readonly isCurrent: boolean;
+  readonly project: ProjectFaviconProject | null;
+  readonly depth: number;
+  readonly fold: { readonly folded: boolean; readonly onToggle: () => void } | null;
+  readonly onOpen: () => void;
+}) {
+  const failed = props.status === "failed" || props.status === "error";
+  const content = (
+    <>
+      <ThreadRelationshipIcon fallbackIcon={props.icon} status={props.status} />
+      {props.project === null ? null : (
+        <ProjectFavicon project={props.project} className="size-3.5 shrink-0" />
+      )}
+      <span className="min-w-0 flex-1">
+        <span
+          className={cn(
+            "block truncate text-left text-sm leading-4",
+            props.isCurrent ? "font-semibold text-foreground" : "font-medium text-foreground/85",
+          )}
+        >
+          {props.title}
+        </span>
+      </span>
+      {props.status === null ? null : (
+        <span
+          className={`shrink-0 text-2xs ${failed ? "text-destructive" : "text-muted-foreground"}`}
+        >
+          {threadRelationshipStatusLabel(props.status)}
+        </span>
+      )}
+    </>
+  );
+  return (
+    <div className="flex h-8 min-w-0 items-center" style={familyRowIndent(props.depth)}>
+      {props.fold === null ? (
+        <span aria-hidden className="size-6 shrink-0" />
+      ) : (
+        <ThreadDetailsControl
+          size="icon-xs"
+          variant="ghost"
+          part="icon"
+          aria-label={`Threads opened by ${props.title}`}
+          aria-expanded={!props.fold.folded}
+          onClick={props.fold.onToggle}
+        >
+          <ChevronDownIcon
+            aria-hidden
+            className={cn(
+              THREAD_DETAILS_PANEL_CHEVRON_CLASS,
+              "transition-transform",
+              props.fold.folded && "-rotate-90",
+            )}
+          />
+        </ThreadDetailsControl>
+      )}
+      <Tooltip>
+        {props.isCurrent ? (
+          <TooltipTrigger
+            delay={200}
+            render={
+              <div
+                aria-current="true"
+                className={`flex h-8 min-w-0 flex-1 items-center rounded-lg bg-black/[0.035] dark:bg-white/[0.08] ${THREAD_DETAILS_PANEL_ROW_CONTENT_CLASS}`}
+              />
+            }
+          >
+            {content}
+          </TooltipTrigger>
+        ) : (
+          <TooltipTrigger
+            delay={200}
+            render={
+              <ThreadDetailsControl
+                size="sm"
+                variant="ghost"
+                part="row"
+                className="flex-1"
+                onClick={props.onOpen}
+              />
+            }
+          >
+            {content}
+          </TooltipTrigger>
+        )}
+        <TooltipPopup side="left">
+          <LineageTooltipContent
+            title={props.title}
+            hint={
+              props.isCurrent
+                ? "This thread"
+                : props.project === null
+                  ? "Open thread in this chat"
+                  : `Open thread from ${props.project.title} in this chat`
+            }
+          />
+        </TooltipPopup>
+      </Tooltip>
+    </div>
+  );
+}
+
+interface ThreadFamilyTreeContext {
+  readonly environmentId: EnvironmentId;
+  readonly currentThreadId: ThreadId;
+  readonly currentProjectId: string | undefined;
+  readonly projects: ReadonlyArray<ProjectFaviconProject & { readonly id: string }>;
+  readonly titleOf: (thread: OrchestrationV2ThreadShell) => string;
+  readonly onOpen: (threadId: ThreadId) => void;
+}
+
+function ThreadFamilyBranch(props: {
+  readonly branch: LineageFamilyBranch;
+  readonly depth: number;
+  readonly context: ThreadFamilyTreeContext;
+}) {
+  const { branch, context, depth } = props;
+  const { thread, isAncestor, isCurrent } = branch.node;
+  const rowKey = threadKey({ environmentId: context.environmentId, threadId: thread.id });
+  const foldedOn = useLineageFoldStore((state) => state.folded.get(rowKey));
+  const setRowFolded = useLineageFoldStore((state) => state.setRowFolded);
+  const folded = isLineageRowFolded(foldedOn, branch.node, context.currentThreadId);
+  const hasChildren =
+    branch.shown.length > 0 || branch.settled.length > 0 || branch.deeperCount > 0;
+  const project =
+    thread.projectId === context.currentProjectId
+      ? undefined
+      : context.projects.find((candidate) => candidate.id === thread.projectId);
+  return (
+    <li>
+      <ThreadFamilyRow
+        title={context.titleOf(thread)}
+        status={thread.activityRunStatus ?? thread.status ?? null}
+        icon={isCurrent ? ArrowRightIcon : isAncestor ? CornerLeftUpIcon : CornerDownRightIcon}
+        isCurrent={isCurrent}
+        project={project ?? null}
+        depth={depth}
+        fold={
+          hasChildren
+            ? {
+                folded,
+                onToggle: () => setRowFolded(rowKey, folded ? null : context.currentThreadId),
+              }
+            : null
+        }
+        onOpen={() => context.onOpen(thread.id)}
+      />
+      {hasChildren && !folded ? (
+        <ThreadFamilyChildren fold={branch} foldKey={rowKey} depth={depth + 1} context={context} />
+      ) : null}
+    </li>
+  );
+}
+
+function ThreadFamilyChildren(props: {
+  readonly fold: LineageFamilyFold;
+  readonly foldKey: string;
+  readonly depth: number;
+  readonly context: ThreadFamilyTreeContext;
+}) {
+  const { context, depth, fold } = props;
+  const settledOpen = useLineageFoldStore((state) => state.settledOpen.has(props.foldKey));
+  const setSettledOpen = useLineageFoldStore((state) => state.setSettledOpen);
+  const renderBranch = (branch: LineageFamilyBranch) => (
+    <ThreadFamilyBranch
+      key={branch.node.thread.id}
+      branch={branch}
+      depth={depth}
+      context={context}
+    />
+  );
+  return (
+    <ul className="m-0 list-none p-0">
+      {fold.shown.map(renderBranch)}
+      {fold.settled.length > 0 ? (
+        <li style={familyRowIndent(depth, FAMILY_ARROW_WIDTH_REM)}>
+          <ThreadDetailsControl
+            aria-expanded={settledOpen}
+            onClick={() => setSettledOpen(props.foldKey, !settledOpen)}
+          >
+            <BotIcon aria-hidden className={THREAD_DETAILS_PANEL_ICON_CLASS} />
+            <span className={cn(THREAD_DETAILS_PANEL_LABEL_CLASS, "min-w-0 flex-1 truncate")}>
+              Settled ({fold.settled.length})
+            </span>
+            <ChevronDownIcon
+              aria-hidden
+              className={cn(
+                THREAD_DETAILS_PANEL_CHEVRON_CLASS,
+                "transition-transform",
+                !settledOpen && "-rotate-90",
+              )}
+            />
+          </ThreadDetailsControl>
+        </li>
+      ) : null}
+      {settledOpen ? fold.settled.map(renderBranch) : null}
+      {fold.deeperCount > 0 ? (
+        <li style={familyRowIndent(depth, FAMILY_ARROW_WIDTH_REM)}>
+          <p className="m-0 px-2.5 py-1 text-2xs text-muted-foreground">
+            +{fold.deeperCount} deeper
+          </p>
+        </li>
+      ) : null}
+    </ul>
+  );
+}
+
+function ThreadFamilySection(props: {
+  readonly family: LineageFamily;
+  readonly context: ThreadFamilyTreeContext;
+}) {
+  return (
+    <div>
+      <ThreadLineageSubheading>Family</ThreadLineageSubheading>
+      {/* Its own scroller, so a long family leaves the sections below it within reach. */}
+      <div
+        role="group"
+        aria-label="Thread family"
+        className="max-h-[min(28rem,55dvh)] overflow-y-auto overscroll-contain"
+      >
+        <ThreadFamilyChildren
+          fold={props.family}
+          foldKey={`${threadKey({
+            environmentId: props.context.environmentId,
+            threadId: props.context.currentThreadId,
+          })}:roots`}
+          depth={0}
+          context={props.context}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -621,10 +872,8 @@ export function ThreadRelationshipsPanel(props: {
     active = [],
     previous = [],
     sideChats = [],
-    openedBy = [],
-    opened = [],
   } = groupBy(visibleRelationships, ({ threadId, edge }) => {
-    if (edge.kind === "opened") return edge.targetThreadId === threadId ? "opened" : "openedBy";
+    if (edge.kind === "opened") return "family";
     const isParent = isParentThreadRelationship(edge, props.threadId);
     if (!isParent && graph.nodes.get(threadId)?.thread?.lineage.sideChat === true)
       return "sideChats";
@@ -655,18 +904,31 @@ export function ThreadRelationshipsPanel(props: {
 
   const lineageKindOf = (thread: OrchestrationV2ThreadShell) =>
     lineageThreadKindOf(props.environmentId, thread);
-  const openedFold = foldLineageRows(opened, ({ threadId }) => {
-    const thread = graph.nodes.get(threadId)?.thread;
-    return thread ? lineageKindOf(thread) : "done";
+  const relationshipRowIds = new Set(relationshipRows.map(({ threadId }) => threadId));
+  const familyRowIds = new Set(
+    visibleRelationships.flatMap(({ threadId, edge }) =>
+      edge.kind === "opened" ? [threadId] : [],
+    ),
+  );
+  const family = deriveLineageFamily({
+    tree: deriveThreadFamilyTree(props.threadId, withProjectedThread(shells, projection)),
+    // On a row of its own, or gone by the title lookup above.
+    isLeftOut: (threadId) =>
+      isHiddenRelation(threadId) ||
+      (relationshipRowIds.has(threadId) && !familyRowIds.has(threadId)),
+    kindOf: lineageKindOf,
   });
   const lineageGroup = deriveLineageGroup({
     currentThread,
     nodes: graph.nodes.values(),
-    listedThreadIds: new Set(visibleRelationships.map(({ threadId }) => threadId)),
+    listedThreadIds: new Set([
+      ...visibleRelationships.map(({ threadId }) => threadId),
+      ...(family?.rowIds ?? []),
+    ]),
     isHidden: isHiddenRelation,
     kindOf: lineageKindOf,
   });
-  const familyVisible = openedBy.length > 0 || opened.length > 0 || lineageGroup !== null;
+  const familyVisible = family !== null || lineageGroup !== null;
   const lineageVisible =
     props.showLineage &&
     (related.length > 0 ||
@@ -779,6 +1041,13 @@ export function ThreadRelationshipsPanel(props: {
         ? null
         : (graph.nodes.get(mergeTargetThreadId)?.thread?.title ?? null);
 
+  const familyThreadTitle = (thread: OrchestrationV2ThreadShell) =>
+    relationshipThreadTitle({
+      // Fresher than an archived snapshot's copy.
+      title: resolvedThreadTitles[thread.id] ?? thread.title,
+      isSubagent: thread.lineage.relationshipToParent === "subagent",
+    });
+
   const renderFamilyRow = (
     thread: OrchestrationV2ThreadShell,
     status: string | null,
@@ -787,28 +1056,13 @@ export function ThreadRelationshipsPanel(props: {
   ) => (
     <ThreadLineageLinkRow
       key={thread.id}
-      title={relationshipThreadTitle({
-        // Fresher than an archived snapshot's copy.
-        title: resolvedThreadTitles[thread.id] ?? thread.title,
-        isSubagent: thread.lineage.relationshipToParent === "subagent",
-      })}
+      title={familyThreadTitle(thread)}
       status={status}
       icon={icon}
       hint={hint}
       onOpen={() => openThread(thread.id)}
     />
   );
-
-  const renderOpenedRow = (row: ThreadRelationshipWalkRow) => {
-    const thread = graph.nodes.get(row.threadId)?.thread;
-    if (!thread) return null;
-    return renderFamilyRow(
-      thread,
-      threadRelationshipRowStatus(graph, row),
-      row.edge.targetThreadId === props.threadId ? CornerLeftUpIcon : CornerDownRightIcon,
-      `Open ${relationshipLabel(row.edge, props.threadId).toLowerCase()} in this chat`,
-    );
-  };
 
   const renderRelationshipRow = ({ threadId, edge }: ThreadRelationshipWalkRow) => {
     const node = graph.nodes.get(threadId);
@@ -1131,36 +1385,19 @@ export function ThreadRelationshipsPanel(props: {
               ))}
             </ThreadLineageRowList>
           ) : null}
-          {openedBy.length > 0 ? (
-            <div>
-              <ThreadLineageSubheading>Opened by</ThreadLineageSubheading>
-              <ThreadLineageRowList hiddenCount={0} onShowMore={() => {}}>
-                {openedBy.map(renderOpenedRow)}
-              </ThreadLineageRowList>
-            </div>
-          ) : null}
-          {opened.length > 0 ? (
-            <div>
-              <ThreadLineageSubheading>Opened</ThreadLineageSubheading>
-              <ThreadLineageGroup
-                key={`${scopedThreadKey(ref)}:opened`}
-                label={null}
-                rows={openedFold.shown}
-                expanded
-              >
-                {(visibleRows) => visibleRows.map(renderOpenedRow)}
-              </ThreadLineageGroup>
-              <ThreadLineageGroup
-                key={`${scopedThreadKey(ref)}:opened-settled`}
-                label={`Settled (${openedFold.settled.length})`}
-                labelCounts
-                rows={openedFold.settled}
-                expanded={false}
-              >
-                {(visibleRows) => visibleRows.map(renderOpenedRow)}
-              </ThreadLineageGroup>
-            </div>
-          ) : null}
+          {family === null ? null : (
+            <ThreadFamilySection
+              family={family}
+              context={{
+                environmentId: props.environmentId,
+                currentThreadId: props.threadId,
+                currentProjectId: currentThread?.projectId,
+                projects,
+                titleOf: familyThreadTitle,
+                onOpen: openThread,
+              }}
+            />
+          )}
           {lineageGroup === null ? null : (
             <ThreadLineageGroupSection
               key={`${scopedThreadKey(ref)}:group`}

@@ -3,12 +3,14 @@ import { ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 import {
+  deriveThreadFamilyTree,
   deriveThreadRelationshipGraph,
   immediateThreadRelationships,
   isParentThreadRelationship,
   orderWebThreadLineageRows,
   resolveMergeBackTargetThreadId,
   threadRelationshipRowStatus,
+  withProjectedThread,
 } from "./threadRelationships.ts";
 
 describe("thread relationships", () => {
@@ -571,5 +573,151 @@ describe("web thread lineage ordering", () => {
         },
       }),
     ).toEqual([dated, missingTransfer, undated]);
+  });
+});
+
+describe("deriveThreadFamilyTree", () => {
+  const shell = (id: string, opener?: string, extra: Record<string, unknown> = {}) =>
+    ({
+      id: ThreadId.make(id),
+      ...(opener === undefined ? {} : { openedByThreadId: ThreadId.make(opener) }),
+      lineage: { parentThreadId: null },
+      ...extra,
+    }) as never;
+  const chain = (length: number) =>
+    Array.from({ length }, (_, index) =>
+      shell(`t${index}`, index === 0 ? undefined : `t${index - 1}`),
+    );
+  const tree = (current: string, shells: ReadonlyArray<never>) =>
+    deriveThreadFamilyTree(ThreadId.make(current), shells);
+  const rows = (current: string, shells: ReadonlyArray<never>) =>
+    tree(current, shells).nodes.map(({ thread, depth, isCurrent, isAncestor }) =>
+      [thread.id, depth, isCurrent ? "current" : isAncestor ? "ancestor" : "other"].join(" "),
+    );
+
+  const family = [
+    shell("uncle", "root"),
+    shell("root"),
+    shell("leaf", "middle"),
+    shell("sibling", "root"),
+    shell("middle", "root"),
+    shell("unrelated"),
+  ];
+
+  it.each([
+    [
+      "root",
+      ["root 0 current", "middle 1 other", "leaf 2 other", "sibling 1 other", "uncle 1 other"],
+    ],
+    [
+      "middle",
+      ["root 0 ancestor", "middle 1 current", "leaf 2 other", "sibling 1 other", "uncle 1 other"],
+    ],
+    [
+      "leaf",
+      [
+        "root 0 ancestor",
+        "middle 1 ancestor",
+        "leaf 2 current",
+        "sibling 1 other",
+        "uncle 1 other",
+      ],
+    ],
+  ])("gives the whole family root first from %s", (current, expected) => {
+    expect(rows(current, family)).toEqual(expected);
+  });
+
+  it("gives a thread with no opener and no child a tree of itself", () => {
+    expect(rows("unrelated", family)).toEqual(["unrelated 0 current"]);
+    expect(tree("nowhere", family).nodes).toEqual([]);
+  });
+
+  it("lists siblings newest first", () => {
+    const at = (millis: number) => ({ createdAt: DateTime.makeUnsafe(millis) });
+    const siblings = [
+      shell("root"),
+      shell("old", "root", at(1)),
+      shell("new", "root", at(3)),
+      shell("mid", "root", at(2)),
+    ];
+    expect(rows("root", siblings).slice(1)).toEqual(["new 1 other", "mid 1 other", "old 1 other"]);
+  });
+
+  it.each([
+    ["itself", [shell("a", "a")], "a", ["a 0 current"]],
+    ["a pair", [shell("a", "b"), shell("b", "a")], "a", ["b 0 ancestor", "a 1 current"]],
+    [
+      "a ring it hangs off",
+      [shell("x", "y"), shell("y", "x"), shell("c", "y")],
+      "c",
+      ["x 0 ancestor", "y 1 ancestor", "c 2 current"],
+    ],
+    [
+      "a ring of three",
+      [shell("a", "c"), shell("b", "a"), shell("c", "b")],
+      "b",
+      ["c 0 ancestor", "a 1 ancestor", "b 2 current"],
+    ],
+  ])("ends the walk where a cycle through %s closes", (_name, shells, current, expected) => {
+    expect(rows(current, shells as never)).toEqual(expected);
+  });
+
+  it("makes a thread a root when its opener is missing, deleted or in another environment", () => {
+    const deleted = { deletedAt: DateTime.makeUnsafe(0) };
+    const shells = [
+      shell("from-other-environment", "only-in-another-environment"),
+      shell("gone", "root", deleted),
+      shell("root"),
+      shell("orphan", "gone"),
+      shell("orphan-child", "orphan"),
+    ];
+    expect(rows("from-other-environment", shells)).toEqual(["from-other-environment 0 current"]);
+    expect(rows("orphan-child", shells)).toEqual(["orphan 0 ancestor", "orphan-child 1 current"]);
+    expect(rows("root", shells)).toEqual(["root 0 current"]);
+    expect(tree("gone", shells).nodes).toEqual([]);
+  });
+
+  it("uses the most authoritative copy of a thread", () => {
+    const shells = [
+      shell("child", "root", { title: "live" }),
+      shell("root"),
+      shell("child", undefined, { title: "archived" }),
+    ];
+    const nodes = tree("root", shells).nodes;
+    expect(nodes.map(({ thread }) => thread.title)).toEqual([undefined, "live"]);
+  });
+
+  it("counts what is past the cap on the last row above it, and keeps every member", () => {
+    const shells = chain(12);
+    const fromRoot = tree("t0", shells);
+    expect(fromRoot.nodes.map(({ thread }) => thread.id)).toEqual(
+      Array.from({ length: 9 }, (_, index) => `t${index}`),
+    );
+    expect(fromRoot.nodes.at(-1)).toMatchObject({ depth: 8, deeperCount: 3 });
+    expect(fromRoot.nodes.slice(0, -1).every(({ deeperCount }) => deeperCount === 0)).toBe(true);
+    expect(fromRoot.memberIds.size).toBe(12);
+  });
+
+  it.each([
+    ["t8", 10, 2],
+    ["t11", 12, 0],
+  ])("keeps %s and what it opened past the cap", (current, rowCount, deeper) => {
+    const { nodes } = tree(current, chain(12));
+    expect(nodes).toHaveLength(rowCount);
+    expect(nodes.at(-1)?.deeperCount).toBe(deeper);
+    expect(nodes.some(({ thread, isCurrent }) => isCurrent && thread.id === current)).toBe(true);
+  });
+
+  it("walks from the open thread's projection when no shell carries it", () => {
+    const thread = shell("omitted", "root");
+    const shells = [shell("root"), shell("child", "omitted")];
+    const projection = { thread } as never;
+    expect(rows("omitted", withProjectedThread(shells, projection) as never)).toEqual([
+      "root 0 ancestor",
+      "omitted 1 current",
+      "child 2 other",
+    ]);
+    expect(withProjectedThread(shells, null)).toBe(shells);
+    expect(withProjectedThread(shells, { thread: shells[0] } as never)).toBe(shells);
   });
 });

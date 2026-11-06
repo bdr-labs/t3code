@@ -95,6 +95,74 @@ describe("selectThreadRelationshipShells", () => {
     ).toEqual(["current", "opener", "opened", "member"]);
   });
 
+  it("keeps the whole family, past the depth cap too, and leaves out other families", () => {
+    const threads = [
+      shell("current", null, { openedByThreadId: "opener" }),
+      shell("opener", null, { openedByThreadId: "root" }),
+      shell("root"),
+      shell("sibling", null, { openedByThreadId: "opener" }),
+      shell("uncle", null, { openedByThreadId: "root" }),
+      shell("cousin", null, { openedByThreadId: "uncle" }),
+      ...Array.from({ length: 12 }, (_, index) =>
+        shell(`deep-${index}`, null, {
+          openedByThreadId: index === 0 ? "current" : `deep-${index - 1}`,
+        }),
+      ),
+      shell("other-root"),
+      shell("other-child", null, { openedByThreadId: "other-root" }),
+    ];
+    const selected = selectThreadRelationshipShells(threadId, null as Projection, threads);
+    expect(selected.map((thread) => thread.id)).toEqual(
+      threads.slice(0, -2).map((thread) => thread.id),
+    );
+  });
+
+  it("walks the family from a projection when the shell list leaves the thread out", () => {
+    const threads = [
+      shell("opener"),
+      shell("opened", null, { openedByThreadId: "current" }),
+      shell("unrelated"),
+    ];
+    const projection = {
+      thread: shell("current", null, { openedByThreadId: "opener" }),
+      subagents: [],
+      contextTransfers: [],
+    } as unknown as Projection;
+    expect(
+      selectThreadRelationshipShells(threadId, projection, threads).map((thread) => thread.id),
+    ).toEqual(["opener", "opened"]);
+  });
+
+  it("reads each shell's opener once on a long list, not once per family member", () => {
+    let reads = 0;
+    const counted = (thread: OrchestrationV2ThreadShell) => {
+      const { openedByThreadId, ...rest } = thread;
+      return Object.defineProperty(rest, "openedByThreadId", {
+        enumerable: true,
+        get: () => {
+          reads += 1;
+          return openedByThreadId;
+        },
+      }) as OrchestrationV2ThreadShell;
+    };
+    const threads = [
+      counted(shell("current")),
+      ...Array.from({ length: 500 }, (_, index) =>
+        counted(
+          index < 50
+            ? shell(`family-${index}`, null, { openedByThreadId: "current" })
+            : shell(`other-${index}`),
+        ),
+      ),
+    ];
+    selectThreadRelationshipShells(threadId, null as Projection, threads);
+    expect(reads).toBeLessThanOrEqual(threads.length + 1);
+
+    reads = 0;
+    selectThreadRelationshipShells(threadId, null as Projection, threads);
+    expect(reads).toBeLessThanOrEqual(1);
+  });
+
   it("selects no family for a thread with no opener, opened thread or group", () => {
     const threads = [shell("current"), shell("tagged", null, { tags: ["group:fleet"] })];
     expect(
@@ -107,7 +175,9 @@ describe("selectThreadRelationshipShells", () => {
   it("returns the same elements when an unrelated thread streams", () => {
     const before = [
       shell("current", null, { openedByThreadId: "opener", tags: ["group:fleet"] }),
-      shell("opener"),
+      shell("opener", null, { openedByThreadId: "root" }),
+      shell("root"),
+      shell("sibling", null, { openedByThreadId: "opener" }),
       shell("member", null, { tags: ["group:fleet"] }),
       shell("unrelated", null, { title: "before" }),
     ];

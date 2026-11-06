@@ -13,6 +13,7 @@ const state = vi.hoisted(() => ({
   threadTitles: {} as Record<string, string>,
   archivedThreads: [] as unknown[],
   hiddenKeys: new Set<string>(),
+  projects: [] as unknown[],
 }));
 
 vi.mock(import("../../state/query"), async (original) => ({
@@ -36,7 +37,7 @@ vi.mock(import("../../state/entities"), () => ({
     state.projection === null
       ? []
       : [(state.projection as { thread: unknown }).thread, ...state.relatedShells]) as never,
-  useProjects: (() => []) as never,
+  useProjects: (() => state.projects) as never,
   useHiddenThreadKeys: (() => state.hiddenKeys) as never,
   useAnyEnvironmentHiding: (() => false) as never,
 }));
@@ -61,6 +62,7 @@ import { render } from "../../../test/render";
 import { makeThreadProjectionFixture } from "../../test-fixtures";
 import { ToastProvider } from "../ui/toast";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
+import { useLineageFoldStore } from "./ThreadRelationshipsControl.logic";
 
 const environmentId = EnvironmentId.make("environment");
 const threadId = ThreadId.make("fork");
@@ -71,6 +73,8 @@ function setup() {
   state.threadTitles = { source: "Source" };
   state.archivedThreads = [];
   state.hiddenKeys = new Set();
+  state.projects = [];
+  useLineageFoldStore.setState({ folded: new Map(), settledOpen: new Set() });
   state.projection = {
     thread: {
       id: threadId,
@@ -428,10 +432,21 @@ const settled = { settledOverride: "settled" };
 function setupFamily(current: Record<string, unknown>, related: unknown[]) {
   setup();
   const projection = makeThreadProjectionFixture();
-  state.projection = { ...projection, thread: { ...projection.thread, ...current } };
+  const { id, title } = projection.thread;
+  state.projection = { ...projection, thread: { ...familyShell(id, title), ...current } };
   state.relatedShells = related;
-  return projection.thread.id;
+  return id;
 }
+
+const familyRows = () =>
+  [...document.querySelectorAll('[aria-label="Thread family"] li > div')].map(
+    (row) => row.textContent,
+  );
+
+const familyRow = (title: string) =>
+  page.getByText(title, { exact: true }).element().closest("li > div") as HTMLElement;
+
+const running = { status: "running", activityRunStatus: "running" };
 
 const renderFamilyPanel = (currentThreadId: ThreadId) =>
   render(
@@ -448,16 +463,15 @@ const renderFamilyPanel = (currentThreadId: ThreadId) =>
 
 const heading = (name: string | RegExp) => page.getByRole("heading", { name });
 
-it("names the opener in Lineage with its status and links to it", async () => {
+it("names the opener in the family tree with its status and links to it", async () => {
   const id = setupFamily({ openedByThreadId: ThreadId.make("captain") }, [
-    familyShell("captain", "Captain", { status: "running", activityRunStatus: "running" }),
+    familyShell("captain", "Captain", running),
   ]);
   await using screen = await renderFamilyPanel(id);
 
   await expect.element(page.getByRole("heading", { name: "Lineage" })).toBeVisible();
-  await expect.element(heading("Opened by")).toBeVisible();
-  await expect.element(heading(/^Opened$/)).not.toBeInTheDocument();
-  const row = screen.getByRole("button", { name: /Captain/ });
+  await expect.element(heading("Family")).toBeVisible();
+  const row = screen.getByRole("button", { name: /^Captain/ });
   await expect.element(row).toHaveTextContent("CaptainRunning");
   await row.click();
   await vi.waitFor(() =>
@@ -487,8 +501,7 @@ it.each([
 it("lists opened threads needing the user first and folds settled ones", async () => {
   const fixtureId = makeThreadProjectionFixture().thread.id;
   const openedBy = { openedByThreadId: fixtureId };
-  const running = { status: "running", activityRunStatus: "running" };
-  const id = setupFamily({}, [
+  const id = setupFamily({ title: "Captain" }, [
     familyShell("working", "Mate working", { ...openedBy, ...running }),
     familyShell("asking", "Mate asking", {
       ...openedBy,
@@ -508,9 +521,9 @@ it("lists opened threads needing the user first and folds settled ones", async (
   ]);
   await using screen = await renderFamilyPanel(id);
 
-  await expect.element(heading(/^Opened$/)).toBeVisible();
-  const liveTitles = [...document.querySelectorAll("li")].map((row) => row.textContent);
-  expect(liveTitles.map((title) => title?.replace(/(Running|Done)$/, ""))).toEqual([
+  await expect.element(heading("Family")).toBeVisible();
+  expect(familyRows().map((title) => title?.replace(/(Running|Done)$/, ""))).toEqual([
+    "Captain",
     "Mate asking",
     "Mate settled but running",
     "Mate working",
@@ -521,6 +534,8 @@ it("lists opened threads needing the user first and folds settled ones", async (
   await expect.element(fold).toHaveTextContent("Settled (1)");
   await fold.click();
   await expect.element(screen.getByText("Mate settled A", { exact: true })).toBeVisible();
+  await fold.click();
+  await expect.element(screen.getByText("Mate settled A", { exact: true })).not.toBeInTheDocument();
 });
 
 it("shows the group's other live members and counts the settled ones without a link", async () => {
@@ -610,7 +625,7 @@ it("gives each thread one row across agents, opener, opened and group", async ()
   await expect.element(heading("Group: fleet")).toBeVisible();
   await expect.element(screen.getByText(/settled/)).not.toBeInTheDocument();
   for (const title of ["Captain", "Opened mate", "Worker"]) {
-    expect(screen.getByRole("button", { name: new RegExp(title) }).elements()).toHaveLength(1);
+    expect(screen.getByRole("button", { name: new RegExp(`^${title}`) }).elements()).toHaveLength(1);
   }
   await expect.element(screen.getByText("agent", { exact: true })).toBeVisible();
 });
@@ -639,5 +654,339 @@ it("truncates long titles and group names inside the panel", async () => {
   await userEvent.hover(page.getByText(`Group: ${longGroup}`, { exact: true }));
   await vi.waitFor(() =>
     expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(longGroup),
+  );
+});
+
+/** Root, Middle and Sibling under it, Leaf under Middle, each opened by the one above. */
+const seededFamily = (currentTitle: string) => {
+  const fixtureId = makeThreadProjectionFixture().thread.id;
+  const idOf = (title: string) => (title === currentTitle ? fixtureId : ThreadId.make(title));
+  const shells = [
+    { title: "Root", opener: null, createdAt: 1 },
+    { title: "Sibling", opener: "Root", createdAt: 2 },
+    { title: "Middle", opener: "Root", createdAt: 3 },
+    { title: "Leaf", opener: "Middle", createdAt: 4 },
+  ];
+  const fields = ({ opener, createdAt }: (typeof shells)[number]) => ({
+    createdAt: DateTime.makeUnsafe(createdAt),
+    ...(opener === null ? {} : { openedByThreadId: idOf(opener) }),
+  });
+  const current = shells.find(({ title }) => title === currentTitle)!;
+  return {
+    current: { title: currentTitle, ...fields(current) },
+    related: shells
+      .filter(({ title }) => title !== currentTitle)
+      .map((entry) => familyShell(idOf(entry.title), entry.title, fields(entry))),
+  };
+};
+
+it.each([
+  ["Root", ["Root", "Middle", "Leaf", "Sibling"]],
+  ["Middle", ["Root", "Middle", "Leaf", "Sibling"]],
+  ["Leaf", ["Root", "Middle", "Leaf", "Sibling"]],
+])("shows the whole family from %s, marked and indented", async (currentTitle, order) => {
+  const { current, related } = seededFamily(currentTitle);
+  const id = setupFamily(current, related);
+  await using screen = await renderFamilyPanel(id);
+
+  await expect.element(heading("Family")).toBeVisible();
+  expect(familyRows().map((title) => title?.replace(/Done$/, ""))).toEqual(order);
+
+  const indentOf = (title: string) => familyRow(title).style.paddingInlineStart;
+  expect([indentOf("Root"), indentOf("Middle"), indentOf("Leaf")]).toEqual([
+    "0rem",
+    "0.625rem",
+    "1.25rem",
+  ]);
+
+  const marked = [...document.querySelectorAll('[aria-current="true"]')];
+  expect(marked.map((row) => row.textContent)).toEqual([`${currentTitle}Done`]);
+  expect(marked[0]?.closest("a, button")).toBeNull();
+  await expect
+    .element(screen.getByRole("button", { name: new RegExp(`^${currentTitle}`) }))
+    .not.toBeInTheDocument();
+
+  const start = screen.router?.state.location.pathname;
+  (marked[0] as HTMLElement).click();
+  await expect.element(screen.getByText(currentTitle, { exact: true })).toBeVisible();
+  expect(screen.router?.state.location.pathname).toBe(start);
+});
+
+it("follows a family row to its thread", async () => {
+  const { current, related } = seededFamily("Middle");
+  await using screen = await renderFamilyPanel(setupFamily(current, related));
+  await screen.getByRole("button", { name: /^Sibling/ }).click();
+  await vi.waitFor(() =>
+    expect(screen.router?.state.location.pathname).toBe("/environment/Sibling"),
+  );
+});
+
+it("folds a row's children and opens them again", async () => {
+  const { current, related } = seededFamily("Leaf");
+  await using screen = await renderFamilyPanel(setupFamily(current, related));
+  const folds = screen.getByRole("button", { name: /^Threads opened by / });
+  // Each arrow names its own row, so a screen reader can tell them apart.
+  await expect.element(screen.getByRole("button", { name: "Threads opened by Root" })).toBeVisible();
+  // Root and Middle: the leaf and the sibling have no arrow, and every ancestor starts open.
+  expect(folds.elements()).toHaveLength(2);
+  for (const fold of folds.elements()) expect(fold.getAttribute("aria-expanded")).toBe("true");
+
+  await folds.nth(1).click();
+  await expect.element(screen.getByText("Leaf", { exact: true })).not.toBeInTheDocument();
+  await expect.element(screen.getByText("Sibling", { exact: true })).toBeVisible();
+  await expect.element(folds.nth(1)).toHaveAttribute("aria-expanded", "false");
+
+  await folds.nth(1).click();
+  await expect.element(screen.getByText("Leaf", { exact: true })).toBeVisible();
+  await expect.element(folds.nth(1)).toHaveAttribute("aria-expanded", "true");
+});
+
+it("keeps a fold for the session but opens the path to the thread on screen", async () => {
+  const panel = (threadId: ThreadId) => (
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={threadId}
+      showLineage
+      showSideChats
+    />
+  );
+  // Both views share one thread id per title, as they do in the app.
+  const shells = {
+    root: familyShell("root", "Root"),
+    a: familyShell("a", "A", { openedByThreadId: "root" }),
+    b: familyShell("b", "B", { openedByThreadId: "root" }),
+    aChild: familyShell("a-child", "A child", { openedByThreadId: "a" }),
+    bChild: familyShell("b-child", "B child", { openedByThreadId: "b" }),
+  };
+  const show = (current: { id: ThreadId }) => {
+    const projection = makeThreadProjectionFixture();
+    state.projection = { ...projection, thread: current };
+    state.relatedShells = Object.values(shells).filter((shell) => shell.id !== current.id);
+  };
+  setup();
+  show(shells.aChild);
+  await using screen = await render(panel(shells.aChild.id), { router: "/environment/a-child" });
+  const fold = (title: string) =>
+    familyRow(title).querySelector<HTMLElement>(`button[aria-label="Threads opened by ${title}"]`)!;
+
+  fold("B").click();
+  await expect.element(screen.getByText("B child", { exact: true })).not.toBeInTheDocument();
+  fold("Root").click();
+  await expect.element(screen.getByText("A child", { exact: true })).not.toBeInTheDocument();
+
+  show(shells.b);
+  await screen.rerender(panel(shells.b.id));
+  // Root is on the way to B, so it opens; B itself was folded and is not its own ancestor.
+  await expect.element(screen.getByText("A child", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("B child", { exact: true })).not.toBeInTheDocument();
+
+  show(shells.aChild);
+  await screen.rerender(panel(shells.aChild.id));
+  await expect.element(screen.getByText("A", { exact: true })).not.toBeInTheDocument();
+  fold("Root").click();
+  await expect.element(screen.getByText("A child", { exact: true })).toBeVisible();
+});
+
+it("folds settled children per parent, but never the current thread or a live branch", async () => {
+  const fixtureId = makeThreadProjectionFixture().thread.id;
+  const id = setupFamily(
+    { title: "Current", openedByThreadId: ThreadId.make("root"), ...settled },
+    [
+      familyShell("root", "Root"),
+      familyShell("settled-sibling", "Settled sibling", { openedByThreadId: "root", ...settled }),
+      familyShell("settled-parent", "Settled parent", { openedByThreadId: "root", ...settled }),
+      familyShell("live-grandchild", "Live grandchild", {
+        openedByThreadId: "settled-parent",
+        ...running,
+      }),
+      familyShell("settled-child", "Settled child", { openedByThreadId: fixtureId, ...settled }),
+    ],
+  );
+  await using screen = await renderFamilyPanel(id);
+
+  for (const title of ["Current", "Settled parent", "Live grandchild"]) {
+    await expect.element(screen.getByText(title, { exact: true })).toBeVisible();
+  }
+  await expect.element(screen.getByText("Settled sibling")).not.toBeInTheDocument();
+  await expect.element(screen.getByText("Settled child")).not.toBeInTheDocument();
+
+  const folds = screen.getByRole("button", { name: "Settled (1)" });
+  expect(folds.elements()).toHaveLength(2);
+  await folds.last().click();
+  await expect.element(screen.getByText("Settled sibling")).toBeVisible();
+  await expect.element(screen.getByText("Settled child")).not.toBeInTheDocument();
+});
+
+it("marks a row from another project with that project's icon", async () => {
+  const fixture = makeThreadProjectionFixture();
+  const id = setupFamily({ openedByThreadId: ThreadId.make("elsewhere") }, [
+    familyShell("elsewhere", "Elsewhere", { projectId: "other-project" }),
+    familyShell("here", "Here", { openedByThreadId: fixture.thread.id }),
+  ]);
+  state.projects = [
+    {
+      id: "other-project",
+      environmentId,
+      workspaceRoot: "/other",
+      title: "Other project",
+      faviconPath: null,
+      projectIcon: { kind: "monogram", text: "OP", color: "blue" },
+    },
+  ];
+  await using _screen = await renderFamilyPanel(id);
+
+  await expect.element(page.getByText("Elsewhere", { exact: true })).toBeVisible();
+  expect(familyRow("Elsewhere").querySelector("svg text")?.textContent).toBe("OP");
+  expect(familyRow("Here").querySelector("svg text")).toBeNull();
+});
+
+it("truncates a deep row's long title inside a phone-width panel", async () => {
+  const longTitle = "A thread at the bottom of the family with a title far too long for its row";
+  const fixtureId = makeThreadProjectionFixture().thread.id;
+  const ids = Array.from({ length: 8 }, (_, index) => `level-${index}`);
+  const id = setupFamily(
+    { title: longTitle, openedByThreadId: ThreadId.make(ids.at(-1)!) },
+    ids.map((level, index) =>
+      familyShell(level, level, index === 0 ? {} : { openedByThreadId: ids[index - 1] }),
+    ),
+  );
+  expect(id).toBe(fixtureId);
+  await using _screen = await render(
+    <div style={{ width: 320 }}>
+      <ThreadRelationshipsPanel
+        environmentId={environmentId}
+        threadId={id}
+        showLineage
+        showSideChats
+      />
+    </div>,
+    { router: "/environment/current" },
+  );
+
+  const label = page.getByText(longTitle, { exact: true });
+  await expect.element(label).toBeVisible();
+  const element = label.element();
+  expect(element.scrollWidth).toBeGreaterThan(element.clientWidth);
+  expect(element.clientWidth).toBeGreaterThan(0);
+  const section = element.closest("section")!;
+  expect(section.scrollWidth).toBeLessThanOrEqual(section.clientWidth);
+  expect(element.getBoundingClientRect().right).toBeLessThanOrEqual(
+    section.getBoundingClientRect().right,
+  );
+});
+
+it("counts what is past the depth cap without a link", async () => {
+  const fixtureId = makeThreadProjectionFixture().thread.id;
+  const levels = Array.from({ length: 11 }, (_, index) => `level-${index}`);
+  const id = setupFamily(
+    { title: "Top" },
+    levels.map((level, index) =>
+      familyShell(level, level, { openedByThreadId: index === 0 ? fixtureId : levels[index - 1] }),
+    ),
+  );
+  await using screen = await renderFamilyPanel(id);
+
+  await expect.element(screen.getByText("level-7", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("level-8", { exact: true })).not.toBeInTheDocument();
+  const count = screen.getByText("+3 deeper", { exact: true });
+  await expect.element(count).toBeVisible();
+  expect(count.element().closest("a, button")).toBeNull();
+});
+
+it("keeps a delegate_task worker on its agent row and its children in the tree", async () => {
+  const fixture = makeThreadProjectionFixture();
+  const fixtureId = fixture.thread.id;
+  const id = setupFamily({ title: "Captain" }, [
+    familyShell("worker", "Worker", {
+      openedByThreadId: fixtureId,
+      lineage: {
+        rootThreadId: fixtureId,
+        parentThreadId: fixtureId,
+        relationshipToParent: "subagent",
+      },
+      ...running,
+    }),
+    familyShell("mate", "Mate", { openedByThreadId: "worker" }),
+  ]);
+  state.projection = {
+    ...fixture,
+    thread: (state.projection as typeof fixture).thread,
+    subagents: [
+      {
+        id: NodeId.make("worker-agent"),
+        threadId: id,
+        runId: null,
+        parentNodeId: NodeId.make("parent"),
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: "codex",
+        providerInstanceId: fixture.thread.providerInstanceId,
+        providerThreadId: null,
+        childThreadId: ThreadId.make("worker"),
+        nativeTaskRef: null,
+        prompt: "Work",
+        title: "Worker",
+        model: null,
+        status: "running",
+        result: null,
+        startedAt: null,
+        completedAt: null,
+        updatedAt: fixture.thread.updatedAt,
+      },
+    ],
+  };
+  await using screen = await renderFamilyPanel(id);
+
+  await expect.element(screen.getByText("agent", { exact: true })).toBeVisible();
+  expect(screen.getByRole("button", { name: /Worker/ }).elements()).toHaveLength(1);
+  expect(familyRows().map((title) => title?.replace(/Done$/, ""))).toEqual(["Captain", "Mate"]);
+});
+
+it("adds no family section for a worker or a fork tied only to its parent's row", async () => {
+  const parentId = ThreadId.make("parent");
+  const id = setupFamily(
+    {
+      openedByThreadId: parentId,
+      lineage: { rootThreadId: parentId, parentThreadId: parentId, relationshipToParent: "fork" },
+    },
+    [familyShell("parent", "Parent")],
+  );
+  await using screen = await renderFamilyPanel(id);
+
+  await expect.element(heading("Lineage")).toBeVisible();
+  expect(screen.getByRole("button", { name: /^Parent/ }).elements()).toHaveLength(1);
+  await expect.element(heading("Family")).not.toBeInTheDocument();
+});
+
+it("leaves a hidden thread out of the tree and keeps what it opened", async () => {
+  const id = setupFamily({ title: "Current", openedByThreadId: ThreadId.make("hidden") }, [
+    familyShell("hidden", "Hidden opener", { openedByThreadId: "root" }),
+    familyShell("root", "Root"),
+  ]);
+  state.hiddenKeys = new Set([threadKey({ environmentId, threadId: ThreadId.make("hidden") })]);
+  await using _screen = await renderFamilyPanel(id);
+
+  await expect.element(heading("Family")).toBeVisible();
+  await expect.element(page.getByText("Hidden opener")).not.toBeInTheDocument();
+  expect(familyRows().map((title) => title?.replace(/Done$/, ""))).toEqual(["Root", "Current"]);
+});
+
+it("scrolls a long family inside its own area, leaving the next section in reach", async () => {
+  const fixtureId = makeThreadProjectionFixture().thread.id;
+  const group = { tags: ["group:fleet"] };
+  const id = setupFamily({ title: "Captain", ...group }, [
+    ...Array.from({ length: 60 }, (_, index) =>
+      familyShell(`mate-${index}`, `Mate ${index}`, { openedByThreadId: fixtureId }),
+    ),
+    familyShell("member", "Group member", group),
+  ]);
+  await using screen = await renderFamilyPanel(id);
+
+  const family = screen.getByRole("group", { name: "Thread family" }).element();
+  expect(familyRows()).toHaveLength(61);
+  expect(family.scrollHeight).toBeGreaterThan(family.clientHeight);
+  const groupHeading = heading("Group: fleet").element();
+  expect(groupHeading.getBoundingClientRect().top).toBeLessThanOrEqual(
+    family.getBoundingClientRect().bottom + 16,
   );
 });
