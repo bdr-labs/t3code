@@ -30,6 +30,10 @@ Tab moves through each thread and its buttons. Up and Down also move between thr
 without opening them; Enter opens the focused thread or toggles a group. Right and Left
 expand and collapse groups. `F2` renames the focused thread.
 
+A thread that opened other threads shows them nested under it, with an arrow on its row. Right
+opens a closed row, then moves into its first thread; Left closes an open row, then moves up to
+the thread that opened it. Enter opens the focused thread, however deep it sits.
+
 Press `Shift+F10` or the Context Menu key to open the focused thread's menu. Use the arrow
 keys to move through it, Enter to choose, and Escape to close it.
 

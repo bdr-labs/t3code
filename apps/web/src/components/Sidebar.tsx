@@ -181,6 +181,7 @@ import {
   applySidebarThreadDrop,
   filterSidebarV2VisibleThreads,
   groupSidebarThreadsByProject,
+  sidebarFolderKeyByProject,
   sidebarFolderExpansionKeys,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
@@ -358,6 +359,8 @@ interface SidebarThreadPartitionInput {
   readonly workingShelfEnabled: boolean;
   /** Boring mode: folders list active threads by the user's latest message. */
   readonly sortActiveBySend: boolean;
+  /** Boring mode: the folder each project draws in. */
+  readonly folderKeyByProject: ReadonlyMap<string, string> | null;
   readonly disconnectedEnvironmentIds: ReadonlySet<EnvironmentId>;
   // Snooze wakes, the queued-turn grace and the Working shelf's exit grace depend
   // on the clock, so the minute tick, the precise snooze-wake tick and the inbox
@@ -500,6 +503,7 @@ function useSidebarThreads(input: {
     optimisticDrop,
     workingShelfEnabled,
     sortActiveBySend: folderGroups !== null,
+    folderKeyByProject: folderGroups === null ? null : sidebarFolderKeyByProject(folderGroups),
     disconnectedEnvironmentIds,
     clockKey: `${nowMinute}:${snoozeWakeClock}:${inboxReturnsVersion}`,
   });
@@ -549,11 +553,8 @@ function useSidebarThreads(input: {
         });
   const childThreads = useSidebarChildThreads({
     ...partition,
-    // Folders order and fold the active threads; families form within that order.
-    activeThreads:
-      projectFolders === null
-        ? activeThreads
-        : projectFolders.flatMap((folder) => folder.threads),
+    // Folders order and fold the active threads; families form within each folder.
+    activeFolders: projectFolders?.map((folder) => folder.threads) ?? null,
     threads,
     serverConfigs,
     routeThreadKey: routeRowThreadKey,
@@ -636,6 +637,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     optimisticDrop,
     workingShelfEnabled,
     sortActiveBySend,
+    folderKeyByProject,
     disconnectedEnvironmentIds,
   } = input;
   const preciseNow = new Date().toISOString();
@@ -700,6 +702,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     settled,
     threads,
     scopedProjectKeys,
+    folderKeyByProject,
   });
   // Availability gates dragging only; sorting must stay consistent across clients.
   const sortedPinned = sortPinnedThreadsForSidebar(pinned);
@@ -3350,6 +3353,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             }
                             thread={thread}
                             variant={rowVariant}
+                            fold={childThreads.rowFoldOf(threadKey)}
                             navigationParent={
                               folderRow ??
                               (section === "working" ||

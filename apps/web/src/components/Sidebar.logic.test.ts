@@ -210,6 +210,14 @@ describe("sidebar thread lineage helpers", () => {
     expect(resolveSidebarRowThreadId(worker.id, environmentId, threads)).toBe(worker.id);
     // The worker's own provider subagent has no row, so the worker's row stands in for it.
     expect(resolveSidebarRowThreadId(workerSubagent.id, environmentId, threads)).toBe(worker.id);
+    // A nested thread an agent launched has its own row too, however deep it sits.
+    const nested = {
+      ...makeThreadFixture({ id: ThreadId.make("thread-nested"), environmentId }),
+      openedByThreadId: worker.id,
+    };
+    expect(resolveSidebarRowThreadId(nested.id, environmentId, [...threads, nested])).toBe(
+      nested.id,
+    );
   });
 });
 

@@ -996,6 +996,25 @@ export function groupSidebarThreadsByProject<
   return folders.filter((folder) => folder.threads.length > 0 || keepEmpty(folder.group));
 }
 
+/** The folder each project's threads draw in, as `groupSidebarThreadsByProject` sorts them. */
+export function sidebarFolderKeyByProject(
+  groups: readonly {
+    readonly projectKey: string;
+    readonly memberProjectRefs: ReadonlyArray<{
+      readonly environmentId: EnvironmentId;
+      readonly projectId: string;
+    }>;
+  }[],
+): ReadonlyMap<string, string> {
+  return new Map(
+    groups.flatMap((group) =>
+      group.memberProjectRefs.map(
+        (ref) => [`${ref.environmentId}:${ref.projectId}`, group.projectKey] as const,
+      ),
+    ),
+  );
+}
+
 export type SidebarV2TopStatusKind =
   | "approval"
   | "done"

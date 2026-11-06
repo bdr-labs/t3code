@@ -4,9 +4,12 @@ import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import {
+  CHILD_THREAD_KINDS,
+  childThreadChipsOf,
   childThreadKindOf,
   childThreadRolesOf,
   foldChildThreadFamily,
+  formatChildThreadKindsLabel,
   type ChildThreadChip,
   type ChildThreadKind,
   type ChildThreadRole,
@@ -40,6 +43,7 @@ import {
   childThreadFoldHeadStateOf,
   childThreadStillRuns,
   flattenSidebarThreadFamilies,
+  flattenSidebarThreadNodes,
   formatChildThreadsDisclosureLabel,
   isChildThreadFamilyCollapsed,
   pageSidebarThreadFamilies,
@@ -50,6 +54,7 @@ import {
   type ChildThreadFoldPlace,
   type ChildThreadFolds,
   type SidebarThreadFamily,
+  type SidebarThreadNode,
 } from "./Sidebar.families";
 import {
   hasUnseenCompletion,
@@ -70,26 +75,52 @@ const EMPTY_KEYS: readonly string[] = [];
 const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
 
 /**
- * A family as rendered (foldChildThreadFamily in childThreadSummary.ts): `children` are the
- * rows under the chip row, live ones by kind; settled ones sit behind one "+N settled" row.
+ * A row and the rows right under it, as rendered (foldChildThreadFamily in childThreadSummary.ts):
+ * `children` are the rows under the chip row, live ones by kind; settled ones sit behind one
+ * "+N settled" row. Each child is the head of its own one of these, in `familyByKey`.
  */
-export interface RenderedChildThreadFamily extends SidebarThreadFamily<EnvironmentThreadShell> {
+export interface RenderedChildThreadFamily {
+  readonly head: EnvironmentThreadShell;
+  /** 0 for a top-level row; `head`'s rows sit one deeper. */
+  readonly depth: number;
+  readonly children: readonly EnvironmentThreadShell[];
   readonly hidden: readonly EnvironmentThreadShell[];
   readonly hasChildren: boolean;
   readonly collapsed: boolean;
   readonly place: ChildThreadFoldPlace;
   /** Settled children behind the family's "+N settled" row. */
   readonly settled: readonly EnvironmentThreadShell[];
+  /** Those and everything under them, which the row counts. */
+  readonly settledAll: readonly EnvironmentThreadShell[];
   readonly settledRow: boolean;
   readonly settledShown: boolean;
-  /** False when every child is settled: then the "+N settled" row is the whole family. */
+  /** False when every descendant is settled: then the "+N settled" row is the whole family. */
   readonly disclosure: boolean;
   readonly chips: readonly ChildThreadChip[];
-  /** Every child's kind, for the disclosure's accessible name. */
+  /** Every descendant's kind, for the disclosure's accessible name. */
   readonly summary: string;
-  /** Every child. */
+  /** Every descendant. */
   readonly all: readonly EnvironmentThreadShell[];
 }
+
+/** What a row with children does with its arrow, `aria-expanded`, Right and Left. */
+export interface SidebarThreadRowFold {
+  readonly expanded: boolean;
+  readonly label: string;
+  readonly onToggle: () => void;
+}
+
+// Per depth, capped so a deep family keeps its titles in view. The arrow sits in the indent, where
+// the depth's guide line runs, so it moves no column of the row.
+const NESTED_LEVELS = [
+  { indent: "ps-6", guide: "after:start-2", arrow: "start-2" },
+  { indent: "ps-9", guide: "after:start-5", arrow: "start-5" },
+  { indent: "ps-12", guide: "after:start-8", arrow: "start-8" },
+  { indent: "ps-15", guide: "after:start-11", arrow: "start-11" },
+] as const;
+
+export const nestedRowLevelOf = (depth: number) =>
+  NESTED_LEVELS[Math.min(Math.max(depth, 1), NESTED_LEVELS.length) - 1]!;
 
 const threadShellKey = (thread: Pick<EnvironmentThreadShell, "environmentId" | "id">) =>
   scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
@@ -103,8 +134,8 @@ const isFoldedSettledChild = (
   thread.settledOverride === "settled" && !childThreadStillRuns(resolveSidebarThreadStatus(thread));
 
 /**
- * What a child is doing, for its family's chips, order and status icon. In Settled every child
- * that no longer runs counts as settled; elsewhere a child counts as settled once folded.
+ * What a child is doing, for its family's chips, order and status icon. In Settled every settled
+ * child that no longer runs counts as settled; elsewhere a child counts as settled once folded.
  */
 export function sidebarChildThreadKindOf(
   thread: Parameters<typeof resolveSidebarThreadStatus>[0] &
@@ -116,7 +147,10 @@ export function sidebarChildThreadKindOf(
   return childThreadKindOf({
     status,
     isUnread,
-    settled: section === "settled" ? !childThreadStillRuns(status) : isFoldedSettledChild(thread),
+    settled:
+      section === "settled" && thread.settledOverride === "settled"
+        ? !childThreadStillRuns(status)
+        : isFoldedSettledChild(thread),
   });
 }
 
@@ -142,8 +176,13 @@ export function placeSidebarChildThreads(input: {
   readonly settled: EnvironmentThreadShell[];
   readonly threads: readonly EnvironmentThreadShell[];
   readonly scopedProjectKeys: ReadonlySet<string> | null;
+  /** The folder each project draws in, while the sidebar shows folders. */
+  readonly folderKeyByProject?: ReadonlyMap<string, string> | null;
 }): void {
-  const { scopedProjectKeys } = input;
+  const { scopedProjectKeys, folderKeyByProject } = input;
+  const folderOf = (thread: EnvironmentThreadShell) =>
+    folderKeyByProject?.get(`${thread.environmentId}:${thread.projectId}`);
+  const threadByKey = new Map(input.threads.map((thread) => [threadShellKey(thread), thread]));
   placeChildThreadSections({
     live: input.live,
     settled: input.settled,
@@ -155,7 +194,14 @@ export function placeSidebarChildThreads(input: {
           scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
     ),
     keyOf: threadShellKey,
-    openerKeyOf,
+    // A thread stays in its own project's folder, so a settled child whose opener draws in
+    // another folder has nothing to fold under and stays in Settled.
+    openerKeyOf: (thread) => {
+      const key = openerKeyOf(thread);
+      if (key === null || !folderKeyByProject) return key;
+      const opener = threadByKey.get(key);
+      return opener !== undefined && folderOf(opener) === folderOf(thread) ? key : null;
+    },
     delegatorKeyOf,
   });
 }
@@ -168,6 +214,8 @@ export function placeSidebarChildThreads(input: {
 export function buildSidebarChildThreadSections(input: {
   readonly pinned: readonly EnvironmentThreadShell[];
   readonly active: readonly EnvironmentThreadShell[];
+  /** In place of `active` while the sidebar shows folders: families form within each. */
+  readonly activeFolders?: readonly (readonly EnvironmentThreadShell[])[] | null;
   readonly working: readonly EnvironmentThreadShell[];
   readonly snoozed: readonly EnvironmentThreadShell[];
   readonly settled: readonly EnvironmentThreadShell[];
@@ -178,61 +226,91 @@ export function buildSidebarChildThreadSections(input: {
   readonly isUnread?: (thread: EnvironmentThreadShell) => boolean;
 }) {
   const isUnread = input.isUnread ?? hasUnseenCompletion;
-  const familiesOf = (
-    list: readonly EnvironmentThreadShell[],
+  const familyByKey = new Map<string, RenderedChildThreadFamily>();
+  const renderedOf = (
+    families: readonly SidebarThreadFamily<EnvironmentThreadShell>[],
     section: SidebarSection,
+    depth: number,
   ): readonly RenderedChildThreadFamily[] =>
-    buildSidebarThreadFamilies(list, threadShellKey, openerKeyOf).map((family) => {
+    families.map((family) => {
       const headKey = threadShellKey(family.head);
+      renderedOf(
+        family.children.map((node) => ({ head: node.thread, children: node.children })),
+        section,
+        depth + 1,
+      );
+      // An unsettled worker that follows its delegator into Settled folds as a live thread.
       const place: ChildThreadFoldPlace =
-        section === "settled"
+        section === "settled" && family.head.settledOverride === "settled"
           ? { section: "settled", headKey, entry: settledEntryOf(family.head) }
           : { section: "live", headKey };
       const collapsed = isChildThreadFamilyCollapsed(input.folds, place);
+      const kindOf = (thread: EnvironmentThreadShell) =>
+        sidebarChildThreadKindOf(thread, section, isUnread(thread));
+      const threadOf = (node: SidebarThreadNode<EnvironmentThreadShell>) => node.thread;
       const fold = foldChildThreadFamily(family.children, {
-        kindOf: (child) => sidebarChildThreadKindOf(child, section, isUnread(child)),
-        isOpen: (child) => threadShellKey(child) === input.routeThreadKey,
+        // A row folds as the most urgent thread under it, so folding it never hides those.
+        kindOf: (node) => {
+          const kinds = flattenSidebarThreadNodes([node]).map(kindOf);
+          return CHILD_THREAD_KINDS.find((kind) => kinds.includes(kind))!;
+        },
+        isOpen: (node) =>
+          flattenSidebarThreadNodes([node]).some(
+            (thread) => threadShellKey(thread) === input.routeThreadKey,
+          ),
         collapsed,
         // In Settled every child is settled, so the "+N settled" row is the family's fold.
         settledOpen: section === "settled" ? !collapsed : input.shownSettledKeys.has(headKey),
       });
-      return {
+      const all = flattenSidebarThreadNodes(family.children);
+      // Like `all`, the chips and summary count everything under the row.
+      const allKinds = all.map(kindOf);
+      const rendered: RenderedChildThreadFamily = {
         head: family.head,
-        children: fold.shown,
-        hidden: fold.hidden,
+        depth,
+        children: fold.shown.map(threadOf),
+        hidden: fold.hidden.map(threadOf),
         hasChildren: family.children.length > 0,
         collapsed,
         place,
-        settled: fold.settled,
+        settled: fold.settled.map(threadOf),
+        settledAll: flattenSidebarThreadNodes(fold.settled),
         settledRow: fold.settledRow,
         settledShown: fold.settledShown,
         disclosure: fold.disclosure,
-        chips: fold.chips,
-        summary: fold.summary,
-        all: family.children,
+        chips: fold.disclosure ? childThreadChipsOf(allKinds, { collapsed }) : [],
+        summary: formatChildThreadKindsLabel(allKinds),
+        all,
       };
+      familyByKey.set(headKey, rendered);
+      return rendered;
     });
+  const familiesOf = (list: readonly EnvironmentThreadShell[], section: SidebarSection) =>
+    renderedOf(buildSidebarThreadFamilies(list, threadShellKey, openerKeyOf), section, 0);
   const sectionFamilies = {
     pinned: familiesOf(input.pinned, "pinned"),
-    active: familiesOf(input.active, "active"),
+    active: input.activeFolders
+      ? input.activeFolders.flatMap((folder) => familiesOf(folder, "active"))
+      : familiesOf(input.active, "active"),
     working: familiesOf(input.working, "working"),
     snoozed: familiesOf(input.snoozed, "snoozed"),
     settled: familiesOf(input.settled, "settled"),
   };
+  // An opened "+N settled" row renders its children after the live ones.
+  const shownUnder = (family: RenderedChildThreadFamily): EnvironmentThreadShell[] => [
+    family.head,
+    ...[...family.children, ...(family.settledShown ? family.settled : [])].flatMap((child) =>
+      shownUnder(familyByKey.get(threadShellKey(child))!),
+    ),
+  ];
   const orderedThreads = [
     sectionFamilies.pinned,
     sectionFamilies.active,
     sectionFamilies.working,
     sectionFamilies.snoozed,
     sectionFamilies.settled,
-  ].flatMap((families) =>
-    // An opened "+N settled" row renders its children after the live ones.
-    families.flatMap((family) => [
-      ...flattenSidebarThreadFamilies([family]),
-      ...(family.settledShown ? family.settled : []),
-    ]),
-  );
-  return { sectionFamilies, orderedThreads };
+  ].flatMap((families) => families.flatMap(shownUnder));
+  return { sectionFamilies, familyByKey, orderedThreads };
 }
 
 /**
@@ -257,7 +335,7 @@ export function pageSidebarSettledFamilies(input: {
     if (input.routeThreadKey === null) return EMPTY_THREADS;
     const routeFamily = buildSidebarThreadFamilies(page.visible, threadShellKey, openerKeyOf).find(
       (family) =>
-        [family.head, ...family.children].some(
+        flattenSidebarThreadFamilies([family]).some(
           (thread) => threadShellKey(thread) === input.routeThreadKey,
         ),
     );
@@ -278,6 +356,7 @@ export function useSidebarChildThreads(input: {
   readonly routeThreadKey: string | null;
   readonly pinnedThreads: readonly EnvironmentThreadShell[];
   readonly activeThreads: readonly EnvironmentThreadShell[];
+  readonly activeFolders?: readonly (readonly EnvironmentThreadShell[])[] | null;
   readonly visibleWorkingThreads: readonly EnvironmentThreadShell[];
   readonly visibleSnoozedThreads: readonly EnvironmentThreadShell[];
   readonly settledThreads: readonly EnvironmentThreadShell[];
@@ -340,9 +419,10 @@ export function useSidebarChildThreads(input: {
     routeThreadKey,
   });
   const lastVisitedAtById = useUiStateStore((state) => state.threadLastVisitedAtById);
-  const { sectionFamilies, orderedThreads } = buildSidebarChildThreadSections({
+  const { familyByKey, orderedThreads } = buildSidebarChildThreadSections({
     pinned: input.pinnedThreads,
     active: input.activeThreads,
+    activeFolders: input.activeFolders ?? null,
     working: input.visibleWorkingThreads,
     snoozed: input.visibleSnoozedThreads,
     settled: settledPage.renderedSettledThreads,
@@ -361,12 +441,7 @@ export function useSidebarChildThreads(input: {
         ),
       }),
   });
-  const familyByHeadKey = new Map(
-    Object.values(sectionFamilies).flatMap((families) =>
-      families.map((family) => [threadShellKey(family.head), family] as const),
-    ),
-  );
-  // The disclosure row and the context menu flip the same fold.
+  // The arrow, the disclosure row and the context menu flip the same fold.
   const toggleCollapsed = (family: RenderedChildThreadFamily) => {
     const { place } = family;
     if (place.section === "settled") {
@@ -392,10 +467,10 @@ export function useSidebarChildThreads(input: {
           if (!next.delete(family.place.headKey)) next.add(family.place.headKey);
           return next;
         });
-  // Only family heads are list items: children render with their head and
+  // Only top-level heads are list items: children render with their head and
   // never take a drop slot of their own, and drop orders list heads only.
   const headsOf = (list: readonly EnvironmentThreadShell[]) =>
-    list.filter((thread) => familyByHeadKey.has(threadShellKey(thread)));
+    list.filter((thread) => familyByKey.get(threadShellKey(thread))?.depth === 0);
   return {
     ...settledPage,
     orderedThreads,
@@ -406,20 +481,40 @@ export function useSidebarChildThreads(input: {
      * outside Settled when every child is settled: the "+N settled" row is all there is.
      */
     menuStateOf: (headKey: string) => {
-      const family = familyByHeadKey.get(headKey);
+      const family = familyByKey.get(headKey);
       if (family === undefined || !family.hasChildren) return null;
       if (!family.disclosure && family.place.section !== "settled") return null;
       return { collapsed: family.collapsed };
     },
     toggleCollapsedOf: (headKey: string) => {
-      const family = familyByHeadKey.get(headKey);
+      const family = familyByKey.get(headKey);
       if (family !== undefined) toggleCollapsed(family);
+    },
+    /**
+     * A row's arrow, undefined with nothing to fold. A family of only settled children folds
+     * with its "+N settled" row.
+     */
+    rowFoldOf: (key: string): SidebarThreadRowFold | undefined => {
+      const family = familyByKey.get(key);
+      if (family === undefined || (!family.disclosure && !family.settledRow)) return undefined;
+      const expanded = family.disclosure ? !family.collapsed : family.settledShown;
+      return {
+        expanded,
+        label: formatChildThreadsDisclosureLabel({
+          kind: family.disclosure ? "family" : "settled",
+          expanded,
+          count: family.disclosure ? family.all.length : family.settledAll.length,
+          headTitle: family.head.title,
+          ...(family.disclosure ? { summary: family.summary } : {}),
+        }),
+        onToggle: () => (family.disclosure ? toggleCollapsed(family) : toggleSettledShown(family)),
+      };
     },
     /**
      * The rows under a head: none without children, and none while the head
      * is dragged (its children stay in place until it lands).
      */
-    renderChildren: <P extends { readonly variant: string }>(
+    renderChildren: function renderChildren<P extends { readonly variant: string }>(
       headKey: string,
       section: SidebarSection,
       options: {
@@ -428,10 +523,16 @@ export function useSidebarChildThreads(input: {
           thread: EnvironmentThreadShell,
           section: SidebarSection,
         ) => ReactElement<P>;
-        readonly Row: ComponentType<P & { readonly nested?: boolean }>;
+        readonly Row: ComponentType<
+          P & {
+            readonly nested?: boolean;
+            readonly depth?: number;
+            readonly navigationParent?: string;
+          }
+        >;
       },
-    ): ReactNode[] => {
-      const family = familyByHeadKey.get(headKey);
+    ): ReactNode[] {
+      const family = familyByKey.get(headKey);
       if (family === undefined || !family.hasChildren || options.dragging) return [];
       // A child thread under its head is a slim row that is not sortable.
       const nestedRow = (thread: EnvironmentThreadShell, rowSection: SidebarSection) => {
@@ -445,8 +546,24 @@ export function useSidebarChildThreads(input: {
         } = row.props as P &
           Record<"sortableId" | "sortableDisabled" | "contextDrag" | "sortable", unknown>;
         const { Row } = options;
-        return <Row key={row.key} {...(rowProps as unknown as P)} variant="slim" nested />;
+        return (
+          <Row
+            key={row.key}
+            {...(rowProps as unknown as P)}
+            variant="slim"
+            nested
+            depth={family.depth + 1}
+            navigationParent={headKey}
+          />
+        );
       };
+      // A settled row that shows because of what is under it still acts as settled.
+      const sectionOf = (thread: EnvironmentThreadShell) =>
+        isFoldedSettledChild(thread) ? "settled" : section;
+      const rowsUnder = (thread: EnvironmentThreadShell, rowSection: SidebarSection) =>
+        renderChildren(threadShellKey(thread), rowSection, options);
+      // The guide line ends at its last row, so that row's own children draw below the list.
+      const last = family.settledRow ? undefined : family.children.at(-1);
       return [
         <SidebarChildThreads
           key={`children:${headKey}`}
@@ -454,10 +571,19 @@ export function useSidebarChildThreads(input: {
           onToggle={toggleCollapsed}
           onToggleSettled={toggleSettledShown}
           settledRows={
-            family.settledShown ? family.settled.map((child) => nestedRow(child, "settled")) : null
+            family.settledShown
+              ? family.settled.flatMap((child) => [
+                  nestedRow(child, "settled"),
+                  ...rowsUnder(child, "settled"),
+                ])
+              : null
           }
+          below={last === undefined ? [] : rowsUnder(last, sectionOf(last))}
         >
-          {family.children.map((child) => nestedRow(child, section))}
+          {family.children.flatMap((child) => [
+            nestedRow(child, sectionOf(child)),
+            ...(child === last ? [] : rowsUnder(child, sectionOf(child))),
+          ])}
         </SidebarChildThreads>,
       ];
     },
@@ -638,18 +764,22 @@ export function SidebarChildThreads(props: {
   onToggle: (family: RenderedChildThreadFamily) => void;
   onToggleSettled: (family: RenderedChildThreadFamily) => void;
   settledRows: ReactNode;
+  /** The last row's own children, past the end of this list's guide line. */
+  below: readonly ReactNode[];
   children: ReactNode;
 }) {
   const { family, onToggle, onToggleSettled } = props;
-  const settledRoles = childThreadRolesOf(family.settled.map((thread) => thread.title));
+  const settledRoles = childThreadRolesOf(family.settledAll.map((thread) => thread.title));
+  const level = nestedRowLevelOf(family.depth + 1);
   return (
-    <li className="list-none">
+    <li className="flex list-none flex-col gap-px">
       <ul
         role="presentation"
         data-testid="sidebar-child-threads"
         className={cn(
           "relative flex flex-col gap-px",
-          "after:pointer-events-none after:absolute after:start-2 after:top-1 after:w-2.5 after:rounded-es-md after:border-s after:border-b after:border-foreground/20 after:content-['']",
+          "after:pointer-events-none after:absolute after:top-1 after:w-2.5 after:rounded-es-md after:border-s after:border-b after:border-foreground/20 after:content-['']",
+          level.guide,
           // The curve lands on the middle of the last row: a slim child row,
           // or the disclosure or "+N settled" row.
           !family.settledRow && family.children.length > 0
@@ -657,7 +787,7 @@ export function SidebarChildThreads(props: {
             : "after:bottom-4",
         )}
       >
-        {family.disclosure ? (
+        {family.disclosure && family.depth === 0 ? (
           <li className="list-none">
             {/* The chips say how many of each; the tooltip spells it out. */}
             <Tooltip>
@@ -716,11 +846,11 @@ export function SidebarChildThreads(props: {
               aria-label={formatChildThreadsDisclosureLabel({
                 kind: "settled",
                 expanded: family.settledShown,
-                count: family.settled.length,
+                count: family.settledAll.length,
                 headTitle: family.head.title,
               })}
               data-testid="sidebar-child-threads-settled"
-              className={cn(childRowClassName, "text-muted-foreground/70")}
+              className={cn(childRowClassName, level.indent, "text-muted-foreground/70")}
               onClick={() => onToggleSettled(family)}
             >
               {family.disclosure ? (
@@ -729,7 +859,7 @@ export function SidebarChildThreads(props: {
                 <CircleCheckIcon aria-hidden className="size-4 shrink-0 text-muted-foreground/60" />
               )}
               <span className="truncate">
-                {family.settledShown ? "Show less" : `+${family.settled.length} settled`}
+                {family.settledShown ? "Show less" : `+${family.settledAll.length} settled`}
               </span>
               {family.settledShown ? null : (
                 <span className="flex shrink-0 items-center gap-0.5">
@@ -742,6 +872,11 @@ export function SidebarChildThreads(props: {
           </li>
         ) : null}
       </ul>
+      {props.below.length > 0 ? (
+        <ul role="presentation" className="flex flex-col gap-px">
+          {props.below}
+        </ul>
+      ) : null}
     </li>
   );
 }

@@ -162,7 +162,8 @@ export function isAutoSettlementCandidate(
 
 /**
  * Settles with its opener when an agent launched it there or it is that thread's `delegate_task`
- * worker, unless it still works, waits on the user, or the user kept it.
+ * worker and its latest run completed, unless it still works, waits on the user, or the user kept
+ * it. A failed, interrupted, cancelled or never-run child still wants a look, so it stays.
  */
 export function settlesWithOpener(
   thread: Omit<ProjectionStore.ProjectionSettlementCandidate, "latestUserAuthoredMessageAt"> &
@@ -175,6 +176,7 @@ export function settlesWithOpener(
     thread.lineage.parentThreadId === openerId &&
     !isProviderNativeSubagentThread(thread);
   if (thread.openedByThreadId !== openerId && !delegated) return false;
+  if (thread.status !== "completed") return false;
   if (thread.archivedAt !== null || thread.settledOverride === "settled") return false;
   if (thread.pinnedAt != null || thread.autoSettleDisabledAt != null) return false;
   if (thread.pendingRuntimeRequest !== null || thread.activityRunStatus != null) return false;
@@ -649,7 +651,7 @@ export const make = Effect.gen(function* () {
       ),
   );
 
-  // Settling a thread settles the threads it opened. Each child's own
+  // Settling a thread settles the finished threads it opened. Each child's own
   // thread.settled event then settles its children in turn.
   const settleChildren = Effect.fn("ThreadSettlementServiceV2.settleChildren")(
     function* (openerId: ThreadId) {

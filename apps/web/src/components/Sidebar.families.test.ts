@@ -5,6 +5,7 @@ import {
   childThreadNeedsUser,
   childThreadStillRuns,
   flattenSidebarThreadFamilies,
+  flattenSidebarThreadNodes,
   foldSidebarThreadFamily,
   formatChildThreadsDisclosureLabel,
   formatChildThreadsLabel,
@@ -17,6 +18,7 @@ import {
   settledEntryOf,
   toggleChildThreadFamily,
   type ChildThreadFolds,
+  type SidebarThreadNode,
 } from "./Sidebar.families";
 
 interface Row {
@@ -31,7 +33,10 @@ const families = (rows: readonly Row[]) =>
     rows,
     (thread) => thread.key,
     (thread) => thread.openedBy,
-  ).map((family) => [family.head.key, family.children.map((child) => child.key)]);
+  ).map((family) => [
+    family.head.key,
+    flattenSidebarThreadNodes(family.children).map((child) => child.key),
+  ]);
 
 describe("buildSidebarThreadFamilies", () => {
   it("puts children after their head in section order", () => {
@@ -48,10 +53,48 @@ describe("buildSidebarThreadFamilies", () => {
     ]);
   });
 
-  it("flattens grandchildren under the topmost ancestor in the section", () => {
-    expect(families([row("root"), row("child", "root"), row("grandchild", "child")])).toEqual([
-      ["root", ["child", "grandchild"]],
+  it("nests a thread under its own opener, as deep as the chain goes", () => {
+    const shape = (nodes: readonly SidebarThreadNode<Row>[]): unknown[] =>
+      nodes.map((node) => [node.thread.key, node.depth, shape(node.children)]);
+    const built = buildSidebarThreadFamilies(
+      [
+        row("grandchild", "child"),
+        row("root"),
+        row("child", "root"),
+        row("sibling", "root"),
+        row("great", "grandchild"),
+      ],
+      (thread) => thread.key,
+      (thread) => thread.openedBy,
+    );
+    expect(built.map((family) => family.head.key)).toEqual(["root"]);
+    expect(shape(built[0]!.children)).toEqual([
+      ["child", 1, [["grandchild", 2, [["great", 3, []]]]]],
+      ["sibling", 1, []],
     ]);
+  });
+
+  it.each([
+    ["an opener cycle", [row("a", "b"), row("b", "a")]],
+    ["a thread opened from inside a cycle", [row("a", "b"), row("b", "a"), row("c", "a")]],
+    ["a thread opened by itself", [row("a", "a"), row("b", "a")]],
+    ["a dangling opener", [row("a", "gone"), row("b", "a")]],
+    ["an opener in another section", [row("a", "elsewhere"), row("b", "a"), row("c", "b")]],
+    [
+      "a chain past the depth limit",
+      Array.from({ length: 40 }, (_, index) => row(`t${index}`, index ? `t${index - 1}` : null)),
+    ],
+  ])("shows every row exactly once with %s", (_name, rows) => {
+    const built = buildSidebarThreadFamilies(
+      rows,
+      (thread) => thread.key,
+      (thread) => thread.openedBy,
+    );
+    expect(
+      flattenSidebarThreadFamilies(built)
+        .map((thread) => thread.key)
+        .toSorted(),
+    ).toEqual(rows.map((thread) => thread.key).toSorted());
   });
 
   it("stops at the topmost ancestor that is in the section", () => {
@@ -467,12 +510,18 @@ describe("pageSidebarThreadFamilies", () => {
     );
     expect(result.hiddenCount).toBe(4);
     expect(result.nextPageCount).toBe(3);
+    // A grandchild is one more thread of the family it hides with.
+    expect(page([row("a"), row("x"), row("x1", "x"), row("x2", "x1")], 1).hidden).toBe(3);
   });
 
   it("brings the open thread's whole family past the page", () => {
     expect(page([row("a"), row("x"), row("x1", "x"), row("b")], 1, "x1")).toEqual({
       visible: ["a", "x", "x1"],
       hidden: 1,
+    });
+    expect(page([row("a"), row("x"), row("x1", "x"), row("x2", "x1")], 1, "x2")).toEqual({
+      visible: ["a", "x", "x1", "x2"],
+      hidden: 0,
     });
   });
 });

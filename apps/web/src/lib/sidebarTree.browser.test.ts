@@ -79,6 +79,29 @@ describe("sidebar keyboard navigation", () => {
     expect(group.getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("walks a nested tree from its shelf and back, and follows a nested row that goes", async () => {
+    using tree = setup();
+    const shelf = tree.row("shelf:settled");
+    shelf.setAttribute("aria-expanded", "true");
+    const head = tree.row("head", "shelf:settled");
+    const child = tree.row("child", "head");
+    const grandchild = tree.row("grandchild", "child");
+    tree.install();
+    shelf.focus();
+    for (const target of [head, child, grandchild]) {
+      press(document.activeElement as HTMLElement, "ArrowRight");
+      expect(document.activeElement).toBe(target);
+    }
+    for (const target of [child, head, shelf]) {
+      press(document.activeElement as HTMLElement, "ArrowLeft");
+      expect(document.activeElement).toBe(target);
+    }
+    grandchild.focus();
+    // Its parent closed: focus lands on the parent, not the body.
+    grandchild.remove();
+    await vi.waitFor(() => expect(document.activeElement).toBe(child));
+  });
+
   it("opens the row menu on Shift+F10 release without moving focus", () => {
     using tree = setup();
     tree.row("first");

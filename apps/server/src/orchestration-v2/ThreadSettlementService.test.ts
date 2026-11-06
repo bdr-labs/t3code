@@ -1505,21 +1505,27 @@ describe("ThreadSettlementServiceV2 terminals", () => {
     ),
   );
 
-  it.effect("settles the idle threads its opener started along with it", () =>
+  it.effect("settles the finished threads its opener started along with it", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const opener = appThread("opener-thread", "settled");
         const openerId = ThreadId.make("opener-thread");
         const fixture = yield* makeHarness({
           snapshot: makeSnapshot([
-            makeThread("opened-child", { openedByThreadId: openerId }),
+            makeThread("opened-child", { openedByThreadId: openerId, status: "completed" }),
             makeThread("busy-child", { openedByThreadId: openerId, activityRunStatus: "running" }),
-            makeThread("pinned-since-snapshot", { openedByThreadId: openerId }),
+            makeThread("never-ran-child", { openedByThreadId: openerId }),
+            makeThread("failed-child", { openedByThreadId: openerId, status: "failed" }),
+            makeThread("pinned-since-snapshot", {
+              openedByThreadId: openerId,
+              status: "completed",
+            }),
             makeThread("unrelated-thread"),
           ]),
           currentShells: [
             makeThread("pinned-since-snapshot", {
               openedByThreadId: openerId,
+              status: "completed",
               pinnedAt: DateTime.makeUnsafe(NOW),
             }),
           ],
@@ -1677,15 +1683,17 @@ describe("isSnoozed", () => {
 
 describe("settlesWithOpener", () => {
   const openerId = ThreadId.make("opener");
-  const opened = { openedByThreadId: openerId };
+  const completed = { status: "completed" } as const;
+  const opened = { ...completed, openedByThreadId: openerId };
   const settles = (overrides: Partial<SettlementShell>) =>
     ThreadSettlementService.settlesWithOpener(shell(overrides), openerId, NOW_MS);
 
-  it("settles idle threads the opener launched or delegated", () => {
+  it("settles finished threads the opener launched or delegated", () => {
     expect(settles(opened)).toBe(true);
-    expect(settles({ ...opened, status: "completed", settledOverride: "active" })).toBe(true);
+    expect(settles({ ...opened, settledOverride: "active" })).toBe(true);
     expect(
       settles({
+        ...completed,
         lineage: {
           rootThreadId: openerId,
           parentThreadId: openerId,
@@ -1697,11 +1705,19 @@ describe("settlesWithOpener", () => {
     ).toBe(true);
   });
 
+  it.each(["idle", "failed", "interrupted", "cancelled", "rolled_back"] as const)(
+    "keeps a child whose latest run is %s",
+    (status) => {
+      expect(settles({ ...opened, status })).toBe(false);
+    },
+  );
+
   it("leaves other threads and provider-native subagents alone", () => {
-    expect(settles({})).toBe(false);
-    expect(settles({ openedByThreadId: ThreadId.make("someone-else") })).toBe(false);
+    expect(settles(completed)).toBe(false);
+    expect(settles({ ...completed, openedByThreadId: ThreadId.make("someone-else") })).toBe(false);
     expect(
       settles({
+        ...completed,
         lineage: {
           rootThreadId: openerId,
           parentThreadId: openerId,

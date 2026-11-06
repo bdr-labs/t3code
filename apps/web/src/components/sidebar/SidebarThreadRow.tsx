@@ -33,6 +33,7 @@ import {
   AlarmClockOffIcon,
   ArrowRightLeftIcon,
   CheckIcon,
+  ChevronRightIcon,
   CircleAlertIcon,
   CircleCheckIcon,
   CircleDashedIcon,
@@ -103,10 +104,12 @@ import { pickSnoozePreset, resolveSnoozePresets, type SnoozePreset } from "../Si
 import { useThreadShell } from "../../state/entities";
 import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
 import {
+  nestedRowLevelOf,
   SidebarChildThreadRoleIcon,
   SidebarChildThreadStatus,
   sidebarChildRowStatusOf,
   sidebarChildThreadKindOf,
+  type SidebarThreadRowFold,
 } from "../Sidebar.childThreads";
 import { childThreadRoleOf } from "@t3tools/client-runtime/state/thread-family-summary";
 import { ThreadSearchMatchExcerpt } from "../ThreadSearchMatch";
@@ -531,6 +534,38 @@ const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
   ),
 };
 
+// In the row's start inset or indent, so no column of the row moves.
+function SidebarRowFoldArrow(props: { fold: SidebarThreadRowFold; className: string }) {
+  const { fold } = props;
+  return (
+    <button
+      type="button"
+      aria-label={fold.label}
+      aria-expanded={fold.expanded}
+      data-testid="sidebar-row-fold-arrow"
+      // Focus stays put, so the arrow keys carry on from the row that has it.
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        fold.onToggle();
+      }}
+      className={cn(
+        "absolute z-20 flex w-4 cursor-pointer items-center rounded-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+        props.className,
+      )}
+    >
+      <ChevronRightIcon
+        aria-hidden
+        className={cn(
+          "size-3 shrink-0 transition-transform duration-150 motion-reduce:transition-none",
+          fold.expanded && "rotate-90",
+        )}
+      />
+    </button>
+  );
+}
+
 const TOP_STATUS_ICONS = {
   working: CircleDashedIcon,
   waiting: CircleDotDashedIcon,
@@ -555,6 +590,10 @@ type SidebarThreadRowProps = {
   navigationParent?: string | undefined;
   // A child thread under its head: indented past the family line, no favicon.
   nested?: boolean;
+  // How deep a nested row sits; 1 is right under a top-level row.
+  depth?: number;
+  // A row with children: its arrow, `aria-expanded`, and what the tree's Right and Left do.
+  fold?: SidebarThreadRowFold | undefined;
   variantAction: SidebarSweepAction;
   settlementSupported: boolean;
   snoozeSupported: boolean;
@@ -863,6 +902,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
 
   const handleClick = (event: ReactMouseEvent) => {
+    // The tree's Right and Left click the row from script (lib/sidebarTree.ts); a person's click
+    // opens the thread.
+    if (props.fold !== undefined && !event.nativeEvent.isTrusted) {
+      props.fold.onToggle();
+      return;
+    }
     onThreadClick(event, threadRef);
   };
   const handleAcknowledgeWokeClick = (event: ReactMouseEvent) => {
@@ -1294,6 +1339,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 data-sidebar-parent={props.navigationParent}
                 aria-label={accessibility.label}
                 aria-current={accessibility.current}
+                aria-expanded={props.fold?.expanded}
                 data-testid={inFolder ? "sidebar-row-folder" : "sidebar-row-slim"}
                 aria-busy={isRegeneratingTitle || undefined}
                 className={cn(
@@ -1303,7 +1349,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     : cn("flex h-9 items-center px-2.5", inFolder ? "gap-1" : "gap-2.5"),
                   // Indents the gutter one step past the folder's project icon.
                   inFolder && "ps-4",
-                  props.nested && "gap-1.5 ps-6",
+                  props.nested && cn("gap-1.5", nestedRowLevelOf(props.depth ?? 1).indent),
                 )}
                 onClick={handleClick}
                 onDoubleClick={handleDoubleClick}
@@ -1315,6 +1361,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             {/* `contents` keeps one-line rows a single flex row. */}
             <div className={multiline ? "flex h-6 min-w-0 items-center gap-1" : "contents"}>
               {accessibleTitle}
+              {props.fold ? (
+                <SidebarRowFoldArrow
+                  fold={props.fold}
+                  className={
+                    props.nested
+                      ? cn(nestedRowLevelOf(props.depth ?? 1).arrow, "inset-y-0 justify-center")
+                      : cn("start-0 justify-start", multiline ? "top-1.5 h-6" : "inset-y-0")
+                  }
+                />
+              ) : null}
               {gutterSlot}
               {inFolder || props.nested ? null : (
                 <span
@@ -1595,6 +1651,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               data-sidebar-parent={props.navigationParent}
               aria-label={accessibility.label}
               aria-current={accessibility.current}
+              aria-expanded={props.fold?.expanded}
               data-testid="sidebar-row-card"
               aria-busy={isRegeneratingTitle || undefined}
               className={rowSurfaceClassName}
@@ -1606,6 +1663,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           }
         >
           {accessibleTitle}
+          {props.fold ? (
+            <SidebarRowFoldArrow
+              fold={props.fold}
+              className="start-0 top-(--sidebar-content-inset) h-5 justify-start"
+            />
+          ) : null}
           <div
             className={cn(
               "relative z-10 h-[4.875rem] px-(--sidebar-row-content-inset) py-(--sidebar-content-inset)",

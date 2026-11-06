@@ -1,16 +1,23 @@
-// A thread an agent opened through T3 tools nests under its opener, one level deep, within one
-// section. A settled child stays folded under an unsettled opener and moves to Settled with the
-// family; otherwise each thread keeps its own section. A delegated task (`delegate_task`) always
-// follows its delegator's section and hides while the delegator is not shown.
+// A thread an agent opened through T3 tools nests under its opener, as deep as the chain goes,
+// within one section. A settled child stays folded under an unsettled opener and moves to Settled
+// with the family; otherwise each thread keeps its own section. A delegated task (`delegate_task`)
+// always follows its delegator's section and hides while the delegator is not shown.
 
 import type { SidebarThreadStatus } from "./Sidebar.logic";
 
 /** Upper bound on opener chains, so corrupt data can never spin. */
 const MAX_FAMILY_DEPTH = 32;
 
+export interface SidebarThreadNode<T> {
+  readonly thread: T;
+  readonly children: readonly SidebarThreadNode<T>[];
+  /** 1 right under the family's head. */
+  readonly depth: number;
+}
+
 export interface SidebarThreadFamily<T> {
   readonly head: T;
-  readonly children: readonly T[];
+  readonly children: readonly SidebarThreadNode<T>[];
 }
 
 /**
@@ -42,19 +49,26 @@ export function buildSidebarThreadFamilies<T>(
     return ownKey;
   };
 
-  const childrenByHead = new Map<string, T[]>();
+  const childrenByParent = new Map<string, T[]>();
   const heads: T[] = [];
   for (const thread of threads) {
-    const headKey = headKeyOf(thread);
-    if (headKey === keyOf(thread)) {
+    if (headKeyOf(thread) === keyOf(thread)) {
       heads.push(thread);
       continue;
     }
-    const children = childrenByHead.get(headKey);
-    if (children === undefined) childrenByHead.set(headKey, [thread]);
+    // Only a thread whose walk reached a head gets here, so its opener is in the list.
+    const parentKey = parentKeyOf(thread)!;
+    const children = childrenByParent.get(parentKey);
+    if (children === undefined) childrenByParent.set(parentKey, [thread]);
     else children.push(thread);
   }
-  return heads.map((head) => ({ head, children: childrenByHead.get(keyOf(head)) ?? [] }));
+  const nodesUnder = (parentKey: string, depth: number): SidebarThreadNode<T>[] =>
+    (childrenByParent.get(parentKey) ?? []).map((thread) => ({
+      thread,
+      children: nodesUnder(keyOf(thread), depth + 1),
+      depth,
+    }));
+  return heads.map((head) => ({ head, children: nodesUnder(keyOf(head), 1) }));
 }
 
 /**
@@ -187,11 +201,13 @@ export function pageSidebarThreadFamilies<T>(
     options.keepKey === null
       ? undefined
       : rest.find((family) =>
-          [family.head, ...family.children].some((thread) => keyOf(thread) === options.keepKey),
+          flattenSidebarThreadFamilies([family]).some(
+            (thread) => keyOf(thread) === options.keepKey,
+          ),
         );
   if (kept !== undefined) shown.push(kept);
   const hidden = rest.filter((family) => family !== kept);
-  const sizeOf = (family: SidebarThreadFamily<T>) => 1 + family.children.length;
+  const sizeOf = (family: SidebarThreadFamily<T>) => flattenSidebarThreadFamilies([family]).length;
   return {
     visible: flattenSidebarThreadFamilies(shown),
     hiddenCount: hidden.reduce((count, family) => count + sizeOf(family), 0),
@@ -201,9 +217,14 @@ export function pageSidebarThreadFamilies<T>(
   };
 }
 
-/** Heads then their shown children, the order rows render and keys traverse. */
+/** Nodes and everything under them, in tree order. */
+export function flattenSidebarThreadNodes<T>(nodes: readonly SidebarThreadNode<T>[]): T[] {
+  return nodes.flatMap((node) => [node.thread, ...flattenSidebarThreadNodes(node.children)]);
+}
+
+/** Heads then their descendants, the order rows render and keys traverse. */
 export function flattenSidebarThreadFamilies<T>(families: readonly SidebarThreadFamily<T>[]): T[] {
-  return families.flatMap((family) => [family.head, ...family.children]);
+  return families.flatMap((family) => [family.head, ...flattenSidebarThreadNodes(family.children)]);
 }
 
 /**
