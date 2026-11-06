@@ -100,6 +100,20 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         if (input.openedByThreadId !== undefined || input.tags !== undefined) {
           yield* assertMayNameOpenerOrTags(context.limits);
         }
+        if (caller !== undefined) {
+          if (input.openedByThreadId !== undefined && input.openedByThreadId !== caller.id)
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: "a calling thread is its launch's opener",
+            });
+          // A linked environment's launch reaches this tool as an outside client, with its session as linkOrigin.
+          if (input.delegatedFrom !== undefined && linkOrigin === undefined)
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message:
+                "delegatedFrom is set by a linked environment; your thread is recorded as the opener",
+            });
+        }
         // A retry with the same key replays the first launch: the ids derive
         // from the caller and the key, and the launch service replays a
         // command it already accepted.
@@ -275,6 +289,11 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               }),
           ...(openedByThreadId === undefined ? {} : { openedByThreadId }),
           ...(input.tags === undefined ? {} : { tags: input.tags }),
+          // An outside client that names an opener closes its own thread: a person's settle still
+          // works, while the opener's settle, which takes a child between turns, does not take it.
+          ...(caller === undefined && input.openedByThreadId !== undefined
+            ? { autoSettleDisabled: true }
+            : {}),
           createdBy: "agent",
           creationSource: "mcp",
           ...(linkOrigin === undefined ? {} : { linkOrigin }),

@@ -124,6 +124,13 @@ it.effect("only request_secret asks Claude Code to load it up front", () =>
   }).pipe(Effect.provide(layerAdvertisedTools)),
 );
 
+it("the opener line reaches Claude and Codex word for word", () => {
+  const line =
+    "`openedByThreadId` names the thread that opened yours: not your parent for delegation, not a subagent. Report to it with `t3_thread_send` only when your task says so, and mention it by its link.";
+  expect(claudeSystemAppend()).toContain(line);
+  expect(codexAdditionalContext()).toContain(line);
+});
+
 // CI rejects a PR that raises any value above main's agentContextBudget.json, so growth
 // needs the agent-context-increase label. Lower the values when the text shrinks.
 it.effect("agent context matches the committed budget", () =>

@@ -3442,6 +3442,71 @@ describe("OrchestratorMcpService thread list", () => {
     ),
   );
 
+  it.effect("looks up a page's openers once, and links only the live ones", () =>
+    Effect.gen(function* () {
+      const live = ThreadId.make("thread:live-opener");
+      const gone = ThreadId.make("thread:gone-opener");
+      const opened = (id: string, openedByThreadId?: ThreadId) => ({
+        ...shell(id, "project:openers", false),
+        ...(openedByThreadId === undefined ? {} : { openedByThreadId }),
+      });
+      const lookups: Array<ReadonlyArray<ThreadId>> = [];
+      const listed = yield* Effect.gen(function* () {
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* mcp.listThreads(client, { allProjects: true });
+      }).pipe(
+        Effect.provide(
+          layerOrchestratorService.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                NodeServices.layer,
+                NodeCrypto.layer,
+                Layer.mock(ThreadManagementService.ThreadManagementService)({
+                  listProjectThreads: () =>
+                    Effect.succeed([
+                      opened("thread:first", live),
+                      opened("thread:second", live),
+                      opened("thread:third", gone),
+                      opened("thread:plain"),
+                    ]),
+                  getThreadTitles: (threadIds) => {
+                    lookups.push(threadIds);
+                    return Effect.succeed({ [live]: "Live opener" });
+                  },
+                }),
+                ServerSettings.layerTest(),
+                Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+                Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+                  list: () => Effect.succeed([]),
+                }),
+                Layer.mock(ProjectService.ProjectService)({}),
+                Layer.mock(SecretRequests.SecretRequests)({}),
+                Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+                Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+              ),
+            ),
+          ),
+        ),
+      );
+      assert.deepStrictEqual(lookups, [[live, gone]]);
+      const liveLink = `<t3-thread://v2/${client.environmentId}/${live}>`;
+      assert.deepStrictEqual(
+        listed.threads.map(({ openedByThreadId, openedByLink }) => [
+          openedByThreadId,
+          openedByLink,
+        ]),
+        [
+          [live, liveLink],
+          [live, liveLink],
+          [gone, undefined],
+          [undefined, undefined],
+        ],
+      );
+      assert.notProperty(listed.threads[2], "openedByLink");
+      assert.notProperty(listed.threads[3], "openedByThreadId");
+    }),
+  );
+
   it.effect("lists snoozed threads across every project with allProjects", () =>
     Effect.gen(function* () {
       const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;

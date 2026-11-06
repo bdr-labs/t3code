@@ -15,6 +15,7 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
   dispatchFailure,
   newCommandId,
+  openerKeysFor,
   readCaller,
   readThread,
   unavailable,
@@ -125,16 +126,22 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_search: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
-      const { caller } = yield* readCaller();
+      const { caller, threads } = yield* readCaller();
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
       const { matches } = yield* threadSearch
         .searchThreads({ ...input, projectId: input.projectId ?? caller?.projectId })
         .pipe(Effect.mapError(unavailable));
+      const openerKeys = yield* openerKeysFor(
+        threads,
+        scope,
+        matches.map((match) => match.openedByThreadId),
+      );
       return {
         matches: matches.map((match) => ({
           ...match,
           link: McpInvocationContext.threadLinkFor(scope, match.threadId),
+          ...openerKeys(match.openedByThreadId),
         })),
       };
     }),

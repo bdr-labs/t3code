@@ -795,6 +795,39 @@ it.effect("records the opener and tags of a full-access outside session on the s
   }).pipe(Effect.provide(harness.layer));
 });
 
+it.effect("an outside client naming an opener keeps its thread from settling with it", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const count = (threadId: ThreadId) =>
+      storedEventTypes(threadId).pipe(
+        Effect.map((types) => types.filter((type) => type === "thread.auto-settle-set").length),
+      );
+    const captain = yield* launchOverMcp("full-access", {});
+    const params = {
+      openedByThreadId: captain.threadId!,
+      clientRequestId: "mate-keep",
+      message: "Do the work",
+    };
+    const mate = yield* launchOverMcp("full-access", params);
+    const shell = yield* threads.getThreadShell(mate.threadId!);
+    assert.isDefined(shell?.autoSettleDisabledAt ?? undefined);
+    const types = yield* storedEventTypes(mate.threadId!);
+    assert.isAbove(
+      types.findIndex((type) => !type.startsWith("thread.")),
+      types.indexOf("thread.auto-settle-set"),
+    );
+
+    yield* launchOverMcp("full-access", params);
+    assert.equal(yield* count(mate.threadId!), 1);
+
+    // Nothing named: the opener's settle rule stands.
+    assert.equal(yield* count(captain.threadId!), 0);
+    const tagged = yield* launchOverMcp("full-access", { tags: ["hide"] });
+    assert.equal(yield* count(tagged.threadId!), 0);
+  }).pipe(Effect.provide(harness.layer));
+});
+
 it.effect("leaves no thread behind a refused launch", () => {
   const harness = makeHarness();
   return Effect.gen(function* () {

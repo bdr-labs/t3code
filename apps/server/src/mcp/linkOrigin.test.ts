@@ -6,6 +6,7 @@ import {
   CommandId,
   ContextTransferId,
   EnvironmentId,
+  EventId,
   MessageId,
   NodeId,
   type OrchestrationV2Run,
@@ -23,6 +24,7 @@ import * as ServerConfig from "../config.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import { makeSubagentChildThread } from "@t3tools/provider-core/server/subagentProjection";
@@ -66,6 +68,7 @@ const layerDatabase = SqlitePersistence.layerMemory;
 const layerOrchestrator = Layer.mergeAll(
   layerDatabase,
   ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+  ProjectStore.layer.pipe(Layer.provide(layerDatabase)),
   ProviderReplayHarness.layerWithRegistry(
     { name: "link-origin" },
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
@@ -98,6 +101,9 @@ const layerLaunches = Layer.effect(
             worktreePath: null,
             ...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
             ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
+            ...(input.openedByThreadId === undefined
+              ? {}
+              : { openedByThreadId: input.openedByThreadId }),
             createdBy: input.createdBy,
             creationSource: input.creationSource,
           })
@@ -164,7 +170,7 @@ const layerTools = Layer.mergeAll(
   Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
   Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
   Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
-  Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+  Layer.provide(ThreadSearch.layer.pipe(Layer.provide(layerDatabase))),
   Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
   Layer.provide(
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/p" }),
@@ -275,6 +281,41 @@ const usersOwnThread = Effect.gen(function* () {
   });
   return threadId;
 });
+
+const asThread = (threadId: ThreadId): McpInvocationContext.McpInvocationScope => ({
+  ...claudeCode,
+  requestNamespace: `provider:${threadId}`,
+  thread: { threadId, providerSessionId: `provider:${threadId}`, providerInstanceId: instanceId },
+  client: undefined,
+});
+
+/** What each tool that shows a thread answers, through its success schema. */
+const shownIn = (scope: McpInvocationContext.McpInvocationScope) => {
+  const structured = (name: string, args: Record<string, unknown>) =>
+    call(scope, name, args).pipe(
+      Effect.map((result) => {
+        assert.equal(result.isError, false, `${name}: ${JSON.stringify(result.content)}`);
+        return result.structuredContent as Record<string, unknown>;
+      }),
+    );
+  const first = (rows: unknown) =>
+    (rows as ReadonlyArray<Record<string, unknown>> | undefined)?.[0];
+  return {
+    list: (titleContains: string) =>
+      structured("t3_thread_list", { projectId, titleContains }).pipe(
+        Effect.map((result) => first(result.threads)),
+      ),
+    read: (threadId: ThreadId) =>
+      structured("t3_thread_read", { threadId }).pipe(
+        Effect.map((result) => result.thread as Record<string, unknown>),
+      ),
+    wait: (threadId: ThreadId) => structured("t3_thread_wait", { threadId, timeoutMs: 1 }),
+    search: (query: string) =>
+      structured("t3_thread_search", { query, projectId }).pipe(
+        Effect.map((result) => first(result.matches)),
+      ),
+  };
+};
 
 it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts", (it) => {
   it.effect("is stamped, and so is the work it derives", () =>
@@ -463,16 +504,6 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
           });
           return threadId;
         });
-      const asThread = (threadId: ThreadId): McpInvocationContext.McpInvocationScope => ({
-        ...claudeCode,
-        requestNamespace: `provider:${threadId}`,
-        thread: {
-          threadId,
-          providerSessionId: `provider:${threadId}`,
-          providerInstanceId: instanceId,
-        },
-        client: undefined,
-      });
       const atAuto = yield* runningAt("thread:tagging-at-auto", "auto");
       const refused = yield* tag(asThread(atAuto), atAuto);
       assert.equal(failureCode(refused), "runtime_mode_escalation_denied");
@@ -497,26 +528,9 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
     }),
   );
 
-  it.effect("list and read show an opener and tags, and no such key where there are none", () =>
+  it.effect("list and read show tags, and no such key where there are none", () =>
     Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
-      const opener = yield* usersOwnThread;
-      const threadId = ThreadId.make("thread:opened-and-tagged");
-      yield* orchestrator.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make("create:opened-and-tagged"),
-        threadId,
-        projectId,
-        title: "Opened and tagged",
-        modelSelection: { instanceId, model: "gpt-5" },
-        runtimeMode: "auto",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: null,
-        openedByThreadId: opener,
-        createdBy: "agent",
-        creationSource: "mcp",
-      });
+      const threadId = yield* launch(claudeCode, "Carries a tag");
       const tagged = yield* call(claudeCode, "t3_thread_update", {
         threadId,
         action: "tag",
@@ -524,33 +538,115 @@ it.layer(Layer.provideMerge(layerTools, layerOrchestration))("work a link starts
       });
       assert.equal(tagged.isError, false, JSON.stringify(tagged.content));
       const plain = yield* launch(claudeCode, "Plain and untagged");
-
-      const listed = (titleContains: string) =>
-        call(claudeCode, "t3_thread_list", { projectId, titleContains }).pipe(
-          Effect.map(
-            (result) =>
-              (
-                result.structuredContent as {
-                  readonly threads: ReadonlyArray<Record<string, unknown>>;
-                }
-              ).threads[0],
-          ),
-        );
-      const read = (id: ThreadId) =>
-        call(claudeCode, "t3_thread_read", { threadId: id }).pipe(
-          Effect.map(
-            (result) =>
-              (result.structuredContent as { readonly thread: Record<string, unknown> }).thread,
-          ),
-        );
-      for (const shown of [yield* listed("Opened and tagged"), yield* read(threadId)]) {
-        assert.equal(shown?.openedByThreadId, opener);
+      const shows = shownIn(claudeCode);
+      for (const shown of [yield* shows.list("Carries a tag"), yield* shows.read(threadId)]) {
         assert.deepEqual(shown?.tags, ["group:listed"]);
       }
-      for (const shown of [yield* listed("Plain and untagged"), yield* read(plain)]) {
-        assert.notProperty(shown, "openedByThreadId");
+      for (const shown of [yield* shows.list("Plain and untagged"), yield* shows.read(plain)]) {
         assert.notProperty(shown, "tags");
       }
+    }),
+  );
+
+  it.effect("every tool that shows a thread names its opener, and the opener stays no parent", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projects = yield* ProjectStore.ProjectStoreV2;
+      // Search joins the project's own row, which this harness's mocks do not write.
+      yield* projects.apply({
+        sequence: 0,
+        eventId: EventId.make(`created:${projectId}`),
+        aggregateKind: "project",
+        aggregateId: projectId,
+        occurredAt: "2026-10-18T00:00:00.000Z",
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "project.created",
+        payload: {
+          projectId,
+          title: "Link origin",
+          workspaceRoot: "/p/link-origin",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-10-18T00:00:00.000Z",
+          updatedAt: "2026-10-18T00:00:00.000Z",
+        },
+      });
+      const opener = yield* launch(claudeCode, "Opener of Lapwing");
+      const threadId = yield* launch(claudeCode, "Lapwing opened", { openedByThreadId: opener });
+      const plain = yield* launch(claudeCode, "Lapwing plain");
+      const everywhere = (scope: McpInvocationContext.McpInvocationScope, id: ThreadId) => {
+        const shows = shownIn(scope);
+        return Effect.all({
+          list: shows.list(id === threadId ? "Lapwing opened" : "Lapwing plain"),
+          read: shows.read(id),
+          wait: shows.wait(id),
+          search: shows.search(id === threadId ? "Lapwing opened" : "Lapwing plain"),
+        });
+      };
+
+      const hosted: McpInvocationContext.McpInvocationScope = {
+        ...claudeCode,
+        client: { ...claudeCode.client!, hostedAppUrl: "https://t3.example.com" },
+      };
+      for (const scope of [claudeCode, hosted]) {
+        const link = McpInvocationContext.threadLinkFor(scope, opener);
+        for (const [tool, shown] of Object.entries(yield* everywhere(scope, threadId))) {
+          assert.equal(shown?.openedByThreadId, opener, tool);
+          assert.equal(shown?.openedByLink, link, tool);
+        }
+      }
+      assert.include(
+        McpInvocationContext.threadLinkFor(hosted, opener),
+        "https://t3.example.com/threads/",
+      );
+      for (const shown of Object.values(yield* everywhere(claudeCode, plain))) {
+        assert.notProperty(shown, "openedByThreadId");
+        assert.notProperty(shown, "openedByLink");
+      }
+
+      // An opener says nothing about lineage.
+      const read = yield* shownIn(claudeCode).read(threadId);
+      const listed = yield* shownIn(claudeCode).list("Lapwing opened");
+      for (const shown of [read, listed]) {
+        assert.equal(shown?.parentThreadId, null);
+        assert.equal(shown?.relationshipToParent, null);
+      }
+
+      const capabilities = (scope: McpInvocationContext.McpInvocationScope) =>
+        call(scope, "orchestrator_capabilities", {}).pipe(
+          Effect.map((result) => result.structuredContent as Record<string, unknown>),
+        );
+      const asLaunched = asThread(threadId);
+      const ownCapabilities = yield* capabilities(asLaunched);
+      assert.equal(ownCapabilities.openedByThreadId, opener);
+      assert.equal(
+        ownCapabilities.openedByLink,
+        McpInvocationContext.threadLinkFor(asLaunched, opener),
+      );
+      assert.equal(ownCapabilities.parentThreadId, threadId);
+      const outsideCapabilities = yield* capabilities(claudeCode);
+      assert.notProperty(outsideCapabilities, "openedByThreadId");
+      assert.notProperty(outsideCapabilities, "openedByLink");
+      const plainCapabilities = yield* capabilities(asThread(plain));
+      assert.notProperty(plainCapabilities, "openedByThreadId");
+      assert.notProperty(plainCapabilities, "openedByLink");
+
+      // Once the opener is deleted, the id stays as stored and nothing links to it.
+      yield* orchestrator.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("delete:opener-of-lapwing"),
+        threadId: opener,
+      });
+      for (const [tool, shown] of Object.entries(yield* everywhere(claudeCode, threadId))) {
+        assert.equal(shown?.openedByThreadId, opener, tool);
+        assert.notProperty(shown, "openedByLink", tool);
+      }
+      const afterDelete = yield* capabilities(asLaunched);
+      assert.equal(afterDelete.openedByThreadId, opener);
+      assert.notProperty(afterDelete, "openedByLink");
     }),
   );
 

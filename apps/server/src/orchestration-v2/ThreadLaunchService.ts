@@ -93,6 +93,8 @@ export interface ThreadLaunchInput {
   /** Thread whose agent launched this one, recorded on the new thread. */
   readonly openedByThreadId?: ThreadId;
   readonly tags?: ReadonlyArray<ThreadTag>;
+  /** Its closer is the client that launched it: neither its opener's settle nor idling settles it. */
+  readonly autoSettleDisabled?: boolean;
   readonly importedNativeThread?: {
     readonly ref: {
       readonly driver: ProviderDriverKind;
@@ -988,6 +990,21 @@ const make = Effect.gen(function* () {
                 threadId,
                 tag,
                 tagged: true,
+              })
+              .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
+          }
+        }
+        if (input.autoSettleDisabled === true) {
+          const shell = yield* threads
+            .getThreadShell(threadId)
+            .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
+          if (shell?.autoSettleDisabledAt == null) {
+            yield* threads
+              .dispatch({
+                type: "thread.auto-settle.set",
+                commandId: CommandId.make(`${input.commandId}:auto-settle`),
+                threadId,
+                enabled: false,
               })
               .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
           }

@@ -115,17 +115,21 @@ it.effect("attributes a launched thread and its first message to the calling thr
     expect(launchedSender).toBe(sourceThreadId);
     expect(launchedOpener).toBe(sourceThreadId);
 
-    // A caller at full access may name another opener; the message stays its own.
+    // A thread is its launch's opener: even at full access it cannot name another.
     const namedOpener = ThreadId.make("named-opener");
-    yield* toolkit
+    const namingAnother = yield* toolkit
       .handle("t3_thread_launch", {
         title: "Audit",
         message: "Review the change",
         openedByThreadId: namedOpener,
       })
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+    expect(namingAnother.at(-1)?.result).toMatchObject({
+      code: "invalid_request",
+      message: "a calling thread is its launch's opener",
+    });
     expect(launchedSender).toBe(sourceThreadId);
-    expect(launchedOpener).toBe(namedOpener);
+    expect(launchedOpener).toBe(sourceThreadId);
   }),
 );
 
@@ -409,6 +413,12 @@ it.effect(
     }),
 );
 
+const delegatedFrom = {
+  environmentId: EnvironmentId.make("environment-laptop"),
+  threadId: ThreadId.make("thread:laptop-parent"),
+  title: "Laptop parent",
+};
+
 /** One launch through the real tool, parameter decoding included. */
 const launchAs = Effect.fn("test.launchAs")(function* (
   session: Pick<
@@ -420,6 +430,7 @@ const launchAs = Effect.fn("test.launchAs")(function* (
     readonly tags?: ReadonlyArray<string>;
     readonly scratch?: true;
     readonly clientRequestId?: string;
+    readonly delegatedFrom?: typeof delegatedFrom;
   },
   /** Shared by the attempts of one retried launch, so its thread is live on the second. */
   launched: Array<ThreadLaunch.ThreadLaunchInput> = [],
@@ -565,6 +576,7 @@ it.effect("records a named opener and tags from a full-access outside session", 
     expect(launched[0]?.openedByThreadId).toBe(captain.id);
     expect(launched[0]?.tags).toEqual(atLimit);
     expect(launched[0]?.initialMessage?.senderThreadId).toBeUndefined();
+    expect(launched[0]?.autoSettleDisabled).toBe(true);
   }),
 );
 
@@ -638,6 +650,15 @@ it.effect("a retry with no live thread of its own still answers for its opener",
       { openedByThreadId: captain.id, clientRequestId: "launch-once" },
       retried,
     );
+    // Its own thread deleted too: nothing to replay, so the opener answers.
+    const ownDeleted = { ...deletedCaptain, id: retried[0]?.threadId ?? captain.id };
+    const gone = yield* launchAs(
+      { runtimeModeCeiling: "full-access", threads: [deletedCaptain, ownDeleted] },
+      { openedByThreadId: captain.id, clientRequestId: "launch-once" },
+      retried,
+    );
+    expect(gone.result).toMatchObject({ code: "thread_not_found" });
+
     const below = yield* launchAs(
       { runtimeModeCeiling: "auto", threads: [deletedCaptain] },
       { openedByThreadId: captain.id, clientRequestId: "launch-once" },
@@ -645,6 +666,77 @@ it.effect("a retry with no live thread of its own still answers for its opener",
     );
     expect(below.result).toMatchObject({ code: "runtime_mode_escalation_denied" });
     expect(retried).toHaveLength(1);
+  }),
+);
+
+const threadAt = (runtimeMode: RuntimeMode) =>
+  liveThreadShell(ThreadId.make("thread:calling"), { runtimeMode });
+
+it.effect("refuses a thread caller naming another opener and creates nothing", () =>
+  Effect.gen(function* () {
+    const { result, launched, scratchProjects } = yield* launchAs(
+      {
+        runtimeModeCeiling: "full-access",
+        callerThread: threadAt("full-access"),
+        threads: [captain],
+      },
+      { openedByThreadId: captain.id, clientRequestId: "launch-once", scratch: true },
+    );
+    expect(result).toMatchObject({
+      code: "invalid_request",
+      message: "a calling thread is its launch's opener",
+    });
+    expect(launched).toEqual([]);
+    expect(scratchProjects).toEqual([]);
+  }),
+);
+
+it.effect("lets a thread caller name itself as the opener", () =>
+  Effect.gen(function* () {
+    const caller = threadAt("full-access");
+    const { result, launched } = yield* launchAs(
+      { runtimeModeCeiling: "full-access", callerThread: caller },
+      { openedByThreadId: caller.id },
+    );
+    expect(result).toMatchObject({ threadId: launched[0]?.threadId });
+    expect(launched[0]?.openedByThreadId).toBe(caller.id);
+    expect(launched[0]?.initialMessage?.senderThreadId).toBe(caller.id);
+    expect(launched[0]?.autoSettleDisabled).toBeUndefined();
+  }),
+);
+
+it.effect.each(["full-access", "auto"] as const)(
+  "refuses delegatedFrom from a thread at %s with no link and creates nothing",
+  (runtimeMode) =>
+    Effect.gen(function* () {
+      const { result, launched, scratchProjects } = yield* launchAs(
+        { runtimeModeCeiling: "full-access", callerThread: threadAt(runtimeMode) },
+        { delegatedFrom, scratch: true },
+      );
+      expect(result).toMatchObject({
+        code: "invalid_request",
+        message:
+          "delegatedFrom is set by a linked environment; your thread is recorded as the opener",
+      });
+      expect(launched).toEqual([]);
+      expect(scratchProjects).toEqual([]);
+    }),
+);
+
+it.effect("keeps delegatedFrom from a thread a link started, and from an outside client", () =>
+  Effect.gen(function* () {
+    const linkOrigin = { sessionId: "laptop", label: "Laptop", access: "full-access" } as const;
+    const linkedThread = { ...threadAt("full-access"), linkOrigin };
+    const fromLinkedThread = yield* launchAs(
+      { runtimeModeCeiling: "full-access", callerThread: linkedThread },
+      { delegatedFrom },
+    );
+    expect(fromLinkedThread.launched[0]).toMatchObject({ delegatedFrom, linkOrigin });
+
+    // The orchestrator drops it for a thread with no link: only stamped work names a parent.
+    const outside = yield* launchAs({ runtimeModeCeiling: "full-access" }, { delegatedFrom });
+    expect(outside.launched[0]?.delegatedFrom).toEqual(delegatedFrom);
+    expect(outside.launched[0]).not.toHaveProperty("linkOrigin");
   }),
 );
 

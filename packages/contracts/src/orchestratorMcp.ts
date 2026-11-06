@@ -375,6 +375,7 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
   openedByThreadId: Schema.optional(ThreadId),
+  openedByLink: Schema.optional(Schema.String),
   tags: Schema.optional(StoredThreadTags),
   itemCount: NonNegativeInt,
   createdAt: IsoDateTime,
@@ -447,6 +448,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
   openedByThreadId: Schema.optional(ThreadId),
+  openedByLink: Schema.optional(Schema.String),
   tags: Schema.optional(StoredThreadTags),
   runCount: NonNegativeInt,
   itemCount: NonNegativeInt,
@@ -542,6 +544,8 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
   runId: Schema.NullOr(RunId),
   status: OrchestratorMcpThreadStatus,
   timedOut: Schema.Boolean,
+  openedByThreadId: Schema.optional(ThreadId),
+  openedByLink: Schema.optional(Schema.String),
   next: Schema.optional(OrchestratorMcpRunningTaskNext),
   /** With untilDelegatedWorkSettled, once settled: the run whose reply is the thread's result. */
   resultRun: Schema.optional(Schema.Struct({ runId: RunId, status: OrchestrationV2RunStatus })),
@@ -635,6 +639,8 @@ export type OrchestratorMcpEnvironmentLinksResult =
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
+  openedByThreadId: Schema.optional(ThreadId),
+  openedByLink: Schema.optional(Schema.String),
   inheritedProviderInstanceId: Schema.NullOr(ProviderInstanceId),
   inheritedModel: Schema.NullOr(Schema.String),
   inheritedOptions: Schema.optional(Schema.Array(ProviderOptionSelection)),

@@ -44,6 +44,34 @@ export const unavailable = () =>
     message: "The operation could not be completed.",
   });
 
+export interface OpenerKeys {
+  readonly openedByThreadId?: ThreadId;
+  readonly openedByLink?: string;
+}
+
+/**
+ * The opener's id as stored and, while it is not deleted here, its link, archived or not. A page of threads
+ * shares one query, and threads with no opener cost none.
+ */
+export const openerKeysFor = Effect.fn("mcp.openerKeysFor")(function* (
+  threads: Pick<ThreadManagement.ThreadManagementService["Service"], "getThreadTitles">,
+  scope: Parameters<typeof McpInvocationContext.threadLinkFor>[0],
+  openers: ReadonlyArray<ThreadId | undefined>,
+) {
+  const ids = [...new Set(openers)].filter((id) => id !== undefined);
+  const live =
+    ids.length === 0 ? {} : yield* threads.getThreadTitles(ids).pipe(Effect.mapError(unavailable));
+  return (openedByThreadId: ThreadId | undefined): OpenerKeys =>
+    openedByThreadId === undefined
+      ? {}
+      : {
+          openedByThreadId,
+          ...(Object.hasOwn(live, openedByThreadId)
+            ? { openedByLink: McpInvocationContext.threadLinkFor(scope, openedByThreadId) }
+            : {}),
+        };
+});
+
 export const dispatchFailure = (
   error: OrchestratorV2Error | ThreadManagement.ThreadManagementProviderInstanceDisabledError,
 ) =>

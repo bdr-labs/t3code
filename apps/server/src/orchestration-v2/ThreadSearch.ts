@@ -244,6 +244,7 @@ export interface ThreadSearchHit {
   readonly source: "title" | OrchestrationThreadSearchSource;
   readonly snippet?: string;
   readonly messageCreatedAt?: string | null;
+  readonly openedByThreadId?: ThreadId;
 }
 
 export class ThreadSearch extends Context.Service<
@@ -539,6 +540,15 @@ export const make = Effect.gen(function* () {
         },
       ]),
     );
+    const openerOf = new Map(
+      candidates.flatMap(({ thread }) =>
+        thread.openedByThreadId === undefined ? [] : [[thread.id, thread.openedByThreadId]],
+      ),
+    );
+    const openerKey = (threadId: ThreadId) => {
+      const openedByThreadId = openerOf.get(threadId);
+      return openedByThreadId === undefined ? {} : { openedByThreadId };
+    };
     const titleHits: ThreadSearchHit[] = rankSearchItems(candidates, (row, options) =>
       // An agent's search has no use for the user's palette picks.
       scoreThreadSearch(normalizedQuery, subjectById.get(row.thread.id)!, now, {
@@ -552,6 +562,7 @@ export const make = Effect.gen(function* () {
         projectId: item.thread.projectId,
         title: item.thread.title,
         source: "title",
+        ...openerKey(item.thread.id),
       }));
     const shown = new Set(titleHits.map((hit) => hit.threadId));
     const { matches } = yield* searchMessages({
@@ -566,6 +577,7 @@ export const make = Effect.gen(function* () {
       .map(({ quality: _quality, hits: _hits, messageId: _messageId, ...match }) => ({
         ...match,
         title: subjectById.get(match.threadId)!.title,
+        ...openerKey(match.threadId),
       }));
     // Titles come first, but a fifth of the slots stay for message matches,
     // as the palette keeps its "In messages" section.

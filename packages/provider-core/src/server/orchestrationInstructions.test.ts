@@ -9,6 +9,31 @@ import {
   t3OrchestrationSystemPrompt,
 } from "./orchestrationInstructions.ts";
 
+describe("T3 opener instructions", () => {
+  it("reach every provider's prompt path word for word, once", () => {
+    const line =
+      "- `openedByThreadId` names the thread that opened yours: not your parent for delegation, not a subagent. Report to it with `t3_thread_send` only when your task says so, and mention it by its link.\n";
+    const state = { interactionMode: "default", hasT3Mcp: true, hasDeviceTools: false } as const;
+    for (const [surface, text] of [
+      ["shared", T3_CODE_ORCHESTRATION_INSTRUCTIONS],
+      ["system prompt", t3OrchestrationSystemPrompt(true, false)],
+      ["acp prompt", t3AcpPromptWithInstructions({ prompt: "Go.", state })],
+      [
+        "first prompt",
+        t3OrchestrationPrompt({
+          prompt: "Go.",
+          hasT3Mcp: true,
+          hasDeviceTools: false,
+          orchestrationDelivered: false,
+          deviceInstructionsDelivered: false,
+        }),
+      ],
+    ] as const) {
+      assert.equal(text?.split(line).length, 2, surface);
+    }
+  });
+});
+
 describe("T3 device instructions", () => {
   it("route device work through device_open and give Claude the line that loads the tools", () => {
     for (const intent of ["`device_list`", "`device_open`", "`agent-device`", "ssh", "`hostId`"]) {

@@ -71,6 +71,7 @@ const thread = (
     readonly settledAt?: DateTime.Utc;
     readonly linkedPullRequest?: ThreadLinkedPullRequest;
     readonly branchPullRequest?: ThreadLinkedPullRequest;
+    readonly openedByThreadId?: ThreadId;
   } = {},
 ): OrchestrationV2DomainEvent => ({
   id: EventId.make(`created:${threadId}`),
@@ -93,6 +94,9 @@ const thread = (
     linkedPullRequest: overrides.linkedPullRequest ?? null,
     branchPullRequest: overrides.branchPullRequest ?? null,
     activeProviderThreadId: null,
+    ...(overrides.openedByThreadId === undefined
+      ? {}
+      : { openedByThreadId: overrides.openedByThreadId }),
     lineage: overrides.subagentOf
       ? {
           parentThreadId: overrides.subagentOf,
@@ -959,6 +963,36 @@ it.layer(layerTest)("ThreadSearch.searchThreadsWithOlderSettledRows", (it) => {
 });
 
 it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
+  it.effect("says who opened a thread it found by title or by message", () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const search = yield* ThreadSearch.ThreadSearch;
+      const project = ProjectId.make("project:shore");
+      yield* createProject(project);
+      const opener = ThreadId.make("thread:the-opener");
+      const titled = ThreadId.make("thread:sanderling-titled");
+      const byMessage = ThreadId.make("thread:sanderling-message");
+      const plain = ThreadId.make("thread:sanderling-plain");
+      yield* Effect.forEach(
+        [
+          thread(titled, project, { title: "Sanderling", openedByThreadId: opener }),
+          thread(byMessage, project, { title: "Other", openedByThreadId: opener }),
+          message(byMessage, "sanderling-body", "user", "a sanderling note", { minute: 1 }),
+          thread(plain, project, { title: "Sanderling plain" }),
+        ],
+        projections.apply,
+        { discard: true },
+      );
+      const { matches } = yield* search.searchThreads({ query: "sanderling", limit: 10 });
+      const openerOf = (threadId: ThreadId) => matches.find((match) => match.threadId === threadId);
+      assert.equal(openerOf(titled)?.source, "title");
+      assert.equal(openerOf(titled)?.openedByThreadId, opener);
+      assert.equal(openerOf(byMessage)?.source, "user");
+      assert.equal(openerOf(byMessage)?.openedByThreadId, opener);
+      assert.notProperty(openerOf(plain), "openedByThreadId");
+    }),
+  );
+
   it.effect("keeps room for a message-only thread behind many titled ones", () =>
     Effect.gen(function* () {
       const projections = yield* ProjectionStore.ProjectionStoreV2;

@@ -208,6 +208,8 @@ const ThreadSearchTool = Tool.make("t3_thread_search", {
         source: Schema.Literals(["title", "user", "assistant"]),
         snippet: Schema.optional(OrchestrationThreadSearchMatch.fields.snippet),
         messageCreatedAt: Schema.optional(OrchestrationThreadSearchMatch.fields.messageCreatedAt),
+        openedByThreadId: Schema.optional(ThreadId),
+        openedByLink: Schema.optional(Schema.String),
       }),
     ),
   }),

@@ -123,7 +123,12 @@ import {
   runtimeModeRank,
   taskPrompt,
 } from "./delegatedTaskModes.ts";
-import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import {
+  isLiveCallerShell,
+  type OpenerKeys,
+  openerKeysFor,
+  threadNotFound,
+} from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
@@ -797,6 +802,7 @@ function listItemFromShell(
   scope: McpInvocationScope,
   shell: OrchestrationV2ThreadShell,
   nowMs: number,
+  opener: OpenerKeys,
 ): OrchestratorMcpThreadListItem {
   return {
     threadId: shell.id,
@@ -817,7 +823,7 @@ function listItemFromShell(
     ...threadSnooze(shell, nowMs),
     parentThreadId: shell.lineage.parentThreadId,
     relationshipToParent: shell.lineage.relationshipToParent,
-    ...(shell.openedByThreadId === undefined ? {} : { openedByThreadId: shell.openedByThreadId }),
+    ...opener,
     ...(shell.tags?.length ? { tags: shell.tags } : {}),
     itemCount: shell.visibleItemCount,
     createdAt: DateTime.formatIso(shell.createdAt),
@@ -831,6 +837,7 @@ function threadDetail(
   itemCount: number,
   shell: OrchestrationV2ThreadShell,
   nowMs: number,
+  opener: OpenerKeys,
 ): OrchestratorMcpThreadDetail {
   const latest = ThreadManagementService.latestRun(projection);
   const active = ThreadManagementService.latestActiveRun(projection);
@@ -862,7 +869,7 @@ function threadDetail(
     worktreePath: projection.thread.worktreePath,
     parentThreadId: projection.thread.lineage.parentThreadId,
     relationshipToParent: projection.thread.lineage.relationshipToParent,
-    ...(shell.openedByThreadId === undefined ? {} : { openedByThreadId: shell.openedByThreadId }),
+    ...opener,
     ...(shell.tags?.length ? { tags: shell.tags } : {}),
     runCount: projection.runs.length,
     itemCount,
@@ -2286,8 +2293,11 @@ const make = Effect.gen(function* () {
       );
       const inherited = parent?.thread.modelSelection;
       const searchTerms = input.search?.toLowerCase().split(/\s+/).filter(Boolean) ?? [];
+      const openedByThreadId = parent?.thread.openedByThreadId;
+      const openerKeys = yield* openerKeysFor(threadManagement, scope, [openedByThreadId]);
       return {
         parentThreadId: parent?.thread.id ?? null,
+        ...openerKeys(openedByThreadId),
         inheritedProviderInstanceId: inherited?.instanceId ?? null,
         inheritedModel: inherited?.model ?? null,
         inheritedOptions:
@@ -2993,10 +3003,17 @@ const make = Effect.gen(function* () {
       const limit = input.limit ?? DEFAULT_THREAD_LIST_LIMIT;
       const page = filtered.slice(cursor, cursor + limit);
       const nextCursor = cursor + page.length < filtered.length ? cursor + page.length : null;
+      const openerKeys = yield* openerKeysFor(
+        threadManagement,
+        scope,
+        page.map((shell) => shell.openedByThreadId),
+      );
       return {
         projectId,
         currentThreadId: parent?.thread.id ?? null,
-        threads: page.map((shell) => listItemFromShell(scope, shell, nowMs)),
+        threads: page.map((shell) =>
+          listItemFromShell(scope, shell, nowMs, openerKeys(shell.openedByThreadId)),
+        ),
         nextCursor,
         total: filtered.length,
       } satisfies OrchestratorMcpThreadListResult;
@@ -3087,6 +3104,7 @@ const make = Effect.gen(function* () {
           }
         }
       }
+      const openerKeys = yield* openerKeysFor(threadManagement, scope, [shell.openedByThreadId]);
       return {
         thread: threadDetail(
           scope,
@@ -3094,6 +3112,7 @@ const make = Effect.gen(function* () {
           timeline.totalItems,
           shell,
           yield* Clock.currentTimeMillis,
+          openerKeys(shell.openedByThreadId),
         ),
         recentRuns: target.runs
           .toSorted((left, right) => right.ordinal - left.ordinal)
@@ -3198,11 +3217,15 @@ const make = Effect.gen(function* () {
         : [];
       const wakesCaller =
         ownedTask && !childRequests.some((request) => request.status === "pending");
+      const openerKeys = yield* openerKeysFor(threadManagement, scope, [
+        target.thread.openedByThreadId,
+      ]);
       return {
         threadId: input.threadId,
         runId: result.run?.id ?? null,
         status,
         timedOut: result.timedOut,
+        ...openerKeys(target.thread.openedByThreadId),
         ...(wakesCaller ? { next: ORCHESTRATOR_MCP_RUNNING_TASK_NEXT } : {}),
         ...(result.resultRun === undefined
           ? {}
