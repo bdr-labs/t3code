@@ -531,6 +531,18 @@ const claudeUsageLimit = (message: string | undefined) =>
     ? { resetAt: /\bResets at (\d{4}-\d\d-\d\dT[\d:.]+Z)\.?\s*$/.exec(message)?.[1] ?? null }
     : undefined;
 
+// OpenCode's own dialog names no wait above a week; a Retry-After past that is not a reset time.
+const MAX_FREE_LIMIT_WAIT_MS = 7 * 24 * 60 * 60 * 1000;
+
+// OpenCode 2.2 sends a free model's wait as retryAfterMs, which the bundled 2.0.28 types do not declare.
+export const freeLimitResetAt = (error: { readonly type: string }, created: number) => {
+  if (error.type !== "provider.free-limit" || !("retryAfterMs" in error)) return null;
+  const wait = error.retryAfterMs;
+  if (typeof wait !== "number" || !(wait > 0) || wait > MAX_FREE_LIMIT_WAIT_MS) return null;
+  const resetAt = DateTime.make(created + wait);
+  return resetAt._tag === "Some" ? DateTime.formatIso(resetAt.value) : null;
+};
+
 const INTERRUPT_TIMEOUT = "10 seconds";
 const INSTRUCTIONS_KEY = "t3-code";
 const RECONNECT_ATTEMPTS = 5;
@@ -2170,6 +2182,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           const claudeLimit = claudeUsageLimit(message);
           const usageLimit =
             (type === "provider.quota" && status !== 402) ||
+            (type === "provider.free-limit" && status !== 402) ||
             type === "provider.rate-limit" ||
             claudeLimit !== undefined;
           return yield* endExecution(state, turn, {
@@ -2178,7 +2191,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               message: readableProviderErrorMessage(message, status, response?.body),
               code: type,
               class: usageLimit ? "usage_limit" : "provider_error",
-              resetAt: claudeLimit?.resetAt ?? null,
+              resetAt: claudeLimit?.resetAt ?? freeLimitResetAt(event.data.error, event.created),
             }),
           });
         }

@@ -48,6 +48,7 @@ import {
   OPENCODE_PROVIDER,
   t3McpServerName,
 } from "@t3tools/provider-opencode/testing";
+import { freeLimitResetAt } from "@t3tools/provider-opencode/server/v2/adapter";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { openCode2ReplayRuntime } from "./OpenCode2AdapterV2.testkit.ts";
 import {
@@ -572,6 +573,16 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       },
     },
     {
+      name: "a provider.free-limit answered with 402",
+      failureClass: "provider_error",
+      error: {
+        type: "provider.free-limit",
+        message: "Upstream request failed: Insufficient account funds",
+        status: 402,
+        retryAfterMs: 50476000,
+      },
+    },
+    {
       name: "a Claude limit without a reset timestamp",
       failureClass: "usage_limit",
       error: {
@@ -606,6 +617,76 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       });
     }).pipe(Effect.scoped),
   );
+
+  it.effect.each([
+    {
+      name: "the wait OpenCode records",
+      retryAfter: { retryAfterMs: 50476000 },
+      reset: { resetAt: "1970-01-01T14:01:16.001Z" },
+    },
+    { name: "no wait, as a cap with no Retry-After sends", retryAfter: {}, reset: {} },
+  ])("classifies a provider.free-limit cap with $name as a usage limit", ({ retryAfter, reset }) =>
+    Effect.gen(function* () {
+      const message = "Free usage limit reached. Connect a provider or subscribe to keep going.";
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.execution.failed", {
+          sessionID: SESSION,
+          error: {
+            type: "provider.free-limit",
+            message,
+            status: 429,
+            response: {
+              body: JSON.stringify({
+                type: "error",
+                error: { type: "FreeUsageLimitError", message: "Free usage limit reached." },
+              }),
+            },
+            ...retryAfter,
+          },
+        }),
+      ]);
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn(turnInput(thread));
+      const ended = yield* Fiber.join(terminal);
+      assert.equal(ended?.status, "failed");
+      assert.deepEqual(ended?.failure, {
+        class: "usage_limit",
+        code: "provider.free-limit",
+        message,
+        retryable: null,
+        ...reset,
+      });
+    }).pipe(Effect.scoped),
+  );
+
+  it.each([
+    [
+      "the recorded wait",
+      { type: "provider.free-limit", retryAfterMs: 50476000 },
+      "2026-11-07T00:13:58.404Z",
+    ],
+    ["no wait", { type: "provider.free-limit" }, null],
+    ["a null wait", { type: "provider.free-limit", retryAfterMs: null }, null],
+    ["a string wait", { type: "provider.free-limit", retryAfterMs: "50476000" }, null],
+    ["a zero wait", { type: "provider.free-limit", retryAfterMs: 0 }, null],
+    ["a negative wait", { type: "provider.free-limit", retryAfterMs: -1 }, null],
+    ["a NaN wait", { type: "provider.free-limit", retryAfterMs: Number.NaN }, null],
+    ["an infinite wait", { type: "provider.free-limit", retryAfterMs: Infinity }, null],
+    ["a wait past the last valid date", { type: "provider.free-limit", retryAfterMs: 1e300 }, null],
+    [
+      "a wait of a week",
+      { type: "provider.free-limit", retryAfterMs: 604_800_000 },
+      "2026-11-13T10:12:42.404Z",
+    ],
+    ["a wait over a week", { type: "provider.free-limit", retryAfterMs: 604_800_001 }, null],
+    ["a provider.quota wait", { type: "provider.quota", retryAfterMs: 1000 }, null],
+    ["a provider.rate-limit wait", { type: "provider.rate-limit", retryAfterMs: 1000 }, null],
+    ["a provider.unknown wait", { type: "provider.unknown", retryAfterMs: 1000 }, null],
+  ] as const)("reads a reset time from %s", (_name, error, resetAt) => {
+    assert.equal(freeLimitResetAt(error, 1793959962404), resetAt);
+  });
 
   // regression: #29289 Claude weekly limits through claude-agent lost their usage-limit reset
   it.effect(

@@ -115,6 +115,31 @@ const undecodable = Effect.fnUntraced(function* (data: string) {
   return Result.failVoid;
 });
 
+const decodeRetryAfter = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      data: Schema.Struct({ error: Schema.Struct({ retryAfterMs: Schema.Unknown }) }),
+    }),
+  ),
+);
+// The bundled 2.0.28 schema strips what OpenCode 2.2 added to a failure.
+const keepRetryAfter = (event: OpenCodeEvent, data: string): OpenCodeEvent => {
+  if (event.type !== "session.execution.failed") return event;
+  const raw = decodeRetryAfter(data);
+  return raw._tag === "None"
+    ? event
+    : {
+        ...event,
+        data: {
+          ...event.data,
+          error: {
+            ...event.data.error,
+            retryAfterMs: raw.value.data.error.retryAfterMs,
+          } as typeof event.data.error,
+        },
+      };
+};
+
 const readEvents = HttpClient.get("/api/event", {
   headers: { accept: "text/event-stream" },
 }).pipe(
@@ -130,7 +155,9 @@ const readEvents = HttpClient.get("/api/event", {
       Stream.filterMapEffect((frame) => {
         const decoded = decodeEvent(frame.data);
         return Result.isSuccess(decoded)
-          ? Effect.succeed(Result.succeed<OpenCode2StreamEvent>(decoded.success))
+          ? Effect.succeed(
+              Result.succeed<OpenCode2StreamEvent>(keepRetryAfter(decoded.success, frame.data)),
+            )
           : undecodable(frame.data);
       }),
     ),
