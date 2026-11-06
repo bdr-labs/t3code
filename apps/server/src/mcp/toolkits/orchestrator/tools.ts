@@ -167,7 +167,9 @@ const ScheduleTaskTool = Tool.make("schedule_task", {
 })
   .annotate(Tool.Title, "Schedule a task")
   .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+  .annotate(Tool.OpenWorld, true)
+  // Deferred, it loses to Claude Code's session-scoped CronCreate and ScheduleWakeup.
+  .annotate(Tool.Meta, { "anthropic/alwaysLoad": true });
 
 const ListScheduledTasksTool = Tool.make("list_scheduled_tasks", {
   parameters: OrchestratorMcpListScheduledTasksInput,

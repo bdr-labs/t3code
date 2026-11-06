@@ -9,10 +9,11 @@ import {
   t3OrchestrationSystemPrompt,
 } from "./orchestrationInstructions.ts";
 
-describe("T3 opener instructions", () => {
-  it("reach every provider's prompt path word for word, once", () => {
-    const line =
-      "- `openedByThreadId` names the thread that opened yours: not your parent for delegation, not a subagent. Report to it with `t3_thread_send` only when your task says so, and mention it by its link.\n";
+describe("T3 opener and schedule instructions", () => {
+  it.each([
+    "- `openedByThreadId` names the thread that opened yours: not your parent for delegation, not a subagent. Report to it with `t3_thread_send` only when your task says so, and mention it by its link.\n",
+    "- Work at a set time, on a schedule or on a webhook: `schedule_task`; a provider's own timers end with its session. Asked only to schedule, do not run the prompt.\n",
+  ])("reach every provider's prompt path word for word, once: %s", (line) => {
     const state = { interactionMode: "default", hasT3Mcp: true, hasDeviceTools: false } as const;
     for (const [surface, text] of [
       ["shared", T3_CODE_ORCHESTRATION_INSTRUCTIONS],
@@ -31,6 +32,15 @@ describe("T3 opener instructions", () => {
     ] as const) {
       assert.equal(text?.split(line).length, 2, surface);
     }
+  });
+
+  it("leave the secrets bullet about secrets alone", () => {
+    const bullet = T3_CODE_ORCHESTRATION_INSTRUCTIONS.split("\n").find((line) =>
+      line.startsWith("- A login, token, PIN or pairing code"),
+    );
+    assert.include(bullet, "`request_secret`");
+    assert.include(bullet, "chat ask");
+    assert.notInclude(bullet, "schedule");
   });
 });
 

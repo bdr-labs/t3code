@@ -1,4 +1,5 @@
 import { expect, it } from "@effect/vitest";
+import { ScheduledTaskUpsertSchedule } from "@t3tools/contracts";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import { Tool } from "effect/ai";
@@ -79,4 +80,16 @@ it("advertises an opener, tags and the tag action in tools/list", () => {
       removeTags: expect.objectContaining(tagList),
     },
   );
+});
+
+// The tool's own description names no trigger, so this field is all a model reads about them.
+it("names every schedule trigger in the schedule_task schema", () => {
+  const { properties } = advertisedJsonSchema(OrchestratorToolkit.tools.schedule_task);
+  for (const member of ScheduledTaskUpsertSchedule.members) {
+    expect(properties).toMatchObject({
+      schedule: {
+        description: expect.stringContaining(`type:'${member.fields.type.literal}'`),
+      },
+    });
+  }
 });

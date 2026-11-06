@@ -114,15 +114,25 @@ const layerAdvertisedTools = McpHttpServer.layerTools.pipe(
 );
 
 // Claude Code loads these tools up front instead of behind ToolSearch, outside this budget.
-it.effect("only request_secret asks Claude Code to load it up front", () =>
+it.effect("only request_secret and schedule_task ask Claude Code to load them up front", () =>
   Effect.gen(function* () {
     const mcp = yield* McpServer.McpServer;
     const alwaysLoad = mcp.tools
       .filter(({ tool }) => tool._meta?.["anthropic/alwaysLoad"] !== undefined)
       .map(({ tool }) => [tool.name, tool._meta]);
-    expect(alwaysLoad).toEqual([["request_secret", { "anthropic/alwaysLoad": true }]]);
+    expect(Object.fromEntries(alwaysLoad)).toEqual({
+      schedule_task: { "anthropic/alwaysLoad": true },
+      request_secret: { "anthropic/alwaysLoad": true },
+    });
   }).pipe(Effect.provide(layerAdvertisedTools)),
 );
+
+it("the schedule line reaches Claude and Codex whole", () => {
+  const line =
+    "- Work at a set time, on a schedule or on a webhook: `schedule_task`; a provider's own timers end with its session. Asked only to schedule, do not run the prompt.";
+  expect(claudeSystemAppend()).toContain(line);
+  expect(codexAdditionalContext()).toContain(line);
+});
 
 it("the opener line reaches Claude and Codex word for word", () => {
   const line =
