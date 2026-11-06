@@ -1,4 +1,5 @@
 import {
+  matchComposerDraftThreadItems,
   matchComposerEnvironmentItems,
   matchComposerThreadItems,
 } from "@t3tools/client-runtime/composerThreadItems";
@@ -21,14 +22,14 @@ import {
 import { formatProviderSkillDisplayName } from "@t3tools/shared/inlineSkills";
 
 import type { ComposerTrigger } from "../../composer-logic";
-import type { DraftId } from "../../composerDraftStore";
+import { useComposerDraftStore, type DraftId } from "../../composerDraftStore";
 import { basenameOfPath } from "../../pierre-icons";
 import {
   getProviderSkillsForSlashMenu,
   getProviderSlashCommandsForSlashMenu,
 } from "@t3tools/client-runtime/providerSkills";
 import { searchProviderSkills } from "../../providerSkillSearch";
-import { useVisibleThreadShells } from "~/state/entities";
+import { readProjects, useVisibleThreadShells } from "~/state/entities";
 import { useEnvironmentIdentities, useEnvironmentMachines } from "~/state/environments";
 import { offersLinkedEnvironmentsAtom } from "~/state/peerLinks";
 import {
@@ -111,6 +112,9 @@ export function useComposerMenuItems({
     pullRequestTextQuery === debouncedPullRequestTextQuery ? pullRequestTextQuery : null;
   const isPathTrigger = composerTriggerKind === "path";
   const environmentThreadShells = useVisibleThreadShells(isPathTrigger);
+  const draftSessions = useComposerDraftStore((store) =>
+    isPathTrigger ? store.draftThreadsByThreadKey : null,
+  );
   // Mounts older settled threads matching the mention, which shells may leave out.
   useThreadSearch(isPathTrigger ? [environmentId] : [], pathTriggerQuery, { titlesOnly: true });
   // The user's machines feed `@` machine matches; the catalog summary is cheap and stable.
@@ -188,6 +192,7 @@ export function useComposerMenuItems({
   const items = ((): ComposerCommandItem[] => {
     if (!composerTrigger) return [];
     if (composerTrigger.kind === "path") {
+      const projects = readProjects();
       return [
         ...matchComposerThreadItems({
           shells: environmentThreadShells,
@@ -196,6 +201,23 @@ export function useComposerMenuItems({
           excludeThreadId: activeThreadId,
           query: composerTrigger.query,
           now,
+        }),
+        ...matchComposerDraftThreadItems({
+          drafts: Object.values(draftSessions ?? {})
+            .filter((draft) => !draft.promotedTo)
+            .map((draft) => ({
+              environmentId: draft.environmentId,
+              threadId: draft.threadId,
+              projectTitle:
+                projects.find(
+                  (project) =>
+                    project.environmentId === draft.environmentId && project.id === draft.projectId,
+                )?.title ?? null,
+            })),
+          environmentId,
+          linkedEnvironments,
+          excludeThreadId: activeThreadId,
+          query: composerTrigger.query,
         }),
         // An answer to an agent's question carries thread links, not machines.
         ...(questionAttachmentTarget === null && offersMachines

@@ -7,6 +7,11 @@ import {
 import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import { describe, expect, it } from "vite-plus/test";
 
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { ProjectId } from "@t3tools/contracts";
+
+import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { composerThreadTitle, readPastedComposerContext } from "./composerInlineTokenPaste";
 import { importPastedComposerText } from "./composerInlineTokenPaste";
 
 const thread = {
@@ -55,5 +60,34 @@ describe("importPastedComposerText", () => {
     expect(importPastedComposerText(clipboard({ "text/plain": pasted }), () => new Map())).toBe(
       pasted,
     );
+  });
+});
+
+describe("composerThreadTitle", () => {
+  const openDraft = () =>
+    useComposerDraftStore
+      .getState()
+      .setLogicalProjectDraftThreadId(
+        "logical-project",
+        scopeProjectRef(thread.environmentId, ProjectId.make("project")),
+        DraftId.make("draft-1"),
+        { threadId: thread.threadId },
+      );
+  const closeDraft = () =>
+    useComposerDraftStore.getState().clearDraftThread(DraftId.make("draft-1"));
+
+  it("names nothing for a thread that is gone, so a stale mention attaches no chip", () => {
+    closeDraft();
+    expect(composerThreadTitle(thread)).toBeUndefined();
+  });
+
+  it("names a draft that holds the id, and a plain pasted link to it", () => {
+    openDraft();
+    expect(composerThreadTitle(thread)).toBe("New thread");
+    const fragment = readPastedComposerContext(
+      clipboard({ "text/plain": threadChipCopyTarget(thread, "ignored").value }),
+    );
+    expect(fragment?.records).toMatchObject([{ kind: "thread", title: "New thread" }]);
+    closeDraft();
   });
 });

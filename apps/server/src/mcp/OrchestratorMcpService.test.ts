@@ -3320,24 +3320,30 @@ describe("OrchestratorMcpService thread lookup", () => {
     }),
   );
 
-  it.effect("keeps the plain message for an id that matches nothing", () =>
+  const noRecordHint =
+    "It may be a draft that has not started, which has no record until its first message is sent, or it may have been deleted.";
+  const notFound = `Thread ${bareId} was not found. ${noRecordHint}`;
+  // Stock's sentence stays first: clients of `t3 thread show` recognise a missing thread by it.
+  const notReadable = `Thread ${bareId} is no longer available. ${noRecordHint}`;
+
+  it.effect("says an id that matches nothing may be an unstarted draft or a deleted thread", () =>
     Effect.gen(function* () {
       const { read, send, wait } = yield* failuresFor([]);
       assert.equal(read.code, "thread_not_found");
-      assert.equal(read.message, `Thread ${bareId} is no longer available.`);
+      assert.equal(read.message, notReadable);
       assert.equal(send.code, "thread_not_found");
-      assert.equal(send.message, `Thread ${bareId} was not found.`);
+      assert.equal(send.message, notFound);
       assert.equal(wait.code, "thread_not_found");
-      assert.equal(wait.message, send.message);
+      assert.equal(wait.message, notFound);
     }),
   );
 
   it.effect("does not name an mcp: thread that was deleted", () =>
     Effect.gen(function* () {
       const { read, send, wait } = yield* failuresFor([deletedLaunched]);
-      assert.equal(read.message, `Thread ${bareId} is no longer available.`);
-      assert.equal(send.message, `Thread ${bareId} was not found.`);
-      assert.equal(wait.message, send.message);
+      assert.equal(read.message, notReadable);
+      assert.equal(send.message, notFound);
+      assert.equal(wait.message, notFound);
     }),
   );
 

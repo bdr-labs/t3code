@@ -1281,6 +1281,7 @@ const make = Effect.gen(function* () {
       return yield* threadNotFound(
         threadManagement,
         threadId,
+        // `t3 thread show` prints this; clients recognise a missing thread by this sentence.
         `Thread ${threadId} is no longer available.`,
       );
     }

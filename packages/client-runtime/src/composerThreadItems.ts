@@ -71,6 +71,50 @@ export function matchComposerThreadItems(input: {
     });
 }
 
+export interface ComposerDraftThreadCandidate {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly projectTitle: string | null;
+}
+
+/**
+ * This client's drafts, whose threads do not exist yet but whose ids are already theirs. A draft
+ * has no title to rank by, so "draft", "new thread" or its project's name finds it.
+ */
+export function matchComposerDraftThreadItems(input: {
+  drafts: ReadonlyArray<ComposerDraftThreadCandidate>;
+  environmentId: EnvironmentId;
+  linkedEnvironments: ReadonlyMap<EnvironmentId, string>;
+  excludeThreadId: ThreadId | null;
+  query: string;
+}): ComposerThreadItem[] {
+  const query = foldSearchQuery(input.query);
+  if (query.length === 0) return [];
+  return input.drafts
+    .filter(
+      (draft) =>
+        (draft.environmentId === input.environmentId ||
+          input.linkedEnvironments.has(draft.environmentId)) &&
+        draft.threadId !== input.excludeThreadId &&
+        foldSearchQuery(`new thread draft ${draft.projectTitle ?? ""}`).includes(query),
+    )
+    .slice(0, COMPOSER_THREAD_RESULT_LIMIT)
+    .map((draft) => {
+      const machine =
+        draft.environmentId === input.environmentId
+          ? undefined
+          : input.linkedEnvironments.get(draft.environmentId);
+      const where = draft.projectTitle === null ? "Draft" : `Draft in ${draft.projectTitle}`;
+      return {
+        id: `thread:${draft.environmentId}:${draft.threadId}`,
+        type: "thread",
+        thread: { environmentId: draft.environmentId, threadId: draft.threadId },
+        label: "New thread",
+        description: machine === undefined ? where : `${where} on ${machine}`,
+      };
+    });
+}
+
 export interface ComposerEnvironmentCandidate {
   readonly environmentId: EnvironmentId;
   readonly label: string;

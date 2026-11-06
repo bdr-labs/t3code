@@ -1,6 +1,6 @@
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
-import { userEvent } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 
 const persisted = vi.hoisted(() => ({ title: "" }));
 vi.mock(import("../../state/session"), async (importOriginal) => ({
@@ -19,6 +19,8 @@ vi.mock(import("../../state/use-orchestration-command"), async (importOriginal) 
 vi.mock(import("~/hooks/useThreadActionMenu"), () => ({
   useThreadActionMenu: () => ({ openMenu: () => {}, closeMenu: () => {} }),
 }));
+
+import "~/index.css";
 
 import { render } from "../../../test/render";
 import { ChatHeader } from "./ChatHeader";
@@ -71,3 +73,54 @@ it.each(["blur", "Enter"] as const)(
     expect(persisted.title).toBe("My edited title");
   },
 );
+
+function draftHeader(onCopyDraftReference: () => void) {
+  return (
+    <ChatHeader
+      activeThreadEnvironmentId={EnvironmentId.make("environment")}
+      activeThreadId={ThreadId.make("c8e23066-11e7-4f14-b25e-96e6fb58af44")}
+      activeThreadTitle="New thread"
+      isServerThread={false}
+      activeProject={null}
+      parentThreadLink={null}
+      onOpenThread={() => {}}
+      rightPanelOpen={false}
+      onNewThreadInProject={() => {}}
+      onCopyDraftReference={onCopyDraftReference}
+    />
+  );
+}
+
+async function viewport(width: number, height: number) {
+  const before = { width: window.innerWidth, height: window.innerHeight };
+  await page.viewport(width, height);
+  return { [Symbol.asyncDispose]: () => page.viewport(before.width, before.height) };
+}
+
+const REFERENCE_NAME = "Copy thread c8e23066-11e7-4f14-b25e-96e6fb58af44";
+
+it("shows a draft's reserved thread id and copies a reference to it", async () => {
+  await using _viewport = await viewport(1280, 800);
+  const onCopyDraftReference = vi.fn();
+  await using screen = await render(draftHeader(onCopyDraftReference));
+
+  const reference = screen.getByRole("button", { name: REFERENCE_NAME });
+  await expect.element(reference).toHaveTextContent("c8e23066");
+  await reference.click();
+  expect(onCopyDraftReference).toHaveBeenCalledOnce();
+});
+
+it("leaves the room to the title at phone width", async () => {
+  await using _viewport = await viewport(390, 844);
+  await using screen = await render(draftHeader(() => {}));
+
+  await expect.element(screen.getByRole("heading", { name: "New thread" })).toBeVisible();
+  expect(screen.getByRole("button", { name: REFERENCE_NAME }).elements()).toHaveLength(0);
+});
+
+it("shows no reserved id once the thread has started", async () => {
+  await using _viewport = await viewport(1280, 800);
+  await using screen = await render(header("Started"));
+
+  expect(screen.getByRole("button", { name: /^Copy thread / }).elements()).toHaveLength(0);
+});

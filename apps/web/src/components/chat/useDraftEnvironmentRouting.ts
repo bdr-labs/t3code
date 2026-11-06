@@ -114,6 +114,8 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- writes the resolved load-balanced environment into the draft store once the async pick settles
   useEffect(() => {
     if (!needsLoadBalancing || loadBalancing.pending || !draftId || sendInFlightRef.current) return;
+    // Copying a reference pins the draft, and this effect can still hold the render before that.
+    if (getDraftSession(draftId)?.environmentSelection === "manual") return;
     const target = logicalProjectEnvironments.find(
       (environment) => environment.environmentId === loadBalancing.environmentId,
     );
@@ -131,6 +133,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     logicalProjectEnvironments,
     sendInFlightRef,
     setDraftThreadContext,
+    getDraftSession,
   ]);
   const onAutoEnvironment = () => {
     if (envLocked || !draftId) return;

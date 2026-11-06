@@ -2,6 +2,7 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  matchComposerDraftThreadItems,
   matchComposerEnvironmentItems,
   matchComposerThreadItems,
   type ComposerThreadCandidate,
@@ -117,4 +118,34 @@ describe("matchComposerEnvironmentItems", () => {
       }),
     ).toEqual([]);
   });
+});
+
+it("finds a draft by its project or the word draft, on this server or a linked machine", () => {
+  const linked = EnvironmentId.make("env-linked");
+  const drafts = [
+    { environmentId, threadId: ThreadId.make("current"), projectTitle: "web-app" },
+    { environmentId, threadId: ThreadId.make("here"), projectTitle: "web-app" },
+    { environmentId: linked, threadId: ThreadId.make("linked"), projectTitle: "docs-site" },
+    {
+      environmentId: EnvironmentId.make("env-other"),
+      threadId: ThreadId.make("elsewhere"),
+      projectTitle: "web-app",
+    },
+  ];
+  const match = (query: string) =>
+    matchComposerDraftThreadItems({
+      drafts,
+      environmentId,
+      linkedEnvironments: new Map([[linked, "studio"]]),
+      excludeThreadId: ThreadId.make("current"),
+      query,
+    });
+
+  expect(match("draft").map((item) => [item.thread.threadId, item.description])).toEqual([
+    ["here", "Draft in web-app"],
+    ["linked", "Draft in docs-site on studio"],
+  ]);
+  expect(match("web").map((item) => item.thread.threadId)).toEqual(["here"]);
+  expect(match("settings")).toEqual([]);
+  expect(match("")).toEqual([]);
 });

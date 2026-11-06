@@ -12,9 +12,35 @@ import {
   resolveActiveThreadRouteRef,
   resolveThreadRouteRenderState,
   resolveThreadRouteTarget,
+  resolveUnstartedThreadDraftId,
 } from "./threadRoutes";
 
 describe("threadRoutes", () => {
+  it("opens the draft for a link to its unstarted thread, and only then", () => {
+    const draftId = "draft-1" as never;
+    const ref = scopeThreadRef("env-1" as never, ThreadId.make("thread-1"));
+    const unstarted = { draftId, draftThread: { promotedTo: null } };
+
+    expect(resolveUnstartedThreadDraftId({ serverThreadExists: false, ...unstarted })).toBe(
+      draftId,
+    );
+    expect(resolveUnstartedThreadDraftId({ serverThreadExists: true, ...unstarted })).toBe(null);
+    expect(
+      resolveUnstartedThreadDraftId({
+        serverThreadExists: false,
+        draftId,
+        draftThread: { promotedTo: ref },
+      }),
+    ).toBe(null);
+    expect(
+      resolveUnstartedThreadDraftId({
+        serverThreadExists: false,
+        draftId: null,
+        draftThread: null,
+      }),
+    ).toBe(null);
+  });
+
   it("matches only the thread's own route pathname", () => {
     const ref = scopeThreadRef("env-1" as never, ThreadId.make("thread-1"));
 

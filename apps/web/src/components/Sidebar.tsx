@@ -239,7 +239,7 @@ import {
   useActiveRowReveal,
 } from "./sidebar/routeReveal";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { copyThreadReference } from "../lib/copyThreadReference";
+import { copyDraftThreadReference, copyThreadReference } from "../lib/copyThreadReference";
 import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
 import { Button } from "./ui/button";
 import { isProjectPinShortcut, ProjectPinButton } from "./ProjectPinButton";
@@ -2581,6 +2581,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             return;
           case "copy-branch":
             if (session.branch) copyBranchToClipboard(session.branch, { branch: session.branch });
+            return;
+          case "copy-thread":
+            void copyDraftThreadReference(draftId);
+            return;
+          case "copy-thread-id":
+            copyThreadIdToClipboard(session.threadId, { threadId: session.threadId });
             return;
           case "discard": {
             // The menu may outlive draft promotion; discarding then would strand the send.

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildThreadActionMenuItems, type ThreadActionMenuState } from "./threadActionMenu.logic";
+import {
+  buildDraftActionMenuItems,
+  buildThreadActionMenuItems,
+  type ThreadActionMenuState,
+} from "./threadActionMenu.logic";
 
 const baseState: ThreadActionMenuState = {
   canOperate: true,
@@ -88,5 +92,18 @@ describe("buildThreadActionMenuItems", () => {
     });
     expect(items.find((item) => item.id === "archive")?.disabled).toBe(true);
     expect(items.find((item) => item.id === "turn-into-project")?.disabled).toBe(true);
+  });
+});
+
+describe("buildDraftActionMenuItems", () => {
+  it("copies the draft's thread even with no path or branch to copy", () => {
+    const copy = buildDraftActionMenuItems({
+      hasPath: false,
+      hasBranch: false,
+      hasProject: false,
+    }).find((item) => item.id === "copy");
+
+    expect(copy?.disabled).toBeUndefined();
+    expect(copy?.children?.map((item) => item.id)).toEqual(["copy-thread", "copy-thread-id"]);
   });
 });

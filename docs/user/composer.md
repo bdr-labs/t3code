@@ -321,6 +321,11 @@ current title and opens it when selected. Your prompt only carries a reference: 
 history on demand, so attaching a long thread costs nothing until the agent looks. Attaching a
 thread does not change it, and the agent cannot send messages to it unless you ask.
 
+A draft can be context before it starts. On web and desktop, type `@draft`, `@new`, or part of its
+project's name to pick one, or copy it from the header of the new chat. Its chip opens the draft and
+takes the thread's title when you send its first message. Until then, an agent that tries to read it
+is told it may not have started yet or may have been deleted.
+
 A thread from a linked machine, picked, pasted or dropped, stays a reference that the agent reads
 on that machine. A pasted link to a thread on any other machine stays a link. Dropping a thread
 from any other environment attaches a saved transcript file. The source

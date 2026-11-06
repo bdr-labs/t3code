@@ -10,7 +10,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, HashIcon } from "lucide-react";
 import {
   memo,
   useEffect,
@@ -56,6 +56,8 @@ interface ChatHeaderProps {
   onNewThreadInProject: () => void;
   onOpenProjectSettings?: (() => void) | undefined;
   onFindInThread?: ((threadRef: ScopedThreadRef) => void) | undefined;
+  /** A draft's thread id is already its own: this shows it and copies a reference to it. */
+  onCopyDraftReference?: (() => void) | undefined;
 }
 
 function resolveRenameCommit(input: {
@@ -83,6 +85,7 @@ export const ChatHeader = memo(function ChatHeader({
   onNewThreadInProject,
   onOpenProjectSettings,
   onFindInThread,
+  onCopyDraftReference,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -408,7 +411,7 @@ export const ChatHeader = memo(function ChatHeader({
                 render={
                   <h2
                     aria-label={activeThreadTitle}
-                    className="min-w-0 flex-1"
+                    className={cn("min-w-0 flex-1", onCopyDraftReference && "sm:flex-none")}
                     dir={textDirection(activeThreadTitle)}
                   />
                 }
@@ -418,6 +421,26 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
             </Tooltip>
           )}
+          {renamingTitle === null && onCopyDraftReference ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    aria-label={`Copy thread ${activeThreadId}`}
+                    onClick={onCopyDraftReference}
+                    className="mx-1.5 hidden shrink-0 cursor-pointer items-center gap-0.5 rounded-sm font-mono text-xs text-muted-foreground hover:text-foreground focus-visible:outline-hidden sm:inline-flex focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                  />
+                }
+              >
+                <HashIcon aria-hidden className="size-3" />
+                {activeThreadId.slice(0, 8)}
+              </TooltipTrigger>
+              <TooltipPopup side="top">
+                Copy this thread to mention it anywhere. It opens once you send the first message.
+              </TooltipPopup>
+            </Tooltip>
+          ) : null}
           {renamingTitle === null && activeThreadLinkOrigin ? (
             <Tooltip>
               <TooltipTrigger render={<Badge variant="info" size="sm" />}>

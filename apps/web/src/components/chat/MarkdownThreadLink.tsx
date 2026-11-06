@@ -8,6 +8,7 @@ import {
   unknownThreadLinkLabel,
 } from "@t3tools/shared/threadLinks";
 
+import { DRAFT_THREAD_TITLE, useComposerDraftStore } from "../../composerDraftStore";
 import { configuredHostedAppUrl } from "../../hostedPairing";
 import { useThreadRefs, useThreadShell } from "../../state/entities";
 import { UnresolvedChip } from "../contextChipParts";
@@ -30,7 +31,22 @@ export function MarkdownThreadLink(props: {
   const refs = useThreadRefs(guess);
   const remote = useThreadShell(guess ? guessThreadLinkRef(props.link, refs) : null);
   const thread = local ?? remote;
+  const hasDraft = useComposerDraftStore(
+    (store) =>
+      thread === null &&
+      store.getDraftIdByRef(scopeThreadRef(environmentId, props.link.threadId)) !== null,
+  );
   if (thread === null) {
+    if (hasDraft) {
+      const ref = scopeThreadRef(environmentId, props.link.threadId);
+      const title = props.label || DRAFT_THREAD_TITLE;
+      return (
+        <ThreadContextChip
+          record={{ ...ref, title }}
+          copyMarkdown={formatHostedThreadLink(ref, title, configuredHostedAppUrl())}
+        />
+      );
+    }
     const unknown = unknownThreadLinkLabel(props.link, props.environmentId);
     return <UnresolvedChip label={props.label ?? unknown} tooltip={unknown} />;
   }

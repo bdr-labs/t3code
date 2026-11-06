@@ -55,6 +55,15 @@ export function resolveThreadRouteRenderState(input: {
     : "ready";
 }
 
+/** The draft a link to its unstarted thread opens: the thread does not exist yet, the draft does. */
+export function resolveUnstartedThreadDraftId(input: {
+  serverThreadExists: boolean;
+  draftId: DraftId | null;
+  draftThread: Pick<DraftThreadRouteState, "promotedTo"> | null;
+}): DraftId | null {
+  return input.serverThreadExists || input.draftThread?.promotedTo ? null : input.draftId;
+}
+
 export function buildThreadRouteParams(ref: ScopedThreadRef): {
   environmentId: EnvironmentId;
   threadId: ThreadId;

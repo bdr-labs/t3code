@@ -111,7 +111,7 @@ describe("thread links", () => {
         local,
         () => undefined,
       ),
-    ).toBe("Thread on another machine, Thread no longer available, Old title");
+    ).toBe("Thread on another machine, Thread not started or deleted, Old title");
     expect(relabelThreadLinks("[Old](t3-thread://v1/t1)", local, () => undefined)).toBe(
       "[Old](t3-thread://v1/t1)",
     );

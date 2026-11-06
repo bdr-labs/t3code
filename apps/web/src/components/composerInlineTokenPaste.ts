@@ -16,9 +16,13 @@ import {
   threadLinkContextReferences,
 } from "@t3tools/shared/composerContextReferences";
 
+import { DRAFT_THREAD_TITLE, useComposerDraftStore } from "~/composerDraftStore";
 import { readThreadShell } from "~/state/entities";
 
-const threadTitle = (ref: ScopedThreadRef) => readThreadShell(ref)?.title;
+/** A chip's name: the thread's title, or a draft's until its thread starts. Otherwise no thread. */
+export const composerThreadTitle = (ref: ScopedThreadRef): string | undefined =>
+  readThreadShell(ref)?.title ??
+  (useComposerDraftStore.getState().getDraftIdByRef(ref) ? DRAFT_THREAD_TITLE : undefined);
 
 /** Pasted thread links count as context too, so they become chips like a copied chip does. */
 export function readPastedComposerContext(
@@ -31,7 +35,7 @@ export function readPastedComposerContext(
   const threads = threadLinkContextReferences(
     pastedText,
     decodedFragment?.records ?? [],
-    threadTitle,
+    composerThreadTitle,
   );
   const source =
     decodedFragment?.source ??
@@ -85,7 +89,7 @@ export function importPastedComposerText(
       : occurrence.source;
   });
   // A thread the import refused, on a machine this agent cannot read, stays the link it was.
-  return threadLinkContextReferences(text, fragment?.records ?? [], threadTitle, (record) =>
+  return threadLinkContextReferences(text, fragment?.records ?? [], composerThreadTitle, (record) =>
     nextId(record.contextId),
   ).text;
 }

@@ -22,6 +22,11 @@ import * as McpInvocationContext from "./McpInvocationContext.ts";
  * bare uuid. The id is never rewritten, so permission checks keyed on it still
  * hold; the miss only names a live thread the caller could read by its full id.
  */
+// A client picks a draft's id when the draft opens and this server first hears of it with the first
+// message. The shell lookup also hides deleted threads, so the two cannot be told apart here.
+const NO_RECORD_HINT =
+  "It may be a draft that has not started, which has no record until its first message is sent, or it may have been deleted.";
+
 export const threadNotFound = Effect.fn("OrchestratorMcpService.threadNotFound")(function* (
   threads: Pick<ThreadManagement.ThreadManagementService["Service"], "getThreadShell">,
   threadId: ThreadId,
@@ -33,7 +38,7 @@ export const threadNotFound = Effect.fn("OrchestratorMcpService.threadNotFound")
     code: "thread_not_found",
     message:
       shell === null || shell.deletedAt !== null
-        ? message
+        ? `${message} ${NO_RECORD_HINT}`
         : `${message} Did you mean \`${prefixed}\`?`,
   });
 });

@@ -10,7 +10,11 @@ import {
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useRightPanelStore } from "~/rightPanelStore";
-import { importPastedComposerText, readPastedComposerContext } from "../composerInlineTokenPaste";
+import {
+  composerThreadTitle,
+  importPastedComposerText,
+  readPastedComposerContext,
+} from "../composerInlineTokenPaste";
 import {
   questionAttachmentDraftId,
   trackOpenQuestionAttachmentDraft,
@@ -1989,9 +1993,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     if (item.type === "thread") {
       if (trigger.kind !== "path") return;
-      const shell = readThreadShell(item.thread);
-      if (!shell) return;
-      const record = threadContextRecord(item.thread, shell.title);
+      const title = composerThreadTitle(item.thread);
+      if (title === undefined) return;
+      const record = threadContextRecord(item.thread, title);
       const replacement = `${formatInlineContextReference(threadContextReference(record))} `;
       const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
         snapshot.value,

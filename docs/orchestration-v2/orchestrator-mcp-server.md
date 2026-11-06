@@ -416,6 +416,12 @@ gets the link Copy thread copies, `https://app.t3.codes/threads/<environmentId>/
 on the server's `T3CODE_HOSTED_APP_URL`, for threads in this environment. The
 hosted app offers the desktop app, the mobile app, or itself.
 
+A client picks a draft's thread id when the draft opens and the server first hears
+of it with the first message, so a link to a draft is valid before the thread is.
+Reading, sending to or waiting on an id with no record fails with `thread_not_found`
+and says the thread may be a draft not started yet or may have been deleted: shell
+lookups hide deleted threads, so the server cannot tell the two apart.
+
 List and read results report `snoozed` and `snoozedUntil`, and
 `t3_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
 client's `effectiveSnoozed`, so agents and the sidebar agree: a snoozed thread

@@ -145,7 +145,7 @@ import { useWorkspaceMutationRefresh } from "../hooks/useWorkspaceMutationRefres
 import { DEFAULT_INTERACTION_MODE, type ChatMessage } from "../types";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { useTheme } from "../hooks/useTheme";
-import { copyThreadReference } from "../lib/copyThreadReference";
+import { copyDraftThreadReference, copyThreadReference } from "../lib/copyThreadReference";
 import { subscribeSnapShotComposerFocus } from "../lib/desktopSnapShot";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { FileMetadataThreadProvider } from "../hooks/FileMetadataThreadProvider";
@@ -2389,9 +2389,14 @@ export default function ChatView(props: ChatViewProps) {
           hostedAppUrl: configuredHostedAppUrl(),
         });
   const copyActiveThreadReference = () => {
+    if (!isServerThread) {
+      if (draftId) void copyDraftThreadReference(draftId);
+      return;
+    }
     if (activeThreadReferenceCopyTarget === null) return;
     void copyThreadReference(activeThreadReferenceCopyTarget);
   };
+  const copyActiveThreadReferenceStable = useStableCallback(copyActiveThreadReference);
   const pullRequestPanelTarget = activeThread
     ? threadPullRequestPanelTarget({
         projectId: activeThread.projectId,
@@ -3403,6 +3408,9 @@ export default function ChatView(props: ChatViewProps) {
                 ? { onOpenProjectSettings: handleOpenDraftProjectSettingsStable }
                 : {})}
               {...(threadFindEnabled ? { onFindInThread: openThreadFindStable } : {})}
+              {...(draftId && !isServerThread && !draftThread?.promotedTo
+                ? { onCopyDraftReference: copyActiveThreadReferenceStable }
+                : {})}
             />
           </header>
         )}

@@ -22,6 +22,7 @@ import {
   buildThreadRouteParams,
   isThreadRouteSnapshotAuthoritative,
   resolveThreadRouteRenderState,
+  resolveUnstartedThreadDraftId,
   type ThreadRouteTarget,
 } from "../threadRoutes";
 
@@ -118,6 +119,11 @@ export function ThreadRouteView({
     draftThreadExists: draftThread !== null,
   });
   const environmentHasAnyThreads = environmentThreadRefs.length > 0 || environmentHasDraftThreads;
+  const unstartedThreadDraftId = resolveUnstartedThreadDraftId({
+    serverThreadExists: serverThreadShell !== null,
+    draftId: serverThreadDraftId,
+    draftThread,
+  });
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- clears pending file drops and navigates the router home once a server thread is confirmed missing
   useEffect(() => {
@@ -189,6 +195,10 @@ export function ThreadRouteView({
     }
   } else if (hiddenByTagFilter) {
     redirect = <Navigate to="/" replace />;
+  } else if (unstartedThreadDraftId) {
+    redirect = (
+      <Navigate to="/draft/$draftId" params={{ draftId: unstartedThreadDraftId }} replace />
+    );
   } else if (offShellBlocked) {
     // Before the shell bootstraps, a listed visible thread can still look off-shell.
     if (bootstrapComplete && unlistedThread !== null) redirect = <Navigate to="/" replace />;

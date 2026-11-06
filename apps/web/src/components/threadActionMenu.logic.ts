@@ -35,6 +35,8 @@ export type DraftActionMenuId =
   | "copy"
   | "copy-path"
   | "copy-branch"
+  | "copy-thread"
+  | "copy-thread-id"
   | "project-settings"
   | "discard";
 
@@ -48,12 +50,13 @@ export function buildDraftActionMenuItems(options: {
       id: "copy",
       label: "Copy",
       icon: "copy",
-      disabled: !options.hasPath && !options.hasBranch,
       children: [
         ...(options.hasPath ? [{ id: "copy-path" as const, label: "Path", icon: "folder" }] : []),
         ...(options.hasBranch
           ? [{ id: "copy-branch" as const, label: "Branch", icon: "git-branch" }]
           : []),
+        { id: "copy-thread", label: "Thread", icon: "message-square" },
+        { id: "copy-thread-id", label: "Thread ID", icon: "hash" },
       ],
     },
     ...(options.hasProject

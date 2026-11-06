@@ -3,6 +3,7 @@ import type { ThreadContextRecord } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
 import { MessagesSquareIcon } from "lucide-react";
 
+import { useComposerDraftStore } from "~/composerDraftStore";
 import { useProject, useThreadShell } from "~/state/entities";
 import { ContextChip, ContextChipLabel } from "./ContextChip";
 import { ProjectFavicon } from "./ProjectFavicon";
@@ -15,6 +16,10 @@ export function ThreadContextChip(props: {
 }) {
   const { environmentId, threadId } = props.record;
   const shell = useThreadShell({ environmentId, threadId });
+  // Until the thread starts, a draft on this client that holds its id is what the chip opens.
+  const draftId = useComposerDraftStore((store) =>
+    shell ? null : store.getDraftIdByRef({ environmentId, threadId }),
+  );
   const project = useProject(shell ? scopeProjectRef(environmentId, shell.projectId) : null);
   const title = shell?.title?.trim() || props.record.title;
   return (
@@ -24,7 +29,13 @@ export function ThreadContextChip(props: {
           <ContextChip
             kind="thread"
             {...(props.unreadable ? { state: "invalid" as const } : {})}
-            render={<Link to="/$environmentId/$threadId" params={{ environmentId, threadId }} />}
+            render={
+              draftId ? (
+                <Link to="/draft/$draftId" params={{ draftId }} />
+              ) : (
+                <Link to="/$environmentId/$threadId" params={{ environmentId, threadId }} />
+              )
+            }
             aria-label={`Thread, ${title}`}
             data-markdown-copy={props.copyMarkdown}
             className="no-underline"
@@ -43,7 +54,9 @@ export function ThreadContextChip(props: {
           ? "On another machine, so this machine's agent can't read it. Remove it or switch back to send."
           : shell
             ? "Open thread"
-            : "Thread no longer available"}
+            : draftId
+              ? "Draft, not started yet. Open it"
+              : "Thread not started or deleted"}
       </TooltipPopup>
     </Tooltip>
   );

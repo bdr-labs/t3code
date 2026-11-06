@@ -167,7 +167,7 @@ export function unknownThreadLinkLabel(
   messageEnvironmentId: EnvironmentId,
 ): string {
   return link.environmentId === null || link.environmentId === messageEnvironmentId
-    ? "Thread no longer available"
+    ? "Thread not started or deleted"
     : "Thread on another machine";
 }
 
