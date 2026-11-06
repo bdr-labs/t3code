@@ -89,6 +89,15 @@ environment is offline then, the task runs when it is back.
 Deleting a thread also deletes tasks that post into that thread. Tasks that start
 a new thread on each run survive deletion of their previous threads.
 
+A task that posts into a thread stopped on a usage limit with a known reset time
+sends nothing until the limit resets, and its last run shows as failed with the
+reason. A timed task tries again at its next run or when the limit resets, whichever
+comes first; a **Once** task waits for the reset. **Run now** on such a thread only
+reports why. If a limit has no known reset time, the task sends as usual and may
+hit the limit again. A webhook task bound to a limited thread doesn't wait: it
+starts a run that hits the limit. A task that starts a new thread, on a webhook
+too, uses your fallback model when its own has run out.
+
 You can edit, pause, resume, run immediately, or delete a task from the list.
 Webhook tasks only run when their URL is called, so they can't be run
 immediately.

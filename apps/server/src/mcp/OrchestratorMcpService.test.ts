@@ -2585,6 +2585,29 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
 
+    it.effect("carries why a task's last run failed", () =>
+      Effect.gen(function* () {
+        const upserted = yield* Ref.make(0);
+        const listed = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) => mcp.listScheduledTasks(supervisedClient, { projectId })),
+          Effect.provide(
+            service(
+              [
+                task({ lastRunStatus: "failed", lastRunError: "Waits behind a usage limit." }),
+                task({ id: ScheduledTaskId.make("scheduled-task:clean") }),
+              ],
+              null,
+              upserted,
+            ),
+          ),
+        );
+        assert.deepEqual(
+          listed.tasks.map((summary) => summary.lastRunError),
+          ["Waits behind a usage limit.", undefined],
+        );
+      }),
+    );
+
     it.effect("hides a webhook URL from a thread whose turn has ended", () =>
       Effect.gen(function* () {
         const callerId = ThreadId.make("thread:scheduled-ended");

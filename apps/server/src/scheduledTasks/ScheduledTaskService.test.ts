@@ -5,9 +5,14 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
 import {
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ScheduledTaskError,
+  type ScheduledTask,
   ScheduledTaskId,
+  type ScheduledTaskSchedule,
+  type ServerProvider,
+  ServerSettingsError,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -28,11 +33,68 @@ import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import { layerNewThreadModelTest } from "./testLayers.ts";
 
 const isScheduledTaskError = Schema.is(ScheduledTaskError);
+
+const codex = ProviderInstanceId.make("codex");
+const alternate = ProviderInstanceId.make("codex_alternate");
+const threadOn = (instanceId: ProviderInstanceId) => ({
+  modelSelection: { instanceId, model: "gpt-5.4" },
+});
+const ordinaryRecords = {
+  thread: threadOn(codex),
+  runs: [],
+  turnItems: [],
+  providerSessions: [],
+};
+// A thread whose only run ended as `failure` says, as the orchestrator stores it.
+const stoppedRecords = (input: {
+  readonly failureClass?: string;
+  readonly resetAt?: string | null;
+  readonly threadInstance?: ProviderInstanceId;
+  readonly providerSessions?: ReadonlyArray<unknown>;
+  readonly completedAt?: string;
+}) => {
+  const at = DateTime.makeUnsafe(input.completedAt ?? "2026-09-09T11:00:00.000Z");
+  return {
+    thread: threadOn(input.threadInstance ?? codex),
+    runs: [
+      {
+        id: "run:stopped",
+        ordinal: 1,
+        status: "failed",
+        providerInstanceId: codex,
+        rootNodeId: "node:stopped",
+        startedAt: at,
+        completedAt: at,
+      },
+    ],
+    turnItems: [
+      {
+        type: "error",
+        id: "item:stopped",
+        ordinal: 1,
+        status: "failed",
+        runId: "run:stopped",
+        nodeId: "node:stopped",
+        updatedAt: at,
+        failure: {
+          class: input.failureClass ?? "usage_limit",
+          message: "Plan limit reached.",
+          ...(input.resetAt == null ? {} : { resetAt: input.resetAt }),
+        },
+      },
+    ],
+    providerSessions: input.providerSessions ?? [],
+  };
+};
 
 const insertRow = (
   sql: SqlClient.SqlClient,
@@ -211,6 +273,7 @@ it.effect(
                 }),
                 Layer.mock(ThreadManagementService.ThreadManagementService)({}),
                 Layer.mock(SecretRequests.SecretRequests)({}),
+                layerNewThreadModelTest,
                 NodeCrypto.layer,
                 Scheduler.layer,
               ),
@@ -309,6 +372,7 @@ it.effect(
                 }),
                 Layer.mock(ThreadManagementService.ThreadManagementService)({}),
                 Layer.mock(SecretRequests.SecretRequests)({}),
+                layerNewThreadModelTest,
                 NodeCrypto.layer,
                 Scheduler.layer,
               ),
@@ -353,6 +417,7 @@ it.effect("thread cleanup notifies subscribers and a finishing run cannot recrea
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadRecords: () => Effect.succeed(ordinaryRecords as never),
             sendToThread: () =>
               Deferred.succeed(started, undefined).pipe(
                 Effect.andThen(Deferred.await(release)),
@@ -360,6 +425,7 @@ it.effect("thread cleanup notifies subscribers and a finishing run cannot recrea
               ),
           }),
           Layer.mock(SecretRequests.SecretRequests)({}),
+          layerNewThreadModelTest,
           Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
             namedProjectsRoot: "/projects",
             isScratchProject: () => Effect.succeed(false),
@@ -423,6 +489,7 @@ it.effect("a bound run follows its thread when promotion moves it mid-send", () 
           ManagedPolicy.layerTest(),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadRecords: () => Effect.succeed(ordinaryRecords as never),
             sendToThread: (input) =>
               Ref.updateAndGet(sends, (all) => [
                 ...all,
@@ -446,6 +513,7 @@ it.effect("a bound run follows its thread when promotion moves it mid-send", () 
               ]),
           }),
           Layer.mock(SecretRequests.SecretRequests)({}),
+          layerNewThreadModelTest,
           Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
             namedProjectsRoot: "/projects",
             isScratchProject: () => Effect.succeed(false),
@@ -498,6 +566,7 @@ it.effect("refuses saving an enabled task above the policy ceiling", () =>
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(ThreadManagementService.ThreadManagementService)({}),
           Layer.mock(SecretRequests.SecretRequests)({}),
+          layerNewThreadModelTest,
           Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
             namedProjectsRoot: "/projects",
             isScratchProject: () => Effect.succeed(false),
@@ -566,6 +635,7 @@ it.effect("a run interrupted right after it reserves the task does not block the
           }),
           Layer.mock(ThreadManagementService.ThreadManagementService)({}),
           Layer.mock(SecretRequests.SecretRequests)({}),
+          layerNewThreadModelTest,
           Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
             namedProjectsRoot: "/projects",
             isScratchProject: () => Effect.succeed(false),
@@ -617,4 +687,895 @@ it.effect("a run interrupted right after it reserves the task does not block the
       assert.equal(yield* Ref.get(launches), 1);
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+const FIRE_AT = "2026-09-09T12:00:00.000Z";
+const RESET_AT = "2026-09-09T15:00:00.000Z";
+const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
+const later = (at: string, ms: number) =>
+  DateTime.formatIso(DateTime.addDuration(DateTime.makeUnsafe(at), ms));
+
+const taskDependencies = Layer.mergeAll(
+  ManagedPolicy.layerTest(),
+  Layer.mock(SecretRequests.SecretRequests)({}),
+  Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+    namedProjectsRoot: "/projects",
+    isScratchProject: () => Effect.succeed(false),
+  }),
+  NodeCrypto.layer,
+);
+
+type Fires = {
+  readonly service: ScheduledTaskService.ScheduledTaskService["Service"];
+  // One pass of the real due-task worker, at whatever the clock says.
+  readonly sweep: Effect.Effect<void>;
+  // Every send's mode, and "launch" for a fresh thread.
+  readonly sent: Ref.Ref<ReadonlyArray<string>>;
+  readonly records: Ref.Ref<unknown>;
+  readonly stored: Effect.Effect<ScheduledTask>;
+};
+
+// One service over a mock thread; a second call on the same database is a restart.
+const withFires = <A, E>(
+  body: (fires: Fires) => Effect.Effect<A, E>,
+  state?: Pick<Fires, "sent" | "records">,
+) =>
+  Effect.gen(function* () {
+    const sent = state?.sent ?? (yield* Ref.make<ReadonlyArray<string>>([]));
+    const records = state?.records ?? (yield* Ref.make<unknown>(ordinaryRecords));
+    const workers = new Map<string, Effect.Effect<void>>();
+    const layer = ScheduledTaskService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          taskDependencies,
+          layerNewThreadModelTest,
+          Layer.succeed(Scheduler.Scheduler, {
+            register: <E, R>(name: string, work: Effect.Effect<void, E, R>) =>
+              Effect.gen(function* () {
+                const context = yield* Effect.context<R>();
+                workers.set(name, work.pipe(Effect.provideContext(context), Effect.orDie));
+              }),
+          }),
+          Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+            launch: () =>
+              Ref.update(sent, (all) => [...all, "launch"]).pipe(
+                Effect.as({ threadId: ThreadId.make("thread:launched"), resumed: false } as never),
+              ),
+          }),
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadRecords: () =>
+              Ref.get(records).pipe(
+                Effect.flatMap((value) =>
+                  value === "unreadable"
+                    ? Effect.fail("unreadable" as never)
+                    : Effect.succeed(value as never),
+                ),
+              ),
+            sendToThread: (input) =>
+              Ref.update(sent, (all) => [...all, input.mode]).pipe(
+                Effect.as({ delivery: "started" } as never),
+              ),
+          }),
+        ),
+      ),
+    );
+    return yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      return yield* body({
+        service,
+        sweep: workers.get("scheduled-tasks")!,
+        sent,
+        records,
+        stored: service.list().pipe(
+          Effect.map(({ tasks }) => tasks[0]!),
+          Effect.orDie,
+        ),
+      });
+    }).pipe(Effect.provide(layer));
+  });
+
+const TASK_ID = ScheduledTaskId.make("task:bound-fire");
+const boundTask = (
+  schedule: ScheduledTaskSchedule,
+  overrides: { readonly title?: string; readonly threadId?: ThreadId | null } = {},
+) => ({
+  id: TASK_ID,
+  title: overrides.title ?? "Check in",
+  prompt: "Check progress",
+  enabled: true,
+  schedule,
+  projectId: ProjectId.make("project:test"),
+  ...(overrides.threadId === null
+    ? {}
+    : { threadId: overrides.threadId ?? ThreadId.make("thread:bound-fire") }),
+  workspaceStrategy: { type: "root" as const },
+  modelSelection: { instanceId: codex, model: "gpt-5.4" },
+  runtimeMode: "full-access" as const,
+  interactionMode: "default" as const,
+});
+
+const startClock = TestClock.setTime(Date.parse(FIRE_AT));
+const firesOverMemory = <A, E>(body: (fires: Fires) => Effect.Effect<A, E>) =>
+  startClock.pipe(Effect.andThen(withFires(body)), Effect.provide(SqlitePersistence.layerMemory));
+
+// Saves the task and lets it come due on a thread stopped until `resetIn` later.
+const postponed = (fires: Fires, schedule: ScheduledTaskSchedule, resetIn = 3 * HOUR_MS) =>
+  Effect.gen(function* () {
+    const { task } = yield* fires.service.upsert(boundTask(schedule));
+    const dueAt = task.nextRunAt!;
+    const resetAt = later(dueAt, resetIn);
+    yield* Ref.set(fires.records, stoppedRecords({ resetAt }));
+    yield* TestClock.setTime(Date.parse(dueAt));
+    yield* fires.sweep;
+    return { dueAt, resetAt };
+  });
+
+const INTERVAL = { type: "interval", everyMs: HOUR_MS } as const;
+const FIXED_TIME = { type: "fixed_time", timeOfDay: "13:17" } as const;
+const ONCE = { type: "once", runAt: "2026-09-09T13:00:00.000Z" } as const;
+// Long enough that the reset in postponed() comes first.
+const LONG_INTERVAL = { type: "interval", everyMs: DAY_MS } as const;
+
+it.effect.each([
+  ["interval", INTERVAL],
+  ["fixed_time", FIXED_TIME],
+  ["once", ONCE],
+] as const)(
+  "%s: a stopped thread gets nothing until the reset, then one fire",
+  ([type, schedule]) =>
+    firesOverMemory((fires) =>
+      Effect.gen(function* () {
+        const { resetAt } = yield* postponed(fires, schedule);
+        let held = yield* fires.stored;
+        for (let check = 0; Date.parse(held.nextRunAt!) < Date.parse(resetAt); check++) {
+          assert.isBelow(check, 5);
+          yield* TestClock.setTime(Date.parse(held.nextRunAt!));
+          yield* fires.sweep;
+          held = yield* fires.stored;
+        }
+        assert.deepEqual(yield* Ref.get(fires.sent), []);
+        assert.equal(held.lastRunStatus, "failed");
+        assert.match(held.lastRunError ?? "", /usage limit/);
+        assert.include(held.lastRunError ?? "", resetAt);
+        assert.include(held.lastRunError ?? "", "then or at its next run");
+        assert.equal(held.nextRunAt, resetAt);
+        // Nothing ran, so it does not count as one.
+        assert.equal(held.runCount, 0);
+
+        yield* TestClock.setTime(Date.parse(resetAt) - 1);
+        yield* fires.sweep;
+        assert.deepEqual(yield* Ref.get(fires.sent), []);
+
+        yield* TestClock.setTime(Date.parse(resetAt));
+        yield* fires.sweep;
+        yield* fires.sweep;
+        assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+        const fired = yield* fires.stored;
+        assert.equal(fired.lastRunStatus, "succeeded");
+        assert.isNull(fired.lastRunError);
+        assert.equal(fired.runCount, 1);
+        if (type === "once") assert.isNull(fired.nextRunAt);
+        else assert.isAbove(Date.parse(fired.nextRunAt!), Date.parse(resetAt));
+      }),
+    ),
+);
+
+it.effect.each([
+  ["an interval before the reset", INTERVAL, 3 * HOUR_MS, HOUR_MS],
+  [
+    "an interval past the reset",
+    { type: "interval", everyMs: 5 * HOUR_MS },
+    3 * HOUR_MS,
+    3 * HOUR_MS,
+  ],
+  ["a fixed time before the reset", FIXED_TIME, 2 * DAY_MS, DAY_MS],
+  ["a fixed time past the reset", FIXED_TIME, 3 * HOUR_MS, 3 * HOUR_MS],
+  ["a once, which only has the reset", ONCE, 3 * HOUR_MS, 3 * HOUR_MS],
+] as const)("the next run re-checks at the earlier time: %s", ([, schedule, resetIn, nextIn]) =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { dueAt } = yield* postponed(fires, schedule, resetIn);
+      assert.equal((yield* fires.stored).nextRunAt, later(dueAt, nextIn));
+    }),
+  ),
+);
+
+it.effect("an interval does not pile up across the periods it was postponed over", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { dueAt, resetAt } = yield* postponed(fires, { type: "interval", everyMs: 900_000 });
+      for (let at = Date.parse(dueAt) + 900_000; at < Date.parse(resetAt); at += 900_000) {
+        yield* TestClock.setTime(at);
+        yield* fires.sweep;
+      }
+      assert.deepEqual(yield* Ref.get(fires.sent), []);
+      assert.equal((yield* fires.stored).nextRunAt, resetAt);
+      assert.equal((yield* fires.stored).runCount, 0);
+
+      // The server slept past the reset: still one fire, then the ordinary period.
+      const wake = later(resetAt, 2 * HOUR_MS);
+      yield* TestClock.setTime(Date.parse(wake));
+      yield* fires.sweep;
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+      assert.equal((yield* fires.stored).nextRunAt, later(wake, 900_000));
+    }),
+  ),
+);
+
+it.effect.each([
+  [
+    "moved to another provider",
+    INTERVAL,
+    stoppedRecords({ resetAt: RESET_AT, threadInstance: alternate }),
+  ],
+  ["resumed", INTERVAL, ordinaryRecords],
+  [
+    "moved to another provider",
+    FIXED_TIME,
+    stoppedRecords({ resetAt: "2026-09-12T00:00:00.000Z", threadInstance: alternate }),
+  ],
+  ["resumed", FIXED_TIME, ordinaryRecords],
+] as const)("a thread %s after a postponement fires at the next period", ([, schedule, records]) =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { dueAt } = yield* postponed(fires, schedule, 2 * DAY_MS);
+      const held = yield* fires.stored;
+      assert.isBelow(Date.parse(held.nextRunAt!), Date.parse(dueAt) + 2 * DAY_MS);
+      yield* Ref.set(fires.records, records);
+      yield* TestClock.setTime(Date.parse(held.nextRunAt!));
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+      const fired = yield* fires.stored;
+      assert.equal(fired.lastRunStatus, "succeeded");
+      assert.isNull(fired.lastRunError);
+    }),
+  ),
+);
+
+it.effect.each([
+  ["off its slots", 3 * HOUR_MS],
+  ["exactly on its next slot", DAY_MS],
+] as const)("a fixed-time fire with a reset %s still fires on a late sweep", ([, resetIn]) =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { resetAt } = yield* postponed(fires, FIXED_TIME, resetIn);
+      assert.equal((yield* fires.stored).nextRunAt, resetAt);
+      yield* TestClock.setTime(Date.parse(resetAt) + 30 * 60_000);
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+      assert.equal((yield* fires.stored).lastRunStatus, "succeeded");
+    }),
+  ),
+);
+
+it.effect.each([
+  ["a slot nothing postponed", (_sql: SqlClient.SqlClient, _dueAt: string) => Effect.void],
+  [
+    // What a machine time-zone change leaves behind: a due time off this zone's slots.
+    "a time off this zone's slots that nothing postponed",
+    (sql: SqlClient.SqlClient, dueAt: string) =>
+      sql`UPDATE scheduled_tasks SET next_run_at = ${later(dueAt, 3 * HOUR_MS)}`.pipe(
+        Effect.asVoid,
+        Effect.orDie,
+      ),
+  ],
+  [
+    "a slot after a failure of another kind",
+    (sql: SqlClient.SqlClient, _dueAt: string) =>
+      sql`UPDATE scheduled_tasks SET last_run_status = 'failed', last_run_error = 'Sign in again.'`.pipe(
+        Effect.asVoid,
+        Effect.orDie,
+      ),
+  ],
+] as const)("an ordinary missed run is still skipped: %s", ([, prepare]) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* startClock;
+    yield* withFires((fires) =>
+      Effect.gen(function* () {
+        const { task } = yield* fires.service.upsert(boundTask(FIXED_TIME));
+        yield* prepare(sql, task.nextRunAt!);
+        const dueAt = (yield* fires.stored).nextRunAt!;
+        const wake = Date.parse(dueAt) + 30 * 60_000;
+        yield* TestClock.setTime(wake);
+        yield* fires.sweep;
+        assert.deepEqual(yield* Ref.get(fires.sent), []);
+        assert.isAbove(Date.parse((yield* fires.stored).nextRunAt!), wake);
+      }),
+    );
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("a slot that came before the reset is skipped like any missed slot", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      yield* postponed(fires, FIXED_TIME, 2 * DAY_MS);
+      const slot = (yield* fires.stored).nextRunAt!;
+      const wake = Date.parse(slot) + 30 * 60_000;
+      yield* TestClock.setTime(wake);
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), []);
+      assert.isAbove(Date.parse((yield* fires.stored).nextRunAt!), wake);
+    }),
+  ),
+);
+
+it.effect("a once survives a postponement, a restart and a second postponement", () =>
+  Effect.gen(function* () {
+    yield* startClock;
+    const sent = yield* Ref.make<ReadonlyArray<string>>([]);
+    const records = yield* Ref.make<unknown>(ordinaryRecords);
+    const { resetAt } = yield* withFires((fires) => postponed(fires, ONCE), { sent, records });
+    const secondReset = later(resetAt, 5 * HOUR_MS);
+    yield* withFires(
+      (fires) =>
+        Effect.gen(function* () {
+          assert.equal((yield* fires.stored).nextRunAt, resetAt);
+          // A fresh limit on the retried thread moves it again instead of using it up.
+          yield* Ref.set(records, stoppedRecords({ resetAt: secondReset }));
+          yield* TestClock.setTime(Date.parse(resetAt));
+          yield* fires.sweep;
+          assert.equal((yield* fires.stored).nextRunAt, secondReset);
+          assert.deepEqual(yield* Ref.get(sent), []);
+
+          yield* TestClock.setTime(Date.parse(secondReset));
+          yield* fires.sweep;
+          assert.deepEqual(yield* Ref.get(sent), ["queue"]);
+          const fired = yield* fires.stored;
+          assert.equal(fired.lastRunStatus, "succeeded");
+          assert.isNull(fired.nextRunAt);
+        }),
+      { sent, records },
+    );
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("a reset reported with an offset is stored so the text-compared sweep finds it", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { task } = yield* fires.service.upsert(boundTask(ONCE));
+      yield* Ref.set(fires.records, stoppedRecords({ resetAt: "2026-09-09T16:00:00+01:00" }));
+      yield* TestClock.setTime(Date.parse(task.nextRunAt!));
+      yield* fires.sweep;
+      assert.equal((yield* fires.stored).nextRunAt, RESET_AT);
+      yield* TestClock.setTime(Date.parse(RESET_AT));
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+    }),
+  ),
+);
+
+it.effect.each([
+  ["interval", INTERVAL, 3],
+  ["fixed_time", FIXED_TIME, 3],
+  ["once", ONCE, 1],
+] as const)("%s: a limit with no reset time sends every period", ([, schedule, fires_]) =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      yield* fires.service.upsert(boundTask(schedule));
+      yield* Ref.set(fires.records, stoppedRecords({ resetAt: null }));
+      for (let fired = 1; fired <= fires_; fired++) {
+        yield* TestClock.setTime(Date.parse((yield* fires.stored).nextRunAt!));
+        yield* fires.sweep;
+        assert.lengthOf(yield* Ref.get(fires.sent), fired);
+        const stored = yield* fires.stored;
+        assert.equal(stored.lastRunStatus, "succeeded");
+        assert.isNull(stored.lastRunError);
+      }
+      assert.deepEqual([...new Set(yield* Ref.get(fires.sent))], ["queue"]);
+      if (schedule.type === "once") assert.isNull((yield* fires.stored).nextRunAt);
+    }),
+  ),
+);
+
+// The interval task below comes due at 13:00.
+it.effect.each([
+  ["an idle thread", ordinaryRecords],
+  [
+    "a running thread",
+    {
+      ...ordinaryRecords,
+      runs: [
+        {
+          id: "run:live",
+          ordinal: 1,
+          status: "running",
+          startedAt: DateTime.makeUnsafe(FIRE_AT),
+          completedAt: null,
+        },
+      ],
+    },
+  ],
+  ["a thread that failed for another reason", stoppedRecords({ failureClass: "provider_error" })],
+  ["a limit with no reset time", stoppedRecords({ resetAt: null })],
+  ["a reset that has passed", stoppedRecords({ resetAt: "2026-09-09T12:30:00.000Z" })],
+  [
+    "a reset that was stale when the run failed",
+    stoppedRecords({ resetAt: "2026-09-09T10:59:00.000Z" }),
+  ],
+  [
+    // Still ahead of this fire, so only the comparison with the failure lets it send.
+    "a stale reset ahead of the clock",
+    stoppedRecords({
+      resetAt: "2026-09-09T13:30:00.000Z",
+      completedAt: "2026-09-09T14:00:00.000Z",
+    }),
+  ],
+  [
+    "a reset exactly when the run failed",
+    stoppedRecords({
+      resetAt: "2026-09-09T14:00:00.000Z",
+      completedAt: "2026-09-09T14:00:00.000Z",
+    }),
+  ],
+  [
+    "a thread moved to another provider",
+    stoppedRecords({ resetAt: RESET_AT, threadInstance: alternate }),
+  ],
+  [
+    "a thread whose session has since failed differently",
+    stoppedRecords({
+      resetAt: RESET_AT,
+      providerSessions: [
+        {
+          providerInstanceId: codex,
+          updatedAt: DateTime.makeUnsafe(FIRE_AT),
+          lastError: "Sign in again.",
+        },
+      ],
+    }),
+  ],
+  ["a thread that cannot be read", "unreadable"],
+] as const)("a fire on %s is an ordinary one", ([, records]) =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { task } = yield* fires.service.upsert(boundTask(INTERVAL));
+      yield* Ref.set(fires.records, records);
+      yield* TestClock.setTime(Date.parse(task.nextRunAt!));
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+      const stored = yield* fires.stored;
+      assert.equal(stored.lastRunStatus, "succeeded");
+      assert.isNull(stored.lastRunError);
+      assert.equal(stored.nextRunAt, later(task.nextRunAt!, HOUR_MS));
+    }),
+  ),
+);
+
+it.effect("a session failure on another instance does not lift the stop", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { task } = yield* fires.service.upsert(boundTask(INTERVAL));
+      yield* Ref.set(
+        fires.records,
+        stoppedRecords({
+          resetAt: RESET_AT,
+          providerSessions: [
+            {
+              providerInstanceId: alternate,
+              updatedAt: DateTime.makeUnsafe(FIRE_AT),
+              lastError: "Sign in again.",
+            },
+          ],
+        }),
+      );
+      yield* TestClock.setTime(Date.parse(task.nextRunAt!));
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), []);
+    }),
+  ),
+);
+
+it.effect(
+  "Run now on a thread stopped until a known reset sends nothing and keeps the next run",
+  () =>
+    firesOverMemory((fires) =>
+      Effect.gen(function* () {
+        const { task } = yield* fires.service.upsert(boundTask(INTERVAL));
+        yield* Ref.set(fires.records, stoppedRecords({ resetAt: RESET_AT }));
+        yield* TestClock.adjust("10 minutes");
+        const ran = yield* fires.service.runNow({ id: task.id });
+        assert.deepEqual(yield* Ref.get(fires.sent), []);
+        assert.isNull(ran.threadId);
+        assert.equal(ran.task.lastRunStatus, "failed");
+        assert.match(ran.task.lastRunError ?? "", /usage limit/);
+        assert.include(ran.task.lastRunError ?? "", RESET_AT);
+        assert.equal(ran.task.nextRunAt, task.nextRunAt);
+        assert.equal((yield* fires.stored).nextRunAt, task.nextRunAt);
+      }),
+    ),
+);
+
+it.effect.each([
+  ["no reset time", stoppedRecords({ resetAt: null })],
+  [
+    "a stale reset",
+    stoppedRecords({
+      resetAt: "2026-09-09T12:30:00.000Z",
+      completedAt: "2026-09-09T13:00:00.000Z",
+    }),
+  ],
+] as const)("Run now on a limit with %s sends", ([, records]) =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { task } = yield* fires.service.upsert(boundTask(INTERVAL));
+      yield* Ref.set(fires.records, records);
+      const ran = yield* fires.service.runNow({ id: task.id });
+      assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+      assert.equal(ran.task.lastRunStatus, "succeeded");
+    }),
+  ),
+);
+
+it.effect("Run now keeps a postponed time, and sends once the reset has passed", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { resetAt } = yield* postponed(fires, LONG_INTERVAL);
+      const reason = (yield* fires.stored).lastRunError;
+      yield* fires.service.runNow({ id: TASK_ID });
+      assert.deepEqual(yield* Ref.get(fires.sent), []);
+      assert.equal((yield* fires.stored).nextRunAt, resetAt);
+      assert.equal((yield* fires.stored).lastRunError, reason);
+
+      yield* TestClock.setTime(Date.parse(resetAt) + 1);
+      const ran = yield* fires.service.runNow({ id: TASK_ID });
+      assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+      assert.equal(ran.task.lastRunStatus, "succeeded");
+    }),
+  ),
+);
+
+it.effect("a fire at the reset lets an armed auto-resume go first, then queues behind it", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { resetAt } = yield* postponed(fires, FIXED_TIME);
+      const records = stoppedRecords({ resetAt });
+      yield* Ref.set(fires.records, {
+        ...records,
+        thread: {
+          ...records.thread,
+          limitRecovery: { runId: "run:stopped", resetAt, autoResume: true, snooze: false },
+        },
+      });
+      yield* TestClock.setTime(Date.parse(resetAt));
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), []);
+      assert.equal((yield* fires.stored).nextRunAt, resetAt);
+
+      yield* TestClock.setTime(Date.parse(resetAt) + 15_000);
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+    }),
+  ),
+);
+
+it.effect("a late tick gets the head start from the first sweep that saw it, restart or not", () =>
+  Effect.gen(function* () {
+    yield* startClock;
+    const persisted = yield* withFires((fires) =>
+      Effect.gen(function* () {
+        const { resetAt } = yield* postponed(fires, FIXED_TIME);
+        const records = stoppedRecords({ resetAt });
+        yield* Ref.set(fires.records, {
+          ...records,
+          thread: {
+            ...records.thread,
+            limitRecovery: { runId: "run:stopped", resetAt, autoResume: true, snooze: false },
+          },
+        });
+        yield* TestClock.setTime(Date.parse(resetAt) + 2 * HOUR_MS);
+        yield* fires.sweep;
+        yield* TestClock.adjust("10 seconds");
+        yield* fires.sweep;
+        assert.deepEqual(yield* Ref.get(fires.sent), []);
+        return { sent: fires.sent, records: fires.records };
+      }),
+    );
+    yield* withFires(
+      (fires) =>
+        Effect.gen(function* () {
+          yield* TestClock.adjust("10 seconds");
+          yield* fires.sweep;
+          assert.deepEqual(yield* Ref.get(fires.sent), [], "a restart only restarts the wait");
+          yield* TestClock.adjust("14 seconds");
+          yield* fires.sweep;
+          assert.deepEqual(yield* Ref.get(fires.sent), []);
+          yield* TestClock.adjust("1 second");
+          yield* fires.sweep;
+          assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+        }),
+      persisted,
+    );
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("a recovery another run has answered holds nothing back", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { resetAt } = yield* postponed(fires, FIXED_TIME);
+      const records = stoppedRecords({ resetAt });
+      const at = DateTime.makeUnsafe(resetAt);
+      yield* Ref.set(fires.records, {
+        ...records,
+        runs: [
+          ...records.runs,
+          {
+            ...records.runs[0],
+            id: "run:continued",
+            ordinal: 2,
+            status: "starting",
+            startedAt: at,
+            completedAt: null,
+          },
+        ],
+        thread: {
+          ...records.thread,
+          limitRecovery: { runId: "run:stopped", resetAt, autoResume: true, snooze: false },
+        },
+      });
+      yield* TestClock.setTime(Date.parse(resetAt));
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+    }),
+  ),
+);
+
+it.effect("a thread no longer stopped at the postponed time gets an ordinary fire", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { resetAt } = yield* postponed(fires, FIXED_TIME);
+      yield* Ref.set(fires.records, ordinaryRecords);
+      yield* TestClock.setTime(Date.parse(resetAt));
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+      assert.equal((yield* fires.stored).lastRunStatus, "succeeded");
+    }),
+  ),
+);
+
+it.effect("an edit keeps a postponed time unless it changes the schedule", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { dueAt, resetAt } = yield* postponed(fires, LONG_INTERVAL);
+      yield* fires.service.upsert(boundTask(LONG_INTERVAL, { title: "Renamed" }));
+      assert.equal((yield* fires.stored).nextRunAt, resetAt);
+
+      yield* fires.service.upsert(boundTask({ type: "interval", everyMs: 2 * DAY_MS }));
+      assert.equal((yield* fires.stored).nextRunAt, later(dueAt, 2 * DAY_MS));
+    }),
+  ),
+);
+
+const OTHER_THREAD = ThreadId.make("thread:other");
+
+it.effect.each([
+  ["rebound", OTHER_THREAD],
+  ["unbound", null],
+] as const)("an interval %s while postponed recomputes its next run", ([, threadId]) =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { dueAt, resetAt } = yield* postponed(fires, LONG_INTERVAL);
+      assert.equal((yield* fires.stored).nextRunAt, resetAt);
+      yield* fires.service.upsert(boundTask(LONG_INTERVAL, { threadId }));
+      assert.equal((yield* fires.stored).nextRunAt, later(dueAt, DAY_MS));
+    }),
+  ),
+);
+
+it.effect.each([
+  ["rebound", OTHER_THREAD, "queue"],
+  ["unbound", null, "launch"],
+] as const)("a once %s while postponed past its time fires at once", ([, threadId, sent]) =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { dueAt, resetAt } = yield* postponed(fires, ONCE);
+      assert.equal((yield* fires.stored).nextRunAt, resetAt);
+      yield* TestClock.setTime(Date.parse(dueAt) + 60_000);
+      yield* Ref.set(fires.records, ordinaryRecords);
+      yield* fires.service.upsert(boundTask(ONCE, { threadId }));
+      assert.equal((yield* fires.stored).nextRunAt, later(dueAt, 60_000));
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), [sent]);
+      assert.isNull((yield* fires.stored).nextRunAt);
+    }),
+  ),
+);
+
+it.effect("rebinding a once that already ran does not run it again", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { task } = yield* fires.service.upsert(boundTask(ONCE));
+      yield* TestClock.setTime(Date.parse(task.nextRunAt!));
+      yield* fires.sweep;
+      assert.isNull((yield* fires.stored).nextRunAt);
+      yield* fires.service.upsert(boundTask(ONCE, { threadId: OTHER_THREAD }));
+      assert.isNull((yield* fires.stored).nextRunAt);
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+    }),
+  ),
+);
+
+it.effect("pausing clears a postponed time and resuming does not bring it back", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { dueAt, resetAt } = yield* postponed(fires, LONG_INTERVAL);
+      assert.equal((yield* fires.stored).nextRunAt, resetAt);
+      yield* fires.service.setEnabled({ id: TASK_ID, enabled: false });
+      assert.isNull((yield* fires.stored).nextRunAt);
+      yield* fires.service.setEnabled({ id: TASK_ID, enabled: true });
+      assert.equal((yield* fires.stored).nextRunAt, later(dueAt, DAY_MS));
+    }),
+  ),
+);
+
+it.effect("a paused once past its time asks for a new one, as any paused once does", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      yield* postponed(fires, ONCE);
+      yield* fires.service.setEnabled({ id: TASK_ID, enabled: false });
+      const refused = yield* fires.service
+        .setEnabled({ id: TASK_ID, enabled: true })
+        .pipe(Effect.flip);
+      assert.equal(refused.message, "The run time has passed. Pick a time in the future.");
+      assert.deepEqual(yield* Ref.get(fires.sent), []);
+    }),
+  ),
+);
+
+const storedModel = { instanceId: codex, model: "gpt-5.4" };
+const fallbackModel = {
+  instanceId: ProviderInstanceId.make("claudeAgent"),
+  model: "claude-fable-5-1",
+};
+const provider = (instanceId: ProviderInstanceId, usedPercent: number): ServerProvider => ({
+  instanceId,
+  driver: ProviderDriverKind.make(instanceId),
+  enabled: true,
+  installed: true,
+  version: null,
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: FIRE_AT,
+  models: [],
+  slashCommands: [],
+  skills: [],
+  usageLimits: {
+    checkedAt: FIRE_AT,
+    windows: [
+      {
+        id: "five_hour",
+        kind: "session",
+        label: "Session",
+        usedPercent,
+        windowDurationMins: 300,
+        resetsAt: RESET_AT,
+      },
+    ],
+  },
+});
+const fallbackEverywhere = ServerSettings.layerTest({ fallbackModelSelection: fallbackModel });
+
+// One unbound fire through runNow; returns the model the thread launched on.
+const fireUnbound = (
+  providers: ReadonlyArray<ServerProvider>,
+  settings: Layer.Layer<ServerSettings.ServerSettingsService, ServerSettingsError>,
+) =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(Date.parse(FIRE_AT));
+    const launched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+    const layer = ScheduledTaskService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          taskDependencies,
+          Layer.succeed(Scheduler.Scheduler, { register: () => Effect.void }),
+          settings,
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed(providers),
+          }),
+          Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
+          Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+          Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+            launch: (input) =>
+              Ref.update(launched, (all) => [...all, input.modelSelection]).pipe(
+                Effect.as({ threadId: ThreadId.make("thread:launched"), resumed: false } as never),
+              ),
+          }),
+        ),
+      ),
+    );
+    return yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const { task } = yield* service.upsert({
+        id: ScheduledTaskId.make("task:unbound-fire"),
+        title: "Check in",
+        prompt: "Check progress",
+        enabled: true,
+        schedule: { type: "interval", everyMs: 60_000 },
+        projectId: ProjectId.make("project:test"),
+        workspaceStrategy: { type: "root" },
+        modelSelection: storedModel,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      });
+      const ran = yield* service.runNow({ id: task.id });
+      assert.equal(ran.task.lastRunStatus, "succeeded");
+      const [selection, ...rest] = yield* Ref.get(launched);
+      assert.lengthOf(rest, 0);
+      return selection;
+    }).pipe(Effect.provide(layer));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory));
+
+const exhausted = provider(storedModel.instanceId, 100);
+const usable = provider(storedModel.instanceId, 40);
+const fallbackUsable = provider(fallbackModel.instanceId, 10);
+const fallbackExhausted = provider(fallbackModel.instanceId, 100);
+
+it.effect.each([
+  [
+    "moves an exhausted model to a usable fallback",
+    [exhausted, fallbackUsable],
+    fallbackEverywhere,
+    fallbackModel,
+  ],
+  [
+    "keeps a usable model though a fallback is set",
+    [usable, fallbackUsable],
+    fallbackEverywhere,
+    storedModel,
+  ],
+  [
+    "keeps an exhausted model with no fallback",
+    [exhausted, fallbackUsable],
+    ServerSettings.layerTest(),
+    storedModel,
+  ],
+  [
+    "keeps an exhausted model when the fallback is exhausted too",
+    [exhausted, fallbackExhausted],
+    fallbackEverywhere,
+    storedModel,
+  ],
+  [
+    "keeps an exhausted model when the task's project turned the fallback off",
+    [exhausted, fallbackUsable],
+    ServerSettings.layerTest({
+      fallbackModelSelection: fallbackModel,
+      projectSettingsOverrides: {
+        [ProjectId.make("project:test")]: {
+          providerInstances: { [fallbackModel.instanceId]: { enabled: false } },
+        },
+      },
+    }),
+    storedModel,
+  ],
+  [
+    "ignores another project turning the fallback off",
+    [exhausted, fallbackUsable],
+    ServerSettings.layerTest({
+      fallbackModelSelection: fallbackModel,
+      projectSettingsOverrides: {
+        [ProjectId.make("project:other")]: {
+          providerInstances: { [fallbackModel.instanceId]: { enabled: false } },
+        },
+      },
+    }),
+    fallbackModel,
+  ],
+  [
+    "launches the stored model when settings cannot be read",
+    [exhausted, fallbackUsable],
+    Layer.mock(ServerSettings.ServerSettingsService)({
+      getSettings: Effect.fail(
+        new ServerSettingsError({ settingsPath: "settings.json", operation: "read-file" }),
+      ),
+    }),
+    storedModel,
+  ],
+] as const)("an unbound fire %s", ([, providers, settings, expected]) =>
+  Effect.gen(function* () {
+    assert.deepEqual(yield* fireUnbound(providers, settings), expected);
+  }),
 );

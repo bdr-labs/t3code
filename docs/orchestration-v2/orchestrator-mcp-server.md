@@ -474,10 +474,12 @@ returned unchanged, and a thread with no active provider turn returns
 ### Scheduled tasks
 
 `schedule_task`, `list_scheduled_tasks`, and `delete_scheduled_task` manage
-recurring work in the app scheduler; `schedule_task` with a `scheduledTaskId`
-updates an existing task. A schedule
+recurring and one-time work in the app scheduler; `schedule_task` with a
+`scheduledTaskId` updates an existing task. A schedule
 runs its prompt on an interval, at a fixed time in the server's local time
-zone, or on each qualifying webhook request, even when no turn is active.
+zone, once at a future `runAt`, or on each qualifying webhook request, even when
+no turn is active. A `once` task missed while the server was down runs when it
+is back.
 Without a signature, anyone with the webhook URL can trigger a run.
 Signature checks, filters, and dedupe can skip a webhook request.
 `bindToCurrentThread` defaults to `true` only when the caller has a thread in
@@ -486,6 +488,15 @@ that thread; unbound runs each launch a fresh thread in the task's project.
 Explicit `bindToCurrentThread: true` without a caller thread in that project
 is rejected. Pausing uses `schedule_task` with `scheduledTaskId` and `enabled: false`;
 deletion is permanent.
+
+While a bound task's thread is stopped on a usage limit on the provider it uses
+now, and that limit's reset is known and ahead, a run sends nothing and records
+`failed` with the reason in `lastRunError`. A timed run tries again at its next
+run or at the reset, whichever comes first, and a `once` task at the reset; Run
+now leaves `nextRunAt` alone. A limit with no reset time, or a reset no later than
+the failure, holds nothing back: the run sends as usual and may hit the limit.
+Bound webhook runs always send as usual. An unbound run on an exhausted model,
+webhook runs included, launches on the fallback model when that one is usable.
 
 ## Delegated Task Lifecycle
 

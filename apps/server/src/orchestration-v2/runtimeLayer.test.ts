@@ -1,11 +1,14 @@
 import { PullRequestProviderError } from "@t3tools/source-control-core/server/PullRequestProvider";
 import { SourceControlProviderKind } from "@t3tools/contracts";
-import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
+import {
+  layer as layerUsageLimitRecoveryWorker,
+  limitRecoveryCommand,
+} from "./UsageLimitRecoveryWorker.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
   type ApplicationStoredEvent,
@@ -42,6 +45,8 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Context from "effect/Context";
+import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -52,7 +57,18 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
+import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as CloudManagedEndpointRuntime from "../cloud/ManagedEndpointRuntime.ts";
+import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
+import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import * as ModelManifest from "../provider/ModelManifest.ts";
+import * as ProviderInstanceRegistryMutator from "../provider/ProviderInstanceRegistryMutator.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
@@ -83,6 +99,7 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ScratchThreadPromotion from "../project/ScratchThreadPromotion.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import { layerNewThreadModelTest } from "../scheduledTasks/testLayers.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -335,6 +352,7 @@ const layerScheduledTasksTest = ScheduledTaskService.layer.pipe(
         namedProjectsRoot: "/projects",
         isScratchProject: () => Effect.succeed(false),
       }),
+      layerNewThreadModelTest,
       Scheduler.layer,
     ),
   ),
@@ -8702,4 +8720,534 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
         }),
     );
   },
+);
+
+// Per test, so the real due-task worker sweeps only that test's task.
+const layerScheduledFireTest = (workers: Map<string, Effect.Effect<void>>) =>
+  ScheduledTaskService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        ManagedPolicy.layerTest(),
+        Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+          namedProjectsRoot: "/projects",
+          isScratchProject: () => Effect.succeed(false),
+        }),
+        layerNewThreadModelTest,
+        Layer.succeed(Scheduler.Scheduler, {
+          register: <E, R>(name: string, work: Effect.Effect<void, E, R>) =>
+            Effect.gen(function* () {
+              const context = yield* Effect.context<R>();
+              workers.set(name, work.pipe(Effect.provideContext(context), Effect.orDie));
+            }),
+        }),
+      ),
+    ),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        RuntimeLayer.layer,
+        RuntimeLayer.layerEventSink,
+        ProjectStore.layer,
+        ProjectionStore.layer,
+        EffectOutbox.layer,
+        ThreadCommandExecutor.layer,
+      ),
+    ),
+    Layer.provide(McpSessionRegistryTestkit.layer),
+    Layer.provide(McpProviderSessions.layer),
+    Layer.provideMerge(SqlitePersistence.layerMemory),
+    Layer.provide(layerCheckpointStoreTest),
+    Layer.provide(layerServerConfig),
+    Layer.provide(
+      ServerSettings.layerTest({
+        providerInstances: { [alternateInstanceId]: { driver: "codex", enabled: true } },
+      }),
+    ),
+    Layer.provide(layerTestProviderInstanceRegistry),
+    Layer.provide(layerGitWorkflowTest),
+    Layer.provide(layerProjectServiceTest),
+    Layer.provide(layerPlatformTest),
+  );
+
+// Adds the real recovery worker, with auto-resume on, to a test's scheduled-task workers.
+const layerAutoResumeFireTest = (
+  workers: Map<string, Effect.Effect<void>>,
+  scheduledFire = layerScheduledFireTest(workers),
+) =>
+  layerUsageLimitRecoveryWorker.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        ServerSettings.layerTest({ autoResumeLimitedThreads: true }),
+        Layer.succeed(Scheduler.Scheduler, {
+          register: <E, R>(name: string, work: Effect.Effect<void, E, R>) =>
+            Effect.gen(function* () {
+              const context = yield* Effect.context<R>();
+              workers.set(name, work.pipe(Effect.provideContext(context), Effect.orDie));
+            }),
+        }),
+      ),
+    ),
+    Layer.provideMerge(scheduledFire),
+  );
+
+describe("a scheduled fire on the real orchestrator", () => {
+  const dispatchMessage = (
+    threadId: ThreadId,
+    key: string,
+    type: "start_immediately" | "queue_after_active",
+  ) =>
+    Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+      orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make(`${threadId}:message:${key}`),
+        threadId,
+        messageId: MessageId.make(`${threadId}:message:${key}`),
+        text: key,
+        attachments: [],
+        dispatchMode: { type },
+      }),
+    );
+  const createThread = (threadId: ThreadId) =>
+    Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+      orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId: ProjectId.make(`${threadId}:project`),
+        title: "Scheduled fire",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      }),
+    );
+  // A thread whose running turn stopped on a usage limit that resets an hour from now, if at all.
+  const limitStoppedThread = (
+    threadId: ThreadId,
+    { withQueuedMessage = false, withReset = true } = {},
+  ) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      yield* createThread(threadId);
+      yield* dispatchMessage(threadId, "first", "start_immediately");
+      if (withQueuedMessage) yield* dispatchMessage(threadId, "older", "queue_after_active");
+      const [run] = (yield* orchestrator.getThreadProjection(threadId)).runs;
+      assert.isDefined(run);
+      assert.isNotNull(run.rootNodeId);
+      const now = yield* DateTime.now;
+      const resetAt = DateTime.formatIso(DateTime.add(now, { hours: 1 }));
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make(`${threadId}:error`),
+            type: "turn-item.updated",
+            threadId,
+            runId: run.id,
+            nodeId: run.rootNodeId,
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make(`${threadId}:error`),
+              type: "error",
+              threadId,
+              runId: run.id,
+              nodeId: run.rootNodeId,
+              providerThreadId: run.providerThreadId,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 2,
+              status: "failed",
+              title: "Usage limit reached",
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              failure: {
+                class: "usage_limit",
+                message: "Plan limit reached.",
+                code: "usageLimitExceeded",
+                retryable: null,
+                ...(withReset ? { resetAt } : {}),
+              },
+            },
+          },
+          {
+            id: EventId.make(`${threadId}:failed`),
+            type: "run.updated",
+            threadId,
+            runId: run.id,
+            nodeId: run.rootNodeId,
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: now,
+            payload: { ...run, status: "failed", completedAt: now },
+          },
+        ],
+      });
+      return { source: run, resetAt };
+    });
+  const saveTask = (threadId: ThreadId, everyMinutes = 20) =>
+    Effect.flatMap(ScheduledTaskService.ScheduledTaskService, (tasks) =>
+      tasks.upsert({
+        id: ScheduledTaskId.make(`${threadId}:task`),
+        title: "Check in",
+        prompt: "Check progress",
+        enabled: true,
+        schedule: { type: "interval", everyMs: everyMinutes * 60_000 },
+        projectId: ProjectId.make(`${threadId}:project`),
+        threadId,
+        workspaceStrategy: { type: "root" },
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      }),
+    ).pipe(Effect.map(({ task }) => task));
+  const storedTask = (id: string) =>
+    Effect.flatMap(ScheduledTaskService.ScheduledTaskService, (tasks) => tasks.list()).pipe(
+      Effect.map(({ tasks }) => tasks.find((task) => task.id === id)!),
+    );
+  const firesOf = (threadId: ThreadId, task: { readonly id: string }) =>
+    Effect.gen(function* () {
+      const { messages, runs } = yield* Effect.flatMap(
+        Orchestrator.OrchestratorV2,
+        (orchestrator) => orchestrator.getThreadProjection(threadId),
+      );
+      const fired = messages.filter((message) => message.scheduledTaskId === task.id);
+      return {
+        runs,
+        fired: fired.map((message) => runs.find((run) => run.id === message.runId)),
+      };
+    });
+
+  it.effect.each([
+    ["nothing else waiting", false],
+    ["an older message waiting", true],
+  ] as const)(
+    "a limit-stopped thread with %s gets no new run, and the fire after the reset starts one",
+    ([, withQueuedMessage]) => {
+      const workers = new Map<string, Effect.Effect<void>>();
+      return Effect.gen(function* () {
+        const threadId = ThreadId.make("scheduled-fire-postponed");
+        const { source, resetAt } = yield* limitStoppedThread(threadId, { withQueuedMessage });
+        const before = (yield* firesOf(threadId, { id: "none" })).runs;
+        const task = yield* saveTask(threadId);
+        const sweep = workers.get("scheduled-tasks")!;
+
+        // Each 20-minute period re-checks and adds nothing while the limit lasts.
+        for (const minutes of [20, 40]) {
+          yield* TestClock.adjust("20 minutes");
+          yield* sweep;
+          const held = yield* storedTask(task.id);
+          assert.equal(held.lastRunStatus, "failed");
+          assert.isTrue(held.lastRunError?.includes(resetAt));
+          assert.equal(held.runCount, 0);
+          assert.isBelow(Date.parse(held.nextRunAt!), Date.parse(resetAt) + 1, `at ${minutes}`);
+          const { fired, runs } = yield* firesOf(threadId, task);
+          assert.deepEqual(fired, []);
+          assert.deepEqual(runs, before);
+        }
+        const shell = yield* Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+          orchestrator.getThreadShell(threadId),
+        );
+        assert.equal(shell?.latestRunId, source.id);
+        assert.equal(shell?.lastErrorClass, "usage_limit");
+
+        yield* TestClock.adjust("20 minutes");
+        yield* sweep;
+        yield* sweep;
+        const after = yield* firesOf(threadId, task);
+        assert.deepEqual(
+          after.fired.map((run) => run?.status),
+          ["starting"],
+        );
+        assert.equal((yield* storedTask(task.id)).lastRunStatus, "succeeded");
+      }).pipe(Effect.provide(layerScheduledFireTest(workers)));
+    },
+  );
+
+  // A real tick: the sources in the order they register, so fires come before auto-resume.
+  const tick = (workers: Map<string, Effect.Effect<void>>) =>
+    Effect.forEach(["scheduled-tasks", "usage-limit-recovery"], (name) => workers.get(name)!, {
+      discard: true,
+    });
+  const continuationThenFire = (threadId: ThreadId, task: { readonly id: string }) =>
+    Effect.gen(function* () {
+      const { messages, runs } = yield* Effect.flatMap(
+        Orchestrator.OrchestratorV2,
+        (orchestrator) => orchestrator.getThreadProjection(threadId),
+      );
+      const runOf = (message: (typeof messages)[number] | undefined) =>
+        runs.find((run) => run.id === message?.runId);
+      const continuation = runOf(
+        messages.find((message) => message.text === "Continue where you left off."),
+      );
+      const fired = runOf(messages.find((message) => message.scheduledTaskId === task.id));
+      assert.equal(continuation?.status, "starting");
+      assert.equal(fired?.status, "queued");
+      assert.isBelow(continuation!.ordinal, fired!.ordinal);
+    });
+
+  describe("beside an armed auto-resume", () => {
+    const postponedToTheReset = (threadId: ThreadId, workers: Map<string, Effect.Effect<void>>) =>
+      Effect.gen(function* () {
+        const { resetAt } = yield* limitStoppedThread(threadId);
+        const task = yield* saveTask(threadId, 40);
+        yield* tick(workers);
+        const armed = yield* Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+          orchestrator.getThreadProjection(threadId),
+        );
+        assert.equal(armed.thread.limitRecovery?.autoResume, true);
+        yield* TestClock.adjust("40 minutes");
+        yield* tick(workers);
+        assert.equal((yield* storedTask(task.id)).nextRunAt, resetAt);
+        return { task, resetAt };
+      });
+    it.effect.each([
+      ["20 seconds", 20_000],
+      ["2 hours", 2 * 3_600_000],
+    ] as const)("a postponed fire on a tick %s late goes behind the continuation", ([, lateMs]) => {
+      const workers = new Map<string, Effect.Effect<void>>();
+      return Effect.gen(function* () {
+        const threadId = ThreadId.make(`scheduled-fire-late-${lateMs}`);
+        const { task, resetAt } = yield* postponedToTheReset(threadId, workers);
+
+        yield* TestClock.setTime(Date.parse(resetAt) + lateMs);
+        yield* tick(workers);
+        assert.deepEqual((yield* firesOf(threadId, task)).fired, []);
+
+        yield* TestClock.adjust("5 seconds");
+        yield* tick(workers);
+        yield* continuationThenFire(threadId, task);
+        assert.equal((yield* storedTask(task.id)).lastRunStatus, "succeeded");
+      }).pipe(Effect.provide(layerAutoResumeFireTest(workers)));
+    });
+
+    it.effect("a recovery that cannot deliver holds a postponed fire 15 seconds, no more", () => {
+      const workers = new Map<string, Effect.Effect<void>>();
+      return Effect.gen(function* () {
+        const threadId = ThreadId.make("scheduled-fire-undeliverable");
+        const { task, resetAt } = yield* postponedToTheReset(threadId, workers);
+        yield* Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+          orchestrator.dispatch({
+            type: "thread.settle",
+            commandId: CommandId.make(`${threadId}:settle`),
+            threadId,
+          }),
+        );
+
+        yield* TestClock.setTime(Date.parse(resetAt) + 3_600_000);
+        yield* tick(workers);
+        yield* TestClock.adjust("14 seconds");
+        yield* tick(workers);
+        assert.deepEqual((yield* firesOf(threadId, task)).fired, []);
+
+        yield* TestClock.adjust("1 second");
+        yield* tick(workers);
+        assert.equal((yield* firesOf(threadId, task)).fired[0]?.status, "starting");
+      }).pipe(Effect.provide(layerAutoResumeFireTest(workers)));
+    });
+  });
+
+  it.effect("a thread moved to another provider after a postponement fires next period", () => {
+    const workers = new Map<string, Effect.Effect<void>>();
+    return Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("scheduled-fire-moved-after");
+      yield* limitStoppedThread(threadId);
+      const task = yield* saveTask(threadId);
+      const sweep = workers.get("scheduled-tasks")!;
+
+      yield* TestClock.adjust("20 minutes");
+      yield* sweep;
+      assert.equal((yield* storedTask(task.id)).lastRunStatus, "failed");
+      assert.deepEqual((yield* firesOf(threadId, task)).fired, []);
+
+      yield* orchestrator.dispatch({
+        type: "provider.switch",
+        commandId: CommandId.make(`${threadId}:move`),
+        threadId,
+        modelSelection: { ...modelSelection, instanceId: alternateInstanceId },
+      });
+      yield* TestClock.adjust("20 minutes");
+      yield* sweep;
+
+      const stored = yield* storedTask(task.id);
+      assert.isNull(stored.lastRunError);
+      assert.equal(stored.lastRunStatus, "succeeded");
+      const { fired } = yield* firesOf(threadId, task);
+      assert.equal(fired[0]?.status, "starting");
+      assert.equal(fired[0]?.providerInstanceId, alternateInstanceId);
+    }).pipe(Effect.provide(layerScheduledFireTest(workers)));
+  });
+
+  it.effect("a limit with no reset time sends, as it did before postponing existed", () => {
+    const workers = new Map<string, Effect.Effect<void>>();
+    return Effect.gen(function* () {
+      const threadId = ThreadId.make("scheduled-fire-no-reset");
+      yield* limitStoppedThread(threadId, { withReset: false });
+      const task = yield* saveTask(threadId);
+
+      yield* TestClock.adjust("20 minutes");
+      yield* workers.get("scheduled-tasks")!;
+
+      const stored = yield* storedTask(task.id);
+      assert.equal(stored.lastRunStatus, "succeeded");
+      assert.isNull(stored.lastRunError);
+      assert.equal((yield* firesOf(threadId, task)).fired[0]?.status, "starting");
+    }).pipe(Effect.provide(layerScheduledFireTest(workers)));
+  });
+
+  it.effect("Run now on a limit-stopped thread starts nothing and keeps the next run", () => {
+    const workers = new Map<string, Effect.Effect<void>>();
+    return Effect.gen(function* () {
+      const threadId = ThreadId.make("scheduled-fire-manual");
+      yield* limitStoppedThread(threadId);
+      const task = yield* saveTask(threadId);
+      const tasks = yield* ScheduledTaskService.ScheduledTaskService;
+
+      const ran = yield* tasks.runNow({ id: task.id });
+
+      assert.isNull(ran.threadId);
+      assert.equal(ran.task.lastRunStatus, "failed");
+      assert.equal(ran.task.nextRunAt, task.nextRunAt);
+      assert.deepEqual((yield* firesOf(threadId, task)).fired, []);
+    }).pipe(Effect.provide(layerScheduledFireTest(workers)));
+  });
+
+  it.effect("a thread moved to another provider since its limit is not postponed", () => {
+    const workers = new Map<string, Effect.Effect<void>>();
+    return Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("scheduled-fire-moved-provider");
+      yield* limitStoppedThread(threadId);
+      yield* orchestrator.dispatch({
+        type: "provider.switch",
+        commandId: CommandId.make(`${threadId}:move`),
+        threadId,
+        modelSelection: { ...modelSelection, instanceId: alternateInstanceId },
+      });
+      // The shell alone still reads as stopped, which is why the fire reads the runs.
+      const shell = yield* orchestrator.getThreadShell(threadId);
+      assert.equal(shell?.lastErrorClass, "usage_limit");
+      const task = yield* saveTask(threadId);
+
+      yield* TestClock.adjust("20 minutes");
+      yield* workers.get("scheduled-tasks")!;
+
+      const stored = yield* storedTask(task.id);
+      assert.isNull(stored.lastRunError);
+      assert.equal(stored.lastRunStatus, "succeeded");
+      const { fired } = yield* firesOf(threadId, task);
+      assert.equal(fired[0]?.status, "starting");
+      assert.equal(fired[0]?.providerInstanceId, alternateInstanceId);
+    }).pipe(Effect.provide(layerScheduledFireTest(workers)));
+  });
+
+  it.effect("an idle thread starts and a running thread queues, and both succeed", () => {
+    const workers = new Map<string, Effect.Effect<void>>();
+    return Effect.gen(function* () {
+      const tasks = yield* ScheduledTaskService.ScheduledTaskService;
+      const idleThread = ThreadId.make("scheduled-fire-idle");
+      yield* createThread(idleThread);
+      const idleTask = yield* saveTask(idleThread);
+      const idle = (yield* tasks.runNow({ id: idleTask.id })).task;
+      assert.equal(idle.lastRunStatus, "succeeded");
+      assert.equal((yield* firesOf(idleThread, idle)).fired[0]?.status, "starting");
+
+      const runningThread = ThreadId.make("scheduled-fire-running");
+      yield* createThread(runningThread);
+      yield* dispatchMessage(runningThread, "first", "start_immediately");
+      const runningTask = yield* saveTask(runningThread);
+      const running = (yield* tasks.runNow({ id: runningTask.id })).task;
+      assert.equal(running.lastRunStatus, "succeeded");
+      assert.isNull(running.lastRunError);
+      assert.equal((yield* firesOf(runningThread, running)).fired[0]?.status, "queued");
+    }).pipe(Effect.provide(layerScheduledFireTest(workers)));
+  });
+
+  it.effect("a webhook's queued send on a limit-stopped thread starts a run on the limit", () => {
+    const workers = new Map<string, Effect.Effect<void>>();
+    return Effect.gen(function* () {
+      const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+      const threadId = ThreadId.make("scheduled-fire-webhook");
+      yield* limitStoppedThread(threadId);
+      const sent = yield* threadManagement.sendToThread({
+        projectId: ProjectId.make(`${threadId}:project`),
+        commandId: CommandId.make(`${threadId}:fire`),
+        threadId,
+        messageId: MessageId.make(`${threadId}:fire`),
+        scheduledTaskId: ScheduledTaskId.make(`${threadId}:task`),
+        text: "Check progress",
+        attachments: [],
+        mode: "queue",
+        createdBy: "user",
+        creationSource: "web",
+      });
+      assert.equal(sent.delivery, "started");
+      assert.equal(sent.run.status, "starting");
+    }).pipe(Effect.provide(layerScheduledFireTest(workers)));
+  });
+});
+
+// A cycle through a new dependency of the scheduled task service would never finish building.
+it.effect("the production runtime builds with what the scheduled task service now needs", () =>
+  Effect.gen(function* () {
+    const services = yield* Layer.build(
+      RuntimeLayer.layerProduction.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            ManagedPolicy.layerTest(),
+            ServerSettings.layerTest(),
+            ProviderRegistry.layer.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  Layer.mock(ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator)({}),
+                  Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
+                    getInstance: () => Effect.undefined,
+                    listInstances: Effect.succeed([]),
+                    listUnavailable: Effect.succeed([]),
+                    streamChanges: Stream.empty,
+                    subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+                  }),
+                  ModelManifest.layerTest,
+                  ProviderLatestVersions.layer,
+                ),
+              ),
+            ),
+            ProjectStore.layer,
+            Layer.mock(AnalyticsService.AnalyticsService)({}),
+            Layer.mock(CloudManagedEndpointRuntime.CloudManagedEndpointRuntime)({}),
+            Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+            Layer.mock(PreviewManager.PreviewManager)({}),
+            Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({}),
+            Layer.mock(ProjectEnrichmentService.ProjectEnrichmentService)({}),
+            Layer.mock(ServerSecretStore.ServerSecretStore)({
+              directory: "/unused-secrets",
+              getOrCreateRandom: () => Effect.succeed(new Uint8Array(32)),
+            }),
+            Layer.mock(TerminalManager.TerminalManager)({}),
+            Layer.mock(TextGeneration.TextGeneration)({}),
+            Layer.mock(WorkspacePaths.WorkspacePaths)({}),
+            Layer.mock(WorktreeSetupTracker.WorktreeSetupTracker)({}),
+          ),
+        ),
+        Layer.provide(McpSessionRegistryTestkit.layer),
+        Layer.provide(McpProviderSessions.layer),
+        Layer.provide(SqlitePersistence.layerMemory),
+        Layer.provide(layerCheckpointStoreTest),
+        Layer.provide(layerServerConfig),
+        Layer.provide(layerTestProviderInstanceRegistry),
+        Layer.provide(layerGitWorkflowTest),
+        Layer.provide(layerPlatformTest),
+      ),
+    );
+    const tasks = Context.get(services, ScheduledTaskService.ScheduledTaskService);
+    assert.deepEqual((yield* tasks.list()).tasks, []);
+  }).pipe(Effect.scoped),
 );

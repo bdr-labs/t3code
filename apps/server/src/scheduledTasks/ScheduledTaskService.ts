@@ -2,6 +2,7 @@ import {
   CommandId,
   MessageId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  type OrchestrationV2ThreadProjection,
   type ProjectId,
   ScheduledTask,
   ScheduledTaskError,
@@ -35,6 +36,13 @@ import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import {
+  latestExecutedRun,
+  latestRootProviderFailure,
+  usageLimitBlockedRun,
+} from "@t3tools/shared/orchestrationV2ThreadError";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import * as Exit from "effect/Exit";
 import * as Duration from "effect/Duration";
 import * as Metric from "effect/Metric";
@@ -50,6 +58,9 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -340,6 +351,56 @@ function errorMessage(error: unknown): string {
   return failure instanceof Error ? failure.message : String(failure);
 }
 
+/**
+ * The reset a fire waits for: the latest executed run failed on a usage limit, on the instance the
+ * thread uses now (the orchestrator's usageLimitHoldsQueue), and the limit's reset is known, ahead,
+ * and later than that failure (a reset at or before it is stale, as in limitRecoveryCommand).
+ */
+function usageLimitResetAhead(
+  records: Pick<
+    OrchestrationV2ThreadProjection,
+    "thread" | "runs" | "turnItems" | "providerSessions"
+  >,
+  now: DateTime.DateTime,
+): DateTime.Utc | null {
+  const instanceId = records.thread.modelSelection.instanceId;
+  const [session] = records.providerSessions
+    .filter((candidate) => candidate.providerInstanceId === instanceId)
+    .toSorted(
+      (left, right) =>
+        DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
+    );
+  const run = usageLimitBlockedRun(records.runs, records.turnItems, session?.lastError ?? null);
+  if (run?.providerInstanceId !== instanceId) return null;
+  const reported = latestRootProviderFailure(run, records.turnItems)?.resetAt;
+  const reset = reported == null ? null : Option.getOrNull(DateTime.make(reported));
+  if (reset === null) return null;
+  const resetMs = DateTime.toEpochMillis(reset);
+  return resetMs > DateTime.toEpochMillis(run.completedAt ?? records.thread.updatedAt) &&
+    resetMs > DateTime.toEpochMillis(now)
+    ? reset
+    : null;
+}
+
+// Auto-resume falls due in the same tick as a fire past the reset, and it must go first. Counted
+// from the first sweep that saw it undelivered: after sleep or downtime, fires still tick first.
+const AUTO_RESUME_HEAD_START_MS = 15_000;
+
+function postponedFireError(resetAt: string): string {
+  return `Not sent because the thread stopped on a usage limit that resets at ${resetAt}. The task tries again then or at its next run.`;
+}
+
+/** The reason is the record of a postponement, so a late sweep does not skip it as a missed slot. */
+function isPostponedFire(
+  task: Pick<ScheduledTask, "lastRunStatus" | "lastRunError" | "nextRunAt">,
+): boolean {
+  return (
+    task.lastRunStatus === "failed" &&
+    task.nextRunAt !== null &&
+    task.lastRunError === postponedFireError(task.nextRunAt)
+  );
+}
+
 function webhookPath(taskId: string, token: string): string {
   return `${WEBHOOK_ROUTE_PREFIX}/${encodeURIComponent(taskId)}/${token}`;
 }
@@ -443,6 +504,9 @@ export const layer = Layer.effect(
     const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
+    const projects = yield* ProjectService.ProjectService;
+    const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+    const serverSettings = yield* ServerSettings.ServerSettingsService;
     const secretRequests = yield* SecretRequests.SecretRequests;
     const scheduler = yield* Scheduler.Scheduler;
     const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
@@ -798,6 +862,108 @@ export const layer = Layer.effect(
         ),
     );
 
+    // One write and never 'running': crash recovery counts a one-time task as used from a run's
+    // start, and nothing here ran, so run_count stays too.
+    const recordUnsentFire = Effect.fn("ScheduledTaskService.recordUnsentFire")(function* (
+      active: ScheduledTask,
+      trigger: "scheduled" | "manual",
+      resetAt: string,
+      startedAt: DateTime.DateTime,
+    ) {
+      const startedAtIso = iso(startedAt);
+      const origin = yield* readWebhookOrigin;
+      const record = Effect.gen(function* () {
+        const [row] = yield* getRows(active.id);
+        const current = row === undefined ? null : yield* decodeRow(row, origin);
+        if (current === null) return { recorded: active, written: false };
+        // A pause or edit that landed during this fire keeps the time it computed.
+        const edited =
+          !current.enabled ||
+          current.threadId !== active.threadId ||
+          !isSameSchedule(current.schedule, active.schedule);
+        // Each period re-checks, so a thread that was moved or resumed fires at the next one.
+        const natural = current.schedule.type === "once" ? null : nextRunAt(current, startedAt);
+        const nextRun =
+          trigger === "manual" || edited
+            ? current.nextRunAt
+            : natural !== null && Date.parse(natural) < Date.parse(resetAt)
+              ? natural
+              : resetAt;
+        // Run now leaves a postponement's record alone, so a late sweep still knows it.
+        const error =
+          trigger !== "manual"
+            ? postponedFireError(resetAt)
+            : isPostponedFire(current)
+              ? current.lastRunError
+              : `Not sent because the thread stopped on a usage limit that resets at ${resetAt}.`;
+        yield* sql`
+          UPDATE scheduled_tasks
+          SET updated_at = ${startedAtIso},
+              last_run_at = ${startedAtIso},
+              last_run_webhook_delivery_id = NULL,
+              last_run_status = 'failed',
+              last_run_error = ${error},
+              next_run_at = ${nextRun}
+          WHERE task_id = ${active.id}
+        `;
+        const recorded: ScheduledTask = {
+          ...current,
+          updatedAt: startedAtIso,
+          lastRunAt: startedAtIso,
+          lastRunStatus: "failed",
+          lastRunError: error,
+          nextRunAt: nextRun,
+        };
+        return { recorded, written: true };
+      });
+      const { recorded, written } = yield* sql
+        .withTransaction(record)
+        .pipe(
+          Effect.mapError((cause) =>
+            isScheduledTaskError(cause)
+              ? cause
+              : taskError("Could not record schedule task run.", { taskId: active.id, cause }),
+          ),
+        );
+      if (written) yield* notifyChanged;
+      return { task: recorded, threadId: null, dispatchFailed: false };
+    });
+
+    // In memory, so a restart only restarts the wait.
+    const autoResumeWaits = yield* Ref.make<
+      ReadonlyMap<ScheduledTaskId, { readonly runId: string; readonly seenAtMs: number }>
+    >(new Map());
+
+    /**
+     * While a due continuation has its head start. The fire comes back on the next tick and queues
+     * behind it. A recovery that cannot deliver, such as on a settled thread, holds it no longer.
+     */
+    const autoResumeGoesFirst = (
+      taskId: ScheduledTaskId,
+      records: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+      nowMs: number,
+    ) =>
+      Ref.modify(autoResumeWaits, (waits) => {
+        const recovery = records.thread.limitRecovery;
+        if (
+          recovery?.autoResume !== true ||
+          Date.parse(recovery.resetAt) > nowMs ||
+          latestExecutedRun(records.runs)?.id !== recovery.runId
+        ) {
+          if (!waits.has(taskId)) return [false, waits] as const;
+          const next = new Map(waits);
+          next.delete(taskId);
+          return [false, next] as const;
+        }
+        const seen = waits.get(taskId);
+        return seen?.runId === recovery.runId
+          ? ([nowMs - seen.seenAtMs < AUTO_RESUME_HEAD_START_MS, waits] as const)
+          : ([
+              true,
+              new Map(waits).set(taskId, { runId: recovery.runId, seenAtMs: nowMs }),
+            ] as const);
+      });
+
     const runTask = Effect.fn("ScheduledTaskService.runTask")(function* (
       task: ScheduledTask,
       trigger: "scheduled" | "manual" | "webhook",
@@ -858,6 +1024,29 @@ export const layer = Layer.effect(
                     ? "The task was paused before this delivery ran."
                     : null;
           if (reason !== null) return yield* new WebhookDeliverySkipped({ reason });
+        }
+
+        // A failed read falls through to the send, which reports a missing thread itself.
+        const records =
+          trigger === "webhook" || active.threadId === null
+            ? null
+            : yield* threadManagement
+                .getThreadRecords(
+                  ThreadId.make(active.threadId),
+                  ["runs", "turnItems", "providerSessions"],
+                  { turnItemTypes: ["error"] },
+                )
+                .pipe(Effect.orElseSucceed(() => null));
+        const resetAhead = records === null ? null : usageLimitResetAhead(records, startedAt);
+        if (trigger !== "webhook" && resetAhead !== null) {
+          return yield* recordUnsentFire(active, trigger, iso(resetAhead), startedAt);
+        }
+        if (
+          trigger === "scheduled" &&
+          records !== null &&
+          (yield* autoResumeGoesFirst(active.id, records, DateTime.toEpochMillis(startedAt)))
+        ) {
+          return { task: active, threadId: null, dispatchFailed: false };
         }
 
         if (webhook === undefined) yield* markRunning(active.id, startedAtIso);
@@ -922,29 +1111,57 @@ export const layer = Layer.effect(
               }),
             );
 
+        // A failed read keeps the stored model, which is what a fire launched on before.
+        const newThreadModel = Effect.all([
+          serverSettings.getSettings,
+          projects.getById(active.projectId),
+          providerRegistry.getProviders,
+        ]).pipe(
+          Effect.map(([settings, project, providers]) => {
+            const effective = resolveProjectSettings(
+              settings,
+              active.projectId,
+              Option.getOrUndefined(project),
+            ).settings;
+            return resolveNewThreadModelSelection({
+              defaultSelection: active.modelSelection,
+              fallbackSelection: effective.fallbackModelSelection,
+              providers,
+              settings: effective,
+              projectId: active.projectId,
+              now: DateTime.toEpochMillis(startedAt),
+            }).selection;
+          }),
+          Effect.orElseSucceed(() => null),
+          Effect.map((selection) => selection ?? active.modelSelection),
+        );
+
         // Capture defects and interrupts too so dispatch failures still reach markCompleted.
         const result =
           active.threadId === null
             ? yield* Effect.exit(
-                threadLaunch
-                  .launch({
-                    commandId,
-                    projectId: active.projectId,
-                    title: active.title,
-                    modelSelection: active.modelSelection,
-                    runtimeMode: active.runtimeMode,
-                    interactionMode: active.interactionMode,
-                    workspaceStrategy: active.workspaceStrategy,
-                    initialMessage: {
-                      messageId,
-                      scheduledTaskId: active.id,
-                      text: prompt,
-                      attachments: [],
-                    },
-                    createdBy: active.createdBy,
-                    creationSource: active.creationSource,
-                  })
-                  .pipe(Effect.map((launched) => launched.threadId)),
+                newThreadModel.pipe(
+                  Effect.flatMap((modelSelection) =>
+                    threadLaunch.launch({
+                      commandId,
+                      projectId: active.projectId,
+                      title: active.title,
+                      modelSelection,
+                      runtimeMode: active.runtimeMode,
+                      interactionMode: active.interactionMode,
+                      workspaceStrategy: active.workspaceStrategy,
+                      initialMessage: {
+                        messageId,
+                        scheduledTaskId: active.id,
+                        text: prompt,
+                        attachments: [],
+                      },
+                      createdBy: active.createdBy,
+                      creationSource: active.creationSource,
+                    }),
+                  ),
+                  Effect.map((launched) => launched.threadId),
+                ),
               )
             : yield* Effect.exit(
                 // The stored selection only seeds fresh threads. A bound run
@@ -1114,7 +1331,7 @@ export const layer = Layer.effect(
         due,
         ({ task, dueAt }) =>
           Effect.suspend(() =>
-            isMissedFixedTimeRun(task.schedule, dueAt, now)
+            isMissedFixedTimeRun(task.schedule, dueAt, now) && !isPostponedFire(task)
               ? rescheduleMissedRun(task, now)
               : runTask(task, "scheduled"),
           ).pipe(
@@ -1320,6 +1537,14 @@ export const layer = Layer.effect(
         isSameSchedule(existingTask.schedule, schedule);
       if (!scheduleUnchanged)
         yield* requireFutureOnce({ enabled: input.enabled, schedule }, now, id);
+      // A time postponed for one thread's limit means nothing for another thread.
+      const keepsNextRun = scheduleUnchanged && existingTask.threadId === (input.threadId ?? null);
+      // A one-time task still waiting past its time fires now; one already used stays used.
+      const reboundOnce =
+        scheduleUnchanged &&
+        !keepsNextRun &&
+        schedule.type === "once" &&
+        existingTask.nextRunAt !== null;
       const task: ScheduledTask = {
         id,
         title: input.title,
@@ -1336,9 +1561,10 @@ export const layer = Layer.effect(
         creationSource: input.creationSource ?? "web",
         createdAt: existingTask?.createdAt ?? iso(now),
         updatedAt: iso(now),
-        nextRunAt: scheduleUnchanged
+        nextRunAt: keepsNextRun
           ? existingTask.nextRunAt
-          : nextRunAt({ enabled: input.enabled, schedule }, now),
+          : (nextRunAt({ enabled: input.enabled, schedule }, now) ??
+            (reboundOnce ? iso(now) : null)),
         lastRunAt: existingTask?.lastRunAt ?? null,
         lastRunStatus: existingTask?.lastRunStatus ?? "never",
         lastRunError: existingTask?.lastRunError ?? null,
@@ -1347,7 +1573,7 @@ export const layer = Layer.effect(
       yield* saveTask(
         task,
         input.requireExisting === true,
-        scheduleUnchanged ? existingTask.schedule : null,
+        keepsNextRun ? existingTask.schedule : null,
         webhook,
       );
       yield* notifyChanged;
@@ -1428,6 +1654,11 @@ export const layer = Layer.effect(
           }),
           Ref.update(webhookPermits, (permits) => {
             const next = new Map(permits);
+            next.delete(id);
+            return next;
+          }),
+          Ref.update(autoResumeWaits, (waits) => {
+            const next = new Map(waits);
             next.delete(id);
             return next;
           }),

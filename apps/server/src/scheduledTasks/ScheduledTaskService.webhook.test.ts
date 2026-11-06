@@ -31,6 +31,7 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
+import { layerNewThreadModelTest } from "./testLayers.ts";
 import { renderWebhookPrompt } from "./webhookTemplate.ts";
 
 const decodeUpsertInput = Schema.decodeUnknownEffect(ScheduledTaskUpsertInput);
@@ -176,6 +177,10 @@ const withService = <A, E>(
     readonly sql?: SqlClient.SqlClient;
     readonly workers?: Map<string, Effect.Effect<void>>;
     readonly policy?: ManagedPolicyDocument;
+    readonly threadManagement?: Pick<
+      ThreadManagementService.ThreadManagementService["Service"],
+      "sendToThread"
+    >;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -240,7 +245,8 @@ const withService = <A, E>(
         namedProjectsRoot: "/projects",
         isScratchProject: () => Effect.succeed(false),
       }),
-      Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+      Layer.mock(ThreadManagementService.ThreadManagementService)(options.threadManagement ?? {}),
+      layerNewThreadModelTest,
       Layer.mock(SecretRequests.SecretRequests)({
         consume: ({ ref }) => {
           const value = secretsByRef.get(ref);
@@ -1362,6 +1368,38 @@ it.effect(
     );
   },
 );
+
+it.effect("a webhook on a limit-stopped thread sends as ever, without reading the thread", () => {
+  const modes: Array<string> = [];
+  return withService(
+    ({ service }) =>
+      Effect.gen(function* () {
+        const { task } = yield* service.upsert(
+          yield* webhookTaskInput({ threadId: "thread:limited" }),
+        );
+        const accepted = yield* waitForSpan(
+          service.triggerWebhook(requestFor(task)),
+          "ScheduledTaskService.runWebhookDelivery",
+        );
+        assert.equal(accepted._tag === "accepted" && accepted.outcome, "accepted");
+        assert.deepEqual(modes, ["queue"]);
+        const stored = (yield* service.list()).tasks[0]!;
+        assert.equal(stored.lastRunStatus, "succeeded");
+        assert.isNull(stored.lastRunError);
+        assert.equal(stored.runCount, 1);
+      }),
+    {
+      // getThreadRecords stays unimplemented, so reading the thread would fail this test.
+      threadManagement: {
+        sendToThread: (input) =>
+          Effect.sync(() => {
+            modes.push(input.mode);
+            return { delivery: "started" } as never;
+          }),
+      },
+    },
+  );
+});
 
 it.effect("guards bad-signature floods separately from valid run admission", () =>
   withService(({ service, sql }) =>
