@@ -589,6 +589,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       [...ClaudeAdapterV2.CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS].sort(),
       readOnlyToolNames,
     );
+    assert.include(readOnlyToolNames, "mcp__t3-code__t3_usage_limits");
   });
 });
 

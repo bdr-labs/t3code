@@ -1,11 +1,13 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
+import * as Struct from "effect/Struct";
 
 import { AuthMcpClientAccess } from "./auth.ts";
 import {
   ContextTransferId,
   EnvironmentId,
+  ForwardCompatibleArray,
   IsoDateTime,
   MessageId,
   NodeId,
@@ -43,6 +45,7 @@ import {
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { ServerProviderUsageLimits, ServerProviderUsageWindow } from "./providerUsageLimits.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000));
 const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
@@ -636,6 +639,35 @@ export const OrchestratorMcpEnvironmentLinksResult = Schema.Struct({
 });
 export type OrchestratorMcpEnvironmentLinksResult =
   typeof OrchestratorMcpEnvironmentLinksResult.Type;
+
+/** An allowlist: account identity and reset credits on the provider snapshot stay out. */
+export const OrchestratorMcpUsageLimitsResult = Schema.Struct({
+  providers: Schema.Array(
+    Schema.Struct({
+      instanceId: ProviderInstanceId,
+      driver: ProviderDriverKind,
+      displayName: Schema.optional(TrimmedNonEmptyString),
+      plan: Schema.optional(TrimmedNonEmptyString),
+      checkedAt: IsoDateTime,
+      windows: ForwardCompatibleArray(
+        ServerProviderUsageWindow.mapFields(
+          Struct.pick([
+            "id",
+            "kind",
+            "label",
+            "usedPercent",
+            "resetsAt",
+            "resetPending",
+            "windowDurationMins",
+            "checkedAt",
+          ]),
+        ),
+      ),
+      unavailable: ServerProviderUsageLimits.fields.unavailable,
+    }),
+  ),
+});
+export type OrchestratorMcpUsageLimitsResult = typeof OrchestratorMcpUsageLimitsResult.Type;
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),

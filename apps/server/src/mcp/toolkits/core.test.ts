@@ -39,7 +39,9 @@ import {
 
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import * as ProviderAdapterRegistry from "../../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ThreadCommandExecutor from "../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadLaunchService from "../../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
@@ -57,6 +59,7 @@ import * as McpToolAccessTestkit from "../McpToolAccess.testkit.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { dispatchFailure } from "../threadAccess.ts";
 import * as EnvironmentHandlers from "./environment/handlers.ts";
+import { EnvironmentToolkit } from "./environment/tools.ts";
 import * as AttachmentHandlers from "./attachment/handlers.ts";
 import * as PeerForwarding from "../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../peer/PeerLinkRequests.ts";
@@ -489,6 +492,112 @@ const clientScope = (
   issuedAt: 0,
   capabilities: new Set(["orchestration", "worktree", "pull-requests"]),
 });
+
+it.effect("t3_usage_limits reads for a read-only client and never names the account", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const advertised = server.tools.find(({ tool }) => tool.name === "t3_usage_limits")?.tool;
+    expect(advertised?.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
+    expect(advertised?._meta?.["anthropic/alwaysLoad"]).toBeUndefined();
+    const result = yield* server
+      .callTool({ name: "t3_usage_limits", arguments: {} })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, clientScope("read-only")),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toMatchObject({
+      providers: [
+        { instanceId: "claude", plan: "Claude Max Subscription" },
+        { instanceId: "cursor", plan: "API key" },
+      ],
+    });
+    const wire = JSON.stringify(result);
+    for (const leak of [
+      "person@example.com",
+      "keyholder@example.com",
+      "email",
+      "fingerprint-value",
+      "credentialFingerprint",
+      "resetCredits",
+      "credit-id-value",
+      "workspace-id-value",
+      "profile-id-value",
+    ]) {
+      expect(wire).not.toContain(leak);
+    }
+  }).pipe(
+    Effect.provide(
+      McpHttpServer.toolkitRegistration(EnvironmentToolkit, EnvironmentHandlers.layer).pipe(
+        Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(ThreadCommandExecutor.layer),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
+        Layer.provide(
+          Layer.mock(ServerEnvironment.ServerEnvironment)({
+            getDescriptor: Effect.succeed({
+              environmentId: EnvironmentId.make("mcp-core-environment"),
+              label: "Test",
+              platform: { os: "linux", arch: "x64" },
+              serverVersion: "0.0.0",
+              capabilities: { repositoryIdentity: false },
+            }),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([
+              {
+                instanceId: ProviderInstanceId.make("claude"),
+                driver: ProviderDriverKind.make("claudeAgent"),
+                enabled: true,
+                installed: true,
+                version: null,
+                status: "ready",
+                auth: {
+                  status: "authenticated",
+                  label: "Claude Max Subscription",
+                  email: "person@example.com",
+                  workspaceId: "workspace-id-value",
+                  profileId: "profile-id-value",
+                },
+                checkedAt: "2026-11-06T10:00:00.000Z",
+                models: [],
+                slashCommands: [],
+                skills: [],
+                usageLimits: {
+                  checkedAt: "2026-11-06T10:00:00.000Z",
+                  credentialFingerprint: "fingerprint-value",
+                  resetCredits: { availableCount: 2, nextCreditId: "credit-id-value" },
+                  windows: [{ id: "weekly", kind: "weekly", label: "Weekly", usedPercent: 41 }],
+                },
+              },
+              {
+                instanceId: ProviderInstanceId.make("cursor"),
+                driver: ProviderDriverKind.make("cursor"),
+                enabled: true,
+                installed: true,
+                version: null,
+                status: "ready",
+                auth: {
+                  status: "authenticated",
+                  type: "api-key",
+                  label: "Cursor API key (keyholder@example.com)",
+                },
+                checkedAt: "2026-11-06T10:00:00.000Z",
+                models: [],
+                slashCommands: [],
+                skills: [],
+                usageLimits: { checkedAt: "2026-11-06T10:00:00.000Z", windows: [] },
+              },
+            ]),
+          }),
+        ),
+      ),
+    ),
+  ),
+);
 
 it.effect("a client caller targets any thread within its ceiling and cannot act as a thread", () =>
   Effect.gen(function* () {

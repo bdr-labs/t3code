@@ -1,7 +1,14 @@
-import { OrchestratorMcpFailure, type ServerSettings } from "@t3tools/contracts";
+import {
+  OrchestratorMcpFailure,
+  type OrchestratorMcpUsageLimitsResult,
+  type ServerProvider,
+  type ServerSettings,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Struct from "effect/Struct";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as Settings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -29,6 +36,48 @@ export function preferences(settings: ServerSettings) {
     },
   };
 }
+// An absent key stays absent: `undefined` reaches a linked machine as `null`, which its decode refuses.
+const usageLimits = (
+  providers: ReadonlyArray<ServerProvider>,
+): OrchestratorMcpUsageLimitsResult => ({
+  providers: providers.flatMap((provider) => {
+    if (!provider.enabled || !provider.installed) return [];
+    const identity = Struct.pick(provider, ["instanceId", "driver", "displayName"]);
+    if (provider.auth.status === "unauthenticated") {
+      return [
+        {
+          ...identity,
+          checkedAt: provider.checkedAt,
+          windows: [],
+          unavailable: { reason: "probeFailed" as const, message: "Not signed in." },
+        },
+      ];
+    }
+    const limits = provider.usageLimits;
+    if (limits === undefined) return [];
+    // An API key's label carries the name its owner gave it.
+    const plan = provider.auth.type === "api-key" ? "API key" : provider.auth.label;
+    return [
+      {
+        ...identity,
+        ...(plan === undefined ? {} : { plan }),
+        ...Struct.pick(limits, ["checkedAt", "unavailable"]),
+        windows: limits.windows.map((window) =>
+          Struct.pick(window, [
+            "id",
+            "kind",
+            "label",
+            "usedPercent",
+            "resetsAt",
+            "resetPending",
+            "windowDurationMins",
+            "checkedAt",
+          ]),
+        ),
+      },
+    ];
+  }),
+});
 const access = Effect.gen(function* () {
   const context = yield* readCaller();
   const environment = yield* Environment.ServerEnvironment;
@@ -52,6 +101,13 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
         platform: descriptor.platform,
         preferences: preferences(current),
       };
+    }),
+  ),
+  t3_usage_limits: McpToolAccess.reads(() =>
+    Effect.gen(function* () {
+      yield* access;
+      const registry = yield* ProviderRegistry.ProviderRegistry;
+      return usageLimits(yield* registry.getProviders);
     }),
   ),
   t3_environment_preferences_update: McpToolAccess.writesEnvironment((patch, check) =>

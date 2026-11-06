@@ -4,6 +4,7 @@ import {
   ExecutionEnvironmentDescriptor,
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpFailure,
+  OrchestratorMcpUsageLimitsResult,
   ServerSettings,
   ServerSettingsPatch,
 } from "@t3tools/contracts";
@@ -12,6 +13,7 @@ import { Tool, Toolkit } from "effect/ai";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as Settings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
@@ -53,6 +55,16 @@ const EnvironmentReadTool = Tool.make("t3_environment_read", {
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
+const UsageLimitsTool = Tool.make("t3_usage_limits", {
+  ...shared,
+  dependencies: [...shared.dependencies, ProviderRegistry.ProviderRegistry],
+  description:
+    "List each enabled provider instance's plan and usage windows, with percent used and reset time. A window's `id` or `kind` is what `schedule_task` names. A kind means its first listed window; use `id` when a kind repeats. `checkedAt` is when it was read; a failed read keeps the last reading.",
+  parameters: Schema.Struct({ environmentId: OrchestratorMcpEnvironmentTarget }),
+  success: OrchestratorMcpUsageLimitsResult,
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
 const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update", {
   ...shared,
   description:
@@ -67,4 +79,8 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
   }),
   success: Schema.Struct(PreferenceFields),
 }).annotate(Tool.Destructive, true);
-export const EnvironmentToolkit = Toolkit.make(EnvironmentReadTool, EnvironmentPreferencesTool);
+export const EnvironmentToolkit = Toolkit.make(
+  EnvironmentReadTool,
+  UsageLimitsTool,
+  EnvironmentPreferencesTool,
+);

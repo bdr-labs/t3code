@@ -471,6 +471,17 @@ Without `runId`, it selects the newest interruptible run. A terminal run is
 returned unchanged, and a thread with no active provider turn returns
 `no_active_run`.
 
+### `t3_usage_limits`
+
+Registered by the environment toolkit. Lists the plan and usage windows of each
+enabled, installed provider instance that reports limits, as `ProviderRegistry`
+holds them. A failed read keeps the last reading, so `checkedAt` is the only sign
+of its age. A signed-out provider is listed with `unavailable` and no windows,
+whatever it last read; one that reports no limits is left out. The result is an
+allowlist, because the provider snapshot also carries the account email, the
+credential fingerprint and reset credits, none of which an agent gets here. An
+API key's plan reads "API key", since the key's name is its owner's to choose.
+
 ### Scheduled tasks
 
 `schedule_task`, `list_scheduled_tasks`, and `delete_scheduled_task` manage

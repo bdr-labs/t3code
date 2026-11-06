@@ -55,6 +55,7 @@ export type T3McpToolSummaryAction =
   | "environment-link"
   | "environment-unlink"
   | "environment-update"
+  | "usage-limits"
   | "attachment-prepare"
   | "attachment-discard"
   | "attachment-send"
@@ -338,6 +339,7 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     ["Read", "Reading", "Read", "environment preferences"],
     "environment-read",
   ),
+  t3_usage_limits: tool(["Check", "Checking", "Checked", "usage limits"], "usage-limits"),
   t3_environment_links: tool(
     ["List", "Listing", "Listed", "linked environments"],
     "environment-links",

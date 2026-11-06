@@ -117,6 +117,7 @@ const layerAdvertisedTools = McpHttpServer.layerTools.pipe(
 it.effect("only request_secret and schedule_task ask Claude Code to load them up front", () =>
   Effect.gen(function* () {
     const mcp = yield* McpServer.McpServer;
+    expect(mcp.tools.map(({ tool }) => tool.name)).toContain("t3_usage_limits");
     const alwaysLoad = mcp.tools
       .filter(({ tool }) => tool._meta?.["anthropic/alwaysLoad"] !== undefined)
       .map(({ tool }) => [tool.name, tool._meta]);
