@@ -920,6 +920,7 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
       "task_not_found",
       "task_not_cancellable",
       "thread_not_found",
+      "thread_not_started",
       "run_not_found",
       "thread_not_sendable",
       "thread_not_interruptible",

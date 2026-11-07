@@ -218,7 +218,10 @@ export function useComposerMenuItems({
           linkedEnvironments,
           excludeThreadId: activeThreadId,
           query: composerTrigger.query,
-        }),
+        }).map((item) => ({
+          ...item,
+          label: useComposerDraftStore.getState().getDraftTitleByRef(item.thread) ?? item.label,
+        })),
         // An answer to an agent's question carries thread links, not machines.
         ...(questionAttachmentTarget === null && offersMachines
           ? matchComposerEnvironmentItems({

@@ -27,6 +27,9 @@ function ReferenceHighlightChip(props: {
   const draftId = useComposerDraftStore((store) =>
     shell ? null : store.getDraftIdByRef(props.threadRef),
   );
+  const draftTitle = useComposerDraftStore((store) =>
+    shell ? null : store.getDraftTitleByRef(props.threadRef),
+  );
   // Older settled threads are left out of the shell but still have a title on the server.
   const titles = useEnvironmentQuery(
     shell || draftId
@@ -40,7 +43,7 @@ function ReferenceHighlightChip(props: {
     shell?.title.trim() ||
     titles.data?.[threadId] ||
     (draftId
-      ? "Draft, not started yet"
+      ? draftTitle || "Draft, not started yet"
       : shell || titles.isPending
         ? "Untitled thread"
         : "Thread not started or deleted");
@@ -71,7 +74,9 @@ function ReferenceHighlightChip(props: {
           )}
           <ContextChipLabel>{title}</ContextChipLabel>
         </TooltipTrigger>
-        <TooltipPopup side="bottom">{title}</TooltipPopup>
+        <TooltipPopup side="bottom">
+          {draftId && draftTitle ? `Draft "${draftTitle}", not started yet` : title}
+        </TooltipPopup>
       </Tooltip>
       <ContextChipAction
         aria-label={`Remove ${title} highlight`}

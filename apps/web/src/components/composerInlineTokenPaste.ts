@@ -22,7 +22,9 @@ import { readThreadShell } from "~/state/entities";
 /** A chip's name: the thread's title, or a draft's until its thread starts. Otherwise no thread. */
 export const composerThreadTitle = (ref: ScopedThreadRef): string | undefined =>
   readThreadShell(ref)?.title ??
-  (useComposerDraftStore.getState().getDraftIdByRef(ref) ? DRAFT_THREAD_TITLE : undefined);
+  (useComposerDraftStore.getState().getDraftIdByRef(ref)
+    ? (useComposerDraftStore.getState().getDraftTitleByRef(ref) ?? DRAFT_THREAD_TITLE)
+    : undefined);
 
 /** Pasted thread links count as context too, so they become chips like a copied chip does. */
 export function readPastedComposerContext(

@@ -36,10 +36,15 @@ export function MarkdownThreadLink(props: {
       thread === null &&
       store.getDraftIdByRef(scopeThreadRef(environmentId, props.link.threadId)) !== null,
   );
+  const draftTitle = useComposerDraftStore((store) =>
+    thread === null
+      ? store.getDraftTitleByRef(scopeThreadRef(environmentId, props.link.threadId))
+      : null,
+  );
   if (thread === null) {
     if (hasDraft) {
       const ref = scopeThreadRef(environmentId, props.link.threadId);
-      const title = props.label || DRAFT_THREAD_TITLE;
+      const title = draftTitle || props.label || DRAFT_THREAD_TITLE;
       return (
         <ThreadContextChip
           record={{ ...ref, title }}

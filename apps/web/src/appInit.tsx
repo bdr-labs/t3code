@@ -46,6 +46,7 @@ import {
 } from "./hooks/useSettings";
 import { syncBrowserChromeTheme } from "./hooks/useTheme";
 import { startThreadVisitedMigration } from "./hooks/useThreadVisitedMigration";
+import { startDraftThreadReservations } from "./lib/copyThreadReference";
 import { installDesktopPasteAsText } from "./lib/desktopPasteAsText";
 import {
   syncDocumentElectronPlatformClasses,
@@ -227,6 +228,7 @@ export function startAppServices(): AppRouter {
     threadShellAtom: environmentThreadShells.quietThreadShellAtom,
     threadRefsAtom: environmentThreadShells.threadRefsAtom,
   });
+  startDraftThreadReservations();
   subscribeComposerDraftModelReconciliation({
     registry: appAtomRegistry,
     threadShellAtom: environmentThreadShells.threadShellAtom,

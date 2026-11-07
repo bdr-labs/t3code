@@ -927,6 +927,47 @@ describe("composerDraftStore project draft thread mapping", () => {
     );
   });
 
+  it("titles a draft as its first message would, and not before it has one", () => {
+    const store = useComposerDraftStore.getState();
+    const ref = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    expect(store.getDraftTitleByRef(ref)).toBeNull();
+    store.setPrompt(draftId, "   ");
+    expect(store.getDraftTitleByRef(ref)).toBeNull();
+    store.addImage(draftId, makeImage({ id: "img-title", previewUrl: "blob:title" }));
+    expect(store.getDraftTitleByRef(ref)).toBe("Attached image");
+    store.setPrompt(draftId, "Fix   the login\nform");
+    expect(store.getDraftTitleByRef(ref)).toBe("Fix the login form");
+    expect(
+      store.getDraftTitleByRef(scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, threadId)),
+    ).toBeNull();
+  });
+
+  it("keeps a shared reference only while the draft keeps the machine and id it named", () => {
+    const store = useComposerDraftStore.getState();
+    const shared = () => useComposerDraftStore.getState().getDraftSession(draftId)?.referenceShared;
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    expect(shared()).toBeUndefined();
+    store.markDraftReferenceShared(draftId);
+    store.setDraftThreadContext(draftId, { projectRef: otherProjectRef });
+    expect(shared()).toBe(true);
+    store.setDraftThreadContext(draftId, { projectRef: remoteProjectRef });
+    expect(shared()).toBeUndefined();
+
+    store.setDraftThreadContext(draftId, { projectRef });
+    store.markDraftReferenceShared(draftId);
+    expect(
+      partializeComposerDraftStoreState(useComposerDraftStore.getState()).draftThreadsByThreadKey[
+        draftId
+      ]?.referenceShared,
+    ).toBe(true);
+    const sent = useComposerDraftStore.getState().getDraftSession(draftId)!;
+    restoreFailedDraftThread(draftId, sent, threadId);
+    expect(shared()).toBe(true);
+    restoreFailedDraftThread(draftId, sent, otherThreadId);
+    expect(shared()).toBeUndefined();
+  });
+
   it("clears only matching project draft mapping entries", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, { threadId });

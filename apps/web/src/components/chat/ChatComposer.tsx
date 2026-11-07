@@ -1,5 +1,6 @@
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
+import { shareThreadReference } from "../../lib/copyThreadReference";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { BackgroundThreadContext } from "./backgroundThread";
 import {
@@ -2009,6 +2010,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         addComposerDraftThreadContexts(attachmentDraftTarget, [record], {
           appendReference: false,
         });
+        shareThreadReference(item.thread);
         setComposerHighlightedItemId(null);
       }
       return;

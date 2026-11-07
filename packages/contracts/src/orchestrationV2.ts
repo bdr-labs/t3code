@@ -3623,6 +3623,8 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   getThreadFamily: "orchestration.getThreadFamily",
   getThreadReferences: "orchestration.getThreadReferences",
+  reserveDraftThread: "orchestration.reserveDraftThread",
+  releaseDraftThread: "orchestration.releaseDraftThread",
   getThreadTitles: "orchestration.getThreadTitles",
   getWorktreeThreadIds: "orchestration.getWorktreeThreadIds",
   getOlderSettledThreads: "orchestration.getOlderSettledThreads",
@@ -3754,6 +3756,21 @@ export const OrchestrationV2GetThreadTitlesInput = Schema.Struct({
 
 /** Titles of the requested threads that exist, archived ones included. Deleted and unknown ids are absent. */
 export const OrchestrationV2ThreadTitles = Schema.Record(ThreadId, Schema.String);
+
+/** A draft whose reference left its client, so an agent told of it learns what it is before it starts. */
+export const OrchestrationV2ReserveDraftThreadInput = Schema.Struct({
+  threadId: ThreadId,
+  title: Schema.String.check(Schema.isMaxLength(200)),
+  projectTitle: Schema.NullOr(Schema.String.check(Schema.isMaxLength(200))),
+});
+
+export class OrchestrationV2DraftReservationError extends Schema.TaggedError<OrchestrationV2DraftReservationError>()(
+  "OrchestrationV2DraftReservationError",
+  {
+    message: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
 
 export const OrchestrationV2GetWorktreeThreadIdsInput = Schema.Struct({
   worktreePath: TrimmedNonEmptyString,
@@ -4286,6 +4303,14 @@ export const OrchestrationV2RpcSchemas = {
       ),
     }),
     output: Schema.Struct({ mentions: Schema.Array(ThreadId), waits: Schema.Array(ThreadId) }),
+  },
+  reserveDraftThread: {
+    input: OrchestrationV2ReserveDraftThreadInput,
+    output: Schema.Void,
+  },
+  releaseDraftThread: {
+    input: Schema.Struct({ threadId: ThreadId }),
+    output: Schema.Void,
   },
   getThreadTitles: {
     input: OrchestrationV2GetThreadTitlesInput,

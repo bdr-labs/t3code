@@ -418,9 +418,16 @@ hosted app offers the desktop app, the mobile app, or itself.
 
 A client picks a draft's thread id when the draft opens and the server first hears
 of it with the first message, so a link to a draft is valid before the thread is.
-Reading, sending to or waiting on an id with no record fails with `thread_not_found`
-and says the thread may be a draft not started yet or may have been deleted: shell
-lookups hide deleted threads, so the server cannot tell the two apart.
+When the draft's reference leaves its client (copied, or picked into a message), the
+client reserves the id on the draft's own server with the title its first message would
+give it and its project, and keeps the title current at most every 2 seconds. Reading,
+sending to or waiting on a reserved id fails with `thread_not_started`, naming the
+draft, its title and its project. Any other id with no record fails with
+`thread_not_found` and says the thread may be a draft not started yet or may have
+been deleted: shell lookups hide deleted threads, so the server cannot tell the two
+apart. Reservations live in `thread_draft_reservations`, created at startup rather than
+by a numbered migration. Startup drops rows whose thread now exists, deleted or not,
+and rows not rewritten in 30 days; discarding a shared draft releases its row.
 
 List and read results report `snoozed` and `snoozedUntil`, and
 `t3_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
@@ -613,6 +620,7 @@ interaction_mode_escalation_denied
 task_not_found
 task_not_cancellable
 thread_not_found
+thread_not_started
 run_not_found
 thread_not_sendable
 thread_not_interruptible

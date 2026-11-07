@@ -65,6 +65,8 @@ opens the thread. Only someone connected to the machine that runs the thread can
 
 A new chat already has its thread's id, shown beside its title in the header on wider windows.
 Click it, or use **Copy thread**, to mention the thread before you send anything. The link starts working when you
-send the first message. Until then it opens the draft on the client that holds it, and other
-clients and agents see that the thread has not started or was deleted. If you move the draft to
-another machine after copying, the link still names the first one.
+send the first message. Until then it opens the draft on the client that holds it, other clients
+see that the thread has not started or was deleted, and an agent is told it is a draft that has not
+started, with the title its first message would give it. If you move the draft to another machine
+after copying, the link still names the first one, and an agent there is told it has not started
+or was deleted.

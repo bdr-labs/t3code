@@ -230,6 +230,7 @@ import {
   OrchestrationV2StopWorkflowError,
   OrchestrationV2ForceStopThreadError,
   OrchestrationV2DispatchCommandError,
+  OrchestrationV2DraftReservationError,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2CommandOutputError,
   OrchestrationV2GetThreadProjectionError,
@@ -1820,6 +1821,24 @@ const WsOrchestrationV2GetThreadReferencesRpc = Rpc.make(
   },
 );
 
+const WsOrchestrationV2ReserveDraftThreadRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.reserveDraftThread,
+  {
+    payload: OrchestrationV2RpcSchemas.reserveDraftThread.input,
+    success: OrchestrationV2RpcSchemas.reserveDraftThread.output,
+    error: Schema.Union([OrchestrationV2DraftReservationError, EnvironmentAuthorizationError]),
+  },
+);
+
+const WsOrchestrationV2ReleaseDraftThreadRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.releaseDraftThread,
+  {
+    payload: OrchestrationV2RpcSchemas.releaseDraftThread.input,
+    success: OrchestrationV2RpcSchemas.releaseDraftThread.output,
+    error: Schema.Union([OrchestrationV2DraftReservationError, EnvironmentAuthorizationError]),
+  },
+);
+
 const WsOrchestrationV2GetThreadTitlesRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.getThreadTitles, {
   payload: OrchestrationV2RpcSchemas.getThreadTitles.input,
   success: OrchestrationV2RpcSchemas.getThreadTitles.output,
@@ -2244,6 +2263,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2GetArchivedShellSnapshotRpc,
   WsOrchestrationV2GetThreadFamilyRpc,
   WsOrchestrationV2GetThreadReferencesRpc,
+  WsOrchestrationV2ReserveDraftThreadRpc,
+  WsOrchestrationV2ReleaseDraftThreadRpc,
   WsOrchestrationV2GetThreadTitlesRpc,
   WsOrchestrationV2GetWorktreeThreadIdsRpc,
   WsOrchestrationV2GetOlderSettledThreadsRpc,

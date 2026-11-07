@@ -59,6 +59,7 @@ import {
   SETTINGS_SECRET_REFERENCES_CAPABILITY,
   ORCHESTRATION_PROTOCOL_VERSION,
   OrchestrationV2DispatchCommandError,
+  OrchestrationV2DraftReservationError,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2ThreadLaunchError,
@@ -170,6 +171,7 @@ import { dedupeSnapshotBodies } from "@t3tools/shared/orchestrationV2DedupedBodi
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as ThreadReferences from "./orchestration-v2/ThreadReferences.ts";
+import * as ThreadDraftReservations from "./persistence/ThreadDraftReservations.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
 import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
@@ -2130,6 +2132,26 @@ export const layerWsRpc = (
               (cause) =>
                 new OrchestrationV2GetShellSnapshotError({
                   message: "Failed to load thread references",
+                  cause,
+                }),
+            ),
+          ),
+        [ORCHESTRATION_V2_WS_METHODS.reserveDraftThread]: (input) =>
+          ThreadDraftReservations.reserveThreadDraft(sql, input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationV2DraftReservationError({
+                  message: "Failed to reserve the draft's thread",
+                  cause,
+                }),
+            ),
+          ),
+        [ORCHESTRATION_V2_WS_METHODS.releaseDraftThread]: (input) =>
+          ThreadDraftReservations.releaseThreadDraft(sql, input.threadId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationV2DraftReservationError({
+                  message: "Failed to release the draft's thread",
                   cause,
                 }),
             ),

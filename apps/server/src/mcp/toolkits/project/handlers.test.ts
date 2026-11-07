@@ -226,6 +226,7 @@ const clientLaunchHarness = (input: {
               } as unknown as OrchestrationV2ThreadShell),
         );
       },
+      getDraftReservation: () => Effect.succeed(null),
     }),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
       checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),

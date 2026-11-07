@@ -329,9 +329,12 @@ it again, or its **×** below the sidebar's search box, to remove it. To open th
 window, tapping a chip opens it.
 
 A draft can be context before it starts. On web and desktop, type `@draft`, `@new`, or part of its
-project's name to pick one, or copy it from the header of the new chat. Its chip opens the draft and
-takes the thread's title when you send its first message. Until then, an agent that tries to read it
-is told it may not have started yet or may have been deleted.
+project's name to pick one, or copy it from the header of the new chat. Its chip highlights the
+draft and opens it like any thread chip, and shows the title its first message would give it, then
+the thread's own title once you send that message. Picking or copying a draft tells its machine the
+draft's title and project, so an agent that tries to read it is told it is a draft that has not
+started and what it is called. A draft you have not shared stays on your device, and an agent given
+its id is told it may not have started yet or may have been deleted.
 
 A thread from a linked machine, picked, pasted or dropped, stays a reference that the agent reads
 on that machine. A pasted link to a thread on any other machine stays a link. Dropping a thread

@@ -51,6 +51,7 @@ import type {
   EnvironmentShellState,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
+import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import { waitForDraftHeroTransition } from "./components/chat/draftHeroTransition";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
 import { readThreadPreviewState } from "./previewStateStore";
@@ -117,6 +118,18 @@ export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
 
 /** A draft's title until its first message names the thread. */
 export const DRAFT_THREAD_TITLE = "New thread";
+
+/** The title a draft's first message would give its thread; null while that is the default. */
+export function draftThreadTitle(
+  draft: Pick<ComposerThreadDraftState, "prompt" | "images" | "files"> | null | undefined,
+): string | null {
+  if (!draft) return null;
+  const title = deriveThreadTitleSeed({
+    text: draft.prompt,
+    attachments: [...draft.images, ...draft.files],
+  });
+  return title === DRAFT_THREAD_TITLE ? null : title;
+}
 
 export const DraftId = Schema.String.pipe(Schema.brand("DraftId"));
 export type DraftId = typeof DraftId.Type;
@@ -322,6 +335,7 @@ const PersistedDraftThreadState = Schema.Struct({
   worktreePath: Schema.NullOr(Schema.String),
   envMode: DraftThreadEnvModeSchema,
   startFromOrigin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  referenceShared: Schema.optionalKey(Schema.Boolean),
   promotedTo: Schema.optionalKey(
     Schema.NullOr(
       Schema.Struct({
@@ -415,6 +429,8 @@ export interface DraftSessionState {
   worktreePath: string | null;
   envMode: DraftThreadEnvMode;
   startFromOrigin: boolean;
+  /** Its reference left this client, so its server keeps its title for agents until it starts. */
+  referenceShared?: boolean;
   promotedTo?: ScopedThreadRef | null;
 }
 
@@ -449,6 +465,8 @@ interface ComposerDraftStoreState {
   getDraftSession: (draftId: DraftId) => DraftSessionState | null;
   getDraftSessionByRef: (threadRef: ScopedThreadRef) => DraftSessionState | null;
   getDraftIdByRef: (threadRef: ScopedThreadRef) => DraftId | null;
+  /** The title a draft's first message would give its thread; null while that is the default. */
+  getDraftTitleByRef: (threadRef: ScopedThreadRef) => string | null;
   getPromotedDraftRedirect: (draftId: DraftId) => ScopedThreadRef | null;
   getDraftThreadByRef: (threadRef: ScopedThreadRef) => DraftThreadState | null;
   getDraftThread: (threadRef: ComposerThreadTarget) => DraftThreadState | null;
@@ -508,6 +526,7 @@ interface ComposerDraftStoreState {
     threadRef: ComposerThreadTarget,
   ) => void;
   markDraftThreadPromoting: (threadRef: ComposerThreadTarget, promotedTo?: ScopedThreadRef) => void;
+  markDraftReferenceShared: (draftId: DraftId) => void;
   finalizePromotedDraftThread: (threadRef: ComposerThreadTarget) => void;
   clearDraftThread: (threadRef: ComposerThreadTarget) => void;
   setStickyModelSelection: (modelSelection: ModelSelection | null | undefined) => void;
@@ -1532,6 +1551,12 @@ function createDraftThreadState(
     envMode:
       options?.envMode ?? (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local")),
     startFromOrigin: nextStartFromOrigin,
+    // Sharing named this environment and thread id; a draft moved off either is a new reference.
+    ...(existingThread?.referenceShared &&
+    existingThread.threadId === threadId &&
+    existingThread.environmentId === projectRef.environmentId
+      ? { referenceShared: true }
+      : {}),
     promotedTo: null,
   };
 }
@@ -1566,6 +1591,7 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.worktreePath === right.worktreePath &&
     left.envMode === right.envMode &&
     left.startFromOrigin === right.startFromOrigin &&
+    left.referenceShared === right.referenceShared &&
     scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
   );
 }
@@ -1724,6 +1750,7 @@ function normalizePersistedDraftThreads(
           : candidateDraftThread.loadBalancedEnvironmentId === null
             ? { loadBalancedEnvironmentId: null }
             : {}),
+        ...(candidateDraftThread.referenceShared === true ? { referenceShared: true } : {}),
         promotedTo,
       };
     }
@@ -2487,6 +2514,7 @@ function toHydratedDraftThreadState(
             persistedDraftThread.loadBalancedEnvironmentId as EnvironmentId | null,
         }
       : {}),
+    ...(persistedDraftThread.referenceShared ? { referenceShared: true } : {}),
     promotedTo: persistedDraftThread.promotedTo
       ? scopeThreadRef(
           persistedDraftThread.promotedTo.environmentId as EnvironmentId,
@@ -2582,6 +2610,10 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             }
           }
           return null;
+        },
+        getDraftTitleByRef: (threadRef) => {
+          const draftId = get().getDraftIdByRef(threadRef);
+          return draftId === null ? null : draftThreadTitle(get().draftsByThreadKey[draftId]);
         },
         getPromotedDraftRedirect: (draftId) => get().promotedDraftRedirects[draftId] ?? null,
         getDraftThread: (threadRef) => {
@@ -2769,6 +2801,10 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               envMode:
                 options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
               startFromOrigin: nextStartFromOrigin,
+              ...(existing.referenceShared &&
+              nextProjectRef.environmentId === existing.environmentId
+                ? { referenceShared: true }
+                : {}),
               promotedTo: existing.promotedTo ?? null,
             };
             const isUnchanged =
@@ -2835,6 +2871,20 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               return state;
             }
             return removeDraftThreadReferences(state, threadKey);
+          });
+        },
+        markDraftReferenceShared: (draftId) => {
+          set((state) => {
+            const existing = state.draftThreadsByThreadKey[draftId];
+            if (!existing || existing.referenceShared || isDraftThreadPromoting(existing)) {
+              return state;
+            }
+            return {
+              draftThreadsByThreadKey: {
+                ...state.draftThreadsByThreadKey,
+                [draftId]: { ...existing, referenceShared: true },
+              },
+            };
           });
         },
         markDraftThreadPromoting: (threadRef, promotedTo) => {
@@ -4448,17 +4498,25 @@ export function restoreFailedDraftThread(
   draftThread: DraftThreadState,
   threadId: ThreadId,
 ): void {
-  useComposerDraftStore.setState((state) => ({
-    draftThreadsByThreadKey: {
-      ...state.draftThreadsByThreadKey,
-      [draftId]: {
-        ...(state.draftThreadsByThreadKey[draftId] ?? draftThread),
-        threadId,
-        ...(threadId !== draftThread.threadId ? { createdAt: new Date().toISOString() } : {}),
-        promotedTo: null,
+  useComposerDraftStore.setState((state) => {
+    const { referenceShared, ...current } = state.draftThreadsByThreadKey[draftId] ?? draftThread;
+    return {
+      draftThreadsByThreadKey: {
+        ...state.draftThreadsByThreadKey,
+        [draftId]: {
+          ...current,
+          threadId,
+          // A new id is a reference nobody has been given.
+          ...(threadId !== draftThread.threadId
+            ? { createdAt: new Date().toISOString() }
+            : referenceShared
+              ? { referenceShared }
+              : {}),
+          promotedTo: null,
+        },
       },
-    },
-  }));
+    };
+  });
 }
 
 export function finalizePromotedDraftThreadByRef(threadRef: ScopedThreadRef): void {

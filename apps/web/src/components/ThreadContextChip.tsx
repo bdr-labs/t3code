@@ -32,6 +32,9 @@ export function ThreadContextChip(props: {
   const draftId = useComposerDraftStore((store) =>
     shell ? null : store.getDraftIdByRef({ environmentId, threadId }),
   );
+  const draftTitle = useComposerDraftStore((store) =>
+    shell ? null : store.getDraftTitleByRef({ environmentId, threadId }),
+  );
   const threadKey = scopedThreadKey({ environmentId, threadId });
   // A chip for a related thread stays plain: only mentions of the active reference stand out.
   const isTarget = useReferenceHighlightRole(threadKey) === "target";
@@ -46,13 +49,15 @@ export function ThreadContextChip(props: {
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- no pointerleave fires for a chip that unmounts under the pointer, and the shared hover would stick
   useEffect(() => () => leave({ environmentId, threadId }), [environmentId, threadId]);
   const project = useProject(shell ? scopeProjectRef(environmentId, shell.projectId) : null);
-  const title = shell?.title?.trim() || props.record.title;
+  const title = shell?.title?.trim() || draftTitle || props.record.title;
   const status = props.unreadable
     ? "On another machine, so this machine's agent can't read it. Remove it or switch back to send."
     : shell
       ? null
       : draftId
-        ? "Draft, not started yet."
+        ? draftTitle
+          ? `Draft "${draftTitle}", not started yet.`
+          : "Draft, not started yet."
         : "Thread not started or deleted.";
   const openHint = `${isMacPlatform(navigator.platform) ? "⌘" : "Ctrl"}-click to open.`;
   const gesture = isPhone

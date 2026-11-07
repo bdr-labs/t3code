@@ -23,23 +23,38 @@ import * as McpInvocationContext from "./McpInvocationContext.ts";
  * hold; the miss only names a live thread the caller could read by its full id.
  */
 // A client picks a draft's id when the draft opens and this server first hears of it with the first
-// message. The shell lookup also hides deleted threads, so the two cannot be told apart here.
+// message, or earlier when the client reserves it on sharing it. The shell lookup also hides deleted
+// threads, so an unreserved draft and a deleted thread cannot be told apart here.
 const NO_RECORD_HINT =
   "It may be a draft that has not started, which has no record until its first message is sent, or it may have been deleted.";
 
 export const threadNotFound = Effect.fn("OrchestratorMcpService.threadNotFound")(function* (
-  threads: Pick<ThreadManagement.ThreadManagementService["Service"], "getThreadShell">,
+  threads: Pick<
+    ThreadManagement.ThreadManagementService["Service"],
+    "getThreadShell" | "getDraftReservation"
+  >,
   threadId: ThreadId,
   message: string,
 ) {
   const prefixed = ThreadId.make(`mcp:${threadId}`);
   const shell = yield* threads.getThreadShell(prefixed).pipe(Effect.orElseSucceed(() => null));
+  if (shell !== null && shell.deletedAt === null) {
+    return yield* new OrchestratorMcpFailure({
+      code: "thread_not_found",
+      message: `${message} Did you mean \`${prefixed}\`?`,
+    });
+  }
+  const draft = yield* threads.getDraftReservation(threadId).pipe(Effect.orElseSucceed(() => null));
+  if (draft !== null) {
+    const project = draft.projectTitle === null ? "" : `, in project "${draft.projectTitle}"`;
+    return yield* new OrchestratorMcpFailure({
+      code: "thread_not_started",
+      message: `Thread ${threadId} is a draft that has not started: "${draft.title}"${project}. It has no messages until its first one is sent; ask the person to send it, or carry on without it.`,
+    });
+  }
   return yield* new OrchestratorMcpFailure({
     code: "thread_not_found",
-    message:
-      shell === null || shell.deletedAt !== null
-        ? `${message} ${NO_RECORD_HINT}`
-        : `${message} Did you mean \`${prefixed}\`?`,
+    message: `${message} ${NO_RECORD_HINT}`,
   });
 });
 

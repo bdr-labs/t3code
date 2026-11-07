@@ -55,6 +55,8 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
+import type * as SqlError from "effect/sql/SqlError";
 
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -66,6 +68,7 @@ import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimi
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ThreadDraftReservations from "../persistence/ThreadDraftReservations.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
@@ -422,6 +425,10 @@ export interface ThreadManagementServiceShape {
   readonly getThreadShell: Orchestrator.OrchestratorV2["Service"]["getThreadShell"];
   readonly listAppOwnedChildThreadIds: Orchestrator.OrchestratorV2["Service"]["listAppOwnedChildThreadIds"];
   readonly getThreadTitles: Orchestrator.OrchestratorV2["Service"]["getThreadTitles"];
+  /** A draft a client shared before its thread starts; null once the thread exists. */
+  readonly getDraftReservation: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ThreadDraftReservations.ThreadDraftReservation | null, SqlError.SqlError>;
   /** Omit `projectId` to list every project's threads. Side chats are never listed. */
   readonly listProjectThreads: (input: {
     readonly projectId?: ProjectId | undefined;
@@ -578,6 +585,8 @@ const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+  // Optional so the many test layers built without a database keep building; a server has one.
+  const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
 
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =
     (input) =>
@@ -1540,6 +1549,13 @@ const make = Effect.gen(function* () {
       },
     ),
     getThreadTitles: orchestrator.getThreadTitles,
+    getDraftReservation: Effect.fn("ThreadManagementService.getDraftReservation")(
+      function (threadId) {
+        return Option.isSome(sql)
+          ? ThreadDraftReservations.findThreadDraft(sql.value, threadId)
+          : Effect.succeed(null);
+      },
+    ),
     listProjectThreads,
     sendToThread,
     assertProviderInstanceEnabled,

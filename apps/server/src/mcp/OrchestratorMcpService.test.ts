@@ -3303,6 +3303,7 @@ describe("OrchestratorMcpService thread lookup", () => {
           Layer.mock(ThreadManagementService.ThreadManagementService)({
             getThreadShell: (threadId) =>
               Effect.succeed(shells.find((shell) => shell.id === threadId) ?? null),
+            getDraftReservation: () => Effect.succeed(null),
             sendToThread: () => Ref.update(sent, (count) => count + 1).pipe(Effect.as({} as never)),
             ...overrides,
           }),
@@ -3318,7 +3319,10 @@ describe("OrchestratorMcpService thread lookup", () => {
         ),
       ),
     );
-  const failuresFor = (shells: ReadonlyArray<OrchestrationV2ThreadShell>) =>
+  const failuresFor = (
+    shells: ReadonlyArray<OrchestrationV2ThreadShell>,
+    overrides: Partial<ThreadManagementService.ThreadManagementService["Service"]> = {},
+  ) =>
     Effect.gen(function* () {
       const sent = yield* Ref.make(0);
       return yield* Effect.gen(function* () {
@@ -3329,8 +3333,12 @@ describe("OrchestratorMcpService thread lookup", () => {
           .pipe(Effect.flip);
         const wait = yield* mcp.waitForThread(client, { threadId: bareId }).pipe(Effect.flip);
         return { read, send, wait, sends: yield* Ref.get(sent) };
-      }).pipe(Effect.provide(service(shells, sent)));
+      }).pipe(Effect.provide(service(shells, sent, overrides)));
     });
+  const reservedAs = (projectTitle: string | null) => ({
+    getDraftReservation: (threadId: ThreadId) =>
+      Effect.succeed(threadId === bareId ? { title: "Fix the login form", projectTitle } : null),
+  });
 
   it.effect("points a bare uuid at the mcp: thread it belongs to", () =>
     Effect.gen(function* () {
@@ -3358,6 +3366,50 @@ describe("OrchestratorMcpService thread lookup", () => {
       assert.equal(send.message, notFound);
       assert.equal(wait.code, "thread_not_found");
       assert.equal(wait.message, notFound);
+    }),
+  );
+
+  it.effect("names a shared draft that has not started, with its title and project", () =>
+    Effect.gen(function* () {
+      const { read, send, wait, sends } = yield* failuresFor([], reservedAs("t3code"));
+      for (const error of [read, send, wait]) {
+        assert.equal(error.code, "thread_not_started");
+        assert.equal(
+          error.message,
+          `Thread ${bareId} is a draft that has not started: "Fix the login form", in project "t3code". It has no messages until its first one is sent; ask the person to send it, or carry on without it.`,
+        );
+      }
+      assert.equal(sends, 0);
+      const { read: noProject } = yield* failuresFor([], reservedAs(null));
+      assert.include(noProject.message, `"Fix the login form". It has no messages`);
+    }),
+  );
+
+  it.effect("still points a bare uuid at its live mcp: thread over a reservation", () =>
+    Effect.gen(function* () {
+      const { read } = yield* failuresFor([launched], reservedAs("t3code"));
+      assert.equal(read.code, "thread_not_found");
+      assert.include(read.message, `mcp:${bareId}`);
+    }),
+  );
+
+  it.effect("reads a live thread normally whatever a reservation for its id says", () =>
+    Effect.gen(function* () {
+      const live = liveThreadShell(bareId);
+      const sent = yield* Ref.make(0);
+      const result = yield* Effect.gen(function* () {
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* mcp.waitForThread(client, { threadId: bareId });
+      }).pipe(
+        Effect.provide(
+          service([live], sent, {
+            ...reservedAs("t3code"),
+            getProjectThreadRecords: () => Effect.succeed(idleThreadProjection(live) as never),
+            waitForThread: () => Effect.succeed({ threadId: bareId, run: null, timedOut: false }),
+          }),
+        ),
+      );
+      assert.equal(result.status, "idle");
     }),
   );
 

@@ -88,6 +88,8 @@ describe("composerThreadTitle", () => {
       clipboard({ "text/plain": threadChipCopyTarget(thread, "ignored").value }),
     );
     expect(fragment?.records).toMatchObject([{ kind: "thread", title: "New thread" }]);
+    useComposerDraftStore.getState().setPrompt(DraftId.make("draft-1"), "Fix the login form");
+    expect(composerThreadTitle(thread)).toBe("Fix the login form");
     closeDraft();
   });
 });
