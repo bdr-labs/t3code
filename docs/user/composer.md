@@ -317,9 +317,16 @@ the same server, or from a machine it links to while the Linked environments bet
 show the machine's name. On web and desktop you can also drag a thread out of the sidebar and
 drop it on the composer; a multi-selection drops together. On any client, **Copy thread** copies a
 link to the thread that pastes into a composer as its chip. The chip shows the thread's
-current title and opens it when selected. Your prompt only carries a reference: the agent reads the thread's
+current title. Your prompt only carries a reference: the agent reads the thread's
 history on demand, so attaching a long thread costs nothing until the agent looks. Attaching a
 thread does not change it, and the agent cannot send messages to it unless you ask.
+
+On web and desktop, hover a thread chip, in the composer or in a message, to highlight that thread
+in the sidebar for as long as the pointer stays on it. Click the chip to keep the highlight in the
+thread you are in: it hides while you work in another thread and comes back when you return. Click
+it again, or its **×** below the sidebar's search box, to remove it. To open the thread instead,
+`Cmd`-click on macOS or `Ctrl`-click elsewhere; a middle click also opens it. In a phone-width
+window, tapping a chip opens it.
 
 A draft can be context before it starts. On web and desktop, type `@draft`, `@new`, or part of its
 project's name to pick one, or copy it from the header of the new chat. Its chip opens the draft and

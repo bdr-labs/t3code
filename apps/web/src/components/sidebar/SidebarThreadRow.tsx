@@ -1067,11 +1067,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     shouldRecede &&
       (status === "preparing" || status === "working") &&
       "opacity-70 transition-opacity hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none",
-    // A gradient tints over the row's own background, so an active row still reads as active.
+    // A ring only, so the row's own status, draft and active colours show unchanged underneath.
     referenceRole === "target" &&
-      "bg-linear-to-b from-(--context-chip-thread)/15 to-(--context-chip-thread)/15 ring-2 ring-inset ring-(--context-chip-thread) light:ring-2 light:ring-(--context-chip-thread)",
-    referenceRole === "related" && "ring-1 ring-inset ring-primary/50 light:ring-primary/50",
-    referenceRole === "related" && !props.isActive && !isSelected && "bg-sidebar-row-hover",
+      "ring-1 ring-inset ring-(--context-chip-thread)/60 light:ring-(--context-chip-thread)/60",
+    referenceRole === "related" && "ring-1 ring-inset ring-primary/25 light:ring-primary/25",
     isFileDragOver && "ring-1 ring-inset ring-primary/70",
     isFileDragOver && !props.isActive && !isSelected && "bg-sidebar-row-hover",
     props.sortable?.isDragging &&
@@ -1158,7 +1157,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     : "text-secondary-label/70",
             ),
         isRegeneratingTitle && "opacity-55",
-        referenceRole === "target" && "font-medium text-foreground",
       )}
       dir={textDirection(thread.title)}
     >

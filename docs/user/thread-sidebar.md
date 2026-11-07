@@ -61,12 +61,14 @@ and worktree while you stay in the new thread composer. This requires a Git proj
 ## See references to a thread
 
 On web and desktop, hover a thread link or focus it with the keyboard to highlight
-its row in the sidebar, with a second, quieter highlight on visible threads that
-mention it or wait for it. Click the link to open the thread and keep those highlights
-while you move between threads. Each clicked link becomes a chip below the search box,
-and you can keep several at once. Mentions of a highlighted thread also stand out inside
-any thread you open. Select a chip to return to that thread, or its **×** to stop
-highlighting it. Hover a highlighted thread's own row for its counts, including matches
+its row in the sidebar, with a second, quieter ring on visible threads that
+mention it or wait for it. Click the link to keep those highlights in the thread you
+are in; `Cmd`-click on macOS or `Ctrl`-click elsewhere opens it. Each kept link becomes
+a chip below the search box, and you can keep several. They belong to that thread: they
+hide while you are in another one and return when you come back, until you reload.
+Mentions of a highlighted thread also stand out in the conversation. Select a chip to
+open its thread, or click the link again or the chip's **×** to stop highlighting it.
+Hover a highlighted thread's own row for its counts, including matches
 in collapsed sections. Offline machines may leave results incomplete. On mobile, touch
 and hold a thread link and choose **Show references** to see the related threads.
 

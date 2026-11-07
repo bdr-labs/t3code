@@ -9,6 +9,7 @@ import {
   classifyThreadReferences,
   referenceActivitySignal,
   referenceHighlightRole,
+  roleAtom,
   threadReferenceHighlight,
 } from "./threadReferenceHighlight";
 
@@ -20,40 +21,99 @@ const a = ref("thread-a");
 const b = ref("thread-b");
 const active = () => appAtomRegistry.get(activeThreadReferencesAtom);
 
-it("keeps every pinned reference until it is removed, whatever the hover does", () => {
-  const highlight = threadReferenceHighlight;
-  highlight.clear();
+const highlight = threadReferenceHighlight;
+const reset = (sessionKey: string | null) =>
+  appAtomRegistry.set(activeThreadReferencesAtom, {
+    hovered: null,
+    sessionKey,
+    pinnedBySession: new Map(),
+  });
+const sessionA = scopedThreadKey(ref("session-a"));
+const sessionB = scopedThreadKey(ref("session-b"));
+const pinned = () => {
+  const state = active();
+  return (state.sessionKey && state.pinnedBySession.get(state.sessionKey)) || [];
+};
 
-  highlight.enter(a);
-  highlight.pin(a);
-  highlight.pin(b);
-  highlight.pin(a);
-  highlight.leave(a);
-  expect(active()).toEqual({ hovered: null, pinned: [a, b] });
+it("keeps pins per session: another session hides them and returning restores them", () => {
+  reset(sessionA);
+  const unmount = appAtomRegistry.mount(activeTargetsAtom);
+  const targets = () => appAtomRegistry.get(activeTargetsAtom);
+  try {
+    highlight.togglePinned(a);
+    highlight.togglePinned(b);
+    expect(targets()).toEqual([a, b]);
 
-  highlight.enter(ref("thread-c"));
-  expect(active().pinned).toEqual([a, b]);
-  highlight.leave(a);
-  expect(active().hovered).toEqual(ref("thread-c"));
+    highlight.setSession(sessionB);
+    expect(targets()).toEqual([]);
+    highlight.togglePinned(b);
+    expect(targets()).toEqual([b]);
 
-  highlight.unpin(a);
-  expect(active().pinned).toEqual([b]);
+    highlight.setSession(sessionA);
+    expect(targets()).toEqual([a, b]);
+    highlight.togglePinned(a);
+    expect(targets()).toEqual([b]);
+    highlight.unpin(b);
+    expect(targets()).toEqual([]);
+    expect([...active().pinnedBySession.keys()]).toEqual([sessionB]);
+
+    highlight.setSession(null);
+    highlight.togglePinned(a);
+    expect(targets()).toEqual([]);
+    expect([...active().pinnedBySession.keys()]).toEqual([sessionB]);
+  } finally {
+    unmount();
+  }
+});
+
+it("clears only the current session's pins and leaves the hover alone", () => {
+  reset(sessionA);
   highlight.togglePinned(a);
   highlight.togglePinned(b);
-  expect(active().pinned).toEqual([a]);
+  highlight.setSession(sessionB);
+  highlight.togglePinned(a);
+  highlight.enter(b);
 
   highlight.clear();
-  expect(active()).toEqual({ hovered: null, pinned: [] });
+  expect(pinned()).toEqual([]);
+  expect(active().hovered).toEqual(b);
+  highlight.setSession(sessionA);
+  expect(pinned()).toEqual([a, b]);
+
+  highlight.leave(a);
+  expect(active().hovered).toEqual(b);
+  highlight.leave(b);
+  expect(active().hovered).toBeNull();
+});
+
+it("tells a row about a role change only when its own role changes", () => {
+  reset(sessionA);
+  const listener = vi.fn();
+  const rowKey = scopedThreadKey(a);
+  const unmount = appAtomRegistry.subscribe(roleAtom(rowKey), listener);
+  try {
+    highlight.togglePinned(b);
+    highlight.setSession(sessionB);
+    highlight.setSession(sessionA);
+    expect(listener).not.toHaveBeenCalled();
+
+    highlight.togglePinned(a);
+    expect(appAtomRegistry.get(roleAtom(rowKey))).toBe("target");
+    highlight.setSession(sessionB);
+    expect(appAtomRegistry.get(roleAtom(rowKey))).toBeNull();
+    expect(listener).toHaveBeenCalledTimes(2);
+  } finally {
+    unmount();
+  }
 });
 
 it("activates a hover after it rests 200ms and ends it as soon as the pointer leaves", () => {
   vi.useFakeTimers();
-  const highlight = threadReferenceHighlight;
-  highlight.clear();
+  reset(sessionA);
   const unmount = appAtomRegistry.mount(activeTargetsAtom);
   const targets = () => appAtomRegistry.get(activeTargetsAtom);
   try {
-    highlight.pin(a);
+    highlight.togglePinned(a);
     highlight.enter(b);
     vi.advanceTimersByTime(199);
     expect(targets()).toEqual([a]);
@@ -68,7 +128,7 @@ it("activates a hover after it rests 200ms and ends it as soon as the pointer le
     expect(targets()).toEqual([a]);
   } finally {
     unmount();
-    highlight.clear();
+    reset(null);
     vi.useRealTimers();
   }
 });
