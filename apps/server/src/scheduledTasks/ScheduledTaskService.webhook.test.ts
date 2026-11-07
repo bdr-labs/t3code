@@ -1401,6 +1401,39 @@ it.effect("a webhook on a limit-stopped thread sends as ever, without reading th
   );
 });
 
+it.effect("a steering task turned into a webhook keeps no steer, and queues", () => {
+  const modes: Array<string> = [];
+  return withService(
+    ({ service }) =>
+      Effect.gen(function* () {
+        yield* service.upsert(
+          yield* webhookTaskInput({
+            threadId: "thread:steered",
+            schedule: { type: "interval", everyMs: 3_600_000, deliverAs: "steer" },
+          }),
+        );
+        const { task } = yield* service.upsert(
+          yield* webhookTaskInput({ threadId: "thread:steered" }),
+        );
+        assert.notProperty(task.schedule, "deliverAs");
+        yield* waitForSpan(
+          service.triggerWebhook(requestFor(task)),
+          "ScheduledTaskService.runWebhookDelivery",
+        );
+        assert.deepEqual(modes, ["queue"]);
+      }),
+    {
+      threadManagement: {
+        sendToThread: (input) =>
+          Effect.sync(() => {
+            modes.push(input.mode);
+            return { delivery: "started" } as never;
+          }),
+      },
+    },
+  );
+});
+
 it.effect("guards bad-signature floods separately from valid run admission", () =>
   withService(({ service, sql }) =>
     Effect.gen(function* () {

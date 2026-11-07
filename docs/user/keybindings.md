@@ -18,6 +18,9 @@ does the same. Change these shortcuts in **Settings → Keybindings** under
 or **Composer: Send and Start New Thread**. These bindings take priority over the
 send shortcut. Click the send button to use the configured follow-up behavior.
 
+`mod+Alt+Shift+Enter` opens the scheduled task form for what you typed, as the clock
+button beside Send does. Change it under **Composer: Send on an Event**.
+
 When a thread has queued messages, `mod+Shift+Enter` sends the first one as a steer
 while a turn is running, or as a new turn when the thread is stopped. Change it under
 **Queue: Send First Queued Message** in Keybindings.

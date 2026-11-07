@@ -59,6 +59,7 @@ export function validateScheduledTasksSearch(raw: Record<string, unknown>) {
 
 export type ScheduleMode = "fixed" | "once" | "interval" | "webhook" | "usage";
 export type UsageOn = ScheduledTaskUsageSchedule["on"];
+export type DeliverAs = NonNullable<ScheduledTaskUsageSchedule["deliverAs"]>;
 export type WorkspaceMode = "root" | "worktree" | "existing_worktree";
 
 export interface DraftState {
@@ -103,6 +104,8 @@ export interface DraftState {
   readonly usageWindow: string;
   readonly usageOn: UsageOn;
   readonly usagePercent: string;
+  /** A bound task's run on a running thread. Webhook runs always queue. */
+  readonly deliverAs: DeliverAs;
 }
 
 export const USAGE_PERCENT_DEFAULT = "80";
@@ -212,6 +215,14 @@ export function webhookDeliveryLabel(delivery: {
 }
 
 export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedule | null {
+  const schedule = triggerFromDraft(draft);
+  // Always sent for a bound task: the server keeps the stored one only when a schedule omits it.
+  return schedule === null || schedule.type === "webhook" || !draft.threadId
+    ? schedule
+    : { ...schedule, deliverAs: draft.deliverAs };
+}
+
+function triggerFromDraft(draft: DraftState): ScheduledTaskUpsertSchedule | null {
   if (scheduleDraftErrors(draft).length > 0) return null;
   if (draft.scheduleMode === "usage") {
     const usedPercent = parseUsagePercent(draft.usagePercent);
@@ -355,6 +366,7 @@ export function taskToDraft(task: ScheduledTask): DraftState {
       schedule.type === "usage" && schedule.usedPercent !== undefined
         ? String(schedule.usedPercent)
         : USAGE_PERCENT_DEFAULT,
+    deliverAs: schedule.type === "webhook" ? "queue" : (schedule.deliverAs ?? "queue"),
   };
 }
 

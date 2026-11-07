@@ -56,6 +56,7 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BugIcon,
+  CalendarClockIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
   ChevronRightIcon,
@@ -78,6 +79,7 @@ import {
   UserPlusIcon,
 } from "lucide-react";
 import { openThreadFind } from "./chat/threadFindStore";
+import { useSendOnEventEntry } from "./chat/sendOnEventEntry";
 import {
   useDeferredValue,
   useEffect,
@@ -404,6 +406,7 @@ function OpenCommandPaletteDialog(props: {
   const navigate = useNavigate();
   const pathname = useLocation({ select: (location) => location.pathname });
   const { openChildSearch, setOpen } = props;
+  const sendOnEvent = useSendOnEventEntry((state) => state.entry);
   // Keyed by palette session: the intent and restored search only seed this
   // mount, and closing must not change what the closing palette shows.
   const [initialSearch] = useState(
@@ -1308,6 +1311,23 @@ function OpenCommandPaletteDialog(props: {
       description: "An agent investigates a T3 Code problem and helps file an issue",
       icon: <BugIcon className={ITEM_ICON_CLASS} />,
       run: () => startTriage(triageEnvironmentId),
+    });
+  }
+
+  if (sendOnEvent !== null) {
+    actionItems.push({
+      kind: "action",
+      value: "action:send-on-event",
+      searchTerms: ["schedule", "send later", "event", "usage", "renews", "task", "automation"],
+      title: "Send on an event…",
+      ...(sendOnEvent.disabledReason === null
+        ? {}
+        : { description: sendOnEvent.disabledReason, disabled: true }),
+      icon: <CalendarClockIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "composer.sendOnEvent",
+      run: async () => {
+        sendOnEvent.open();
+      },
     });
   }
 

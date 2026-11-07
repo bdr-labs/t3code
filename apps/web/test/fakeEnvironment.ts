@@ -12,6 +12,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   RunId,
+  ScheduledTaskId,
   ServerConfig,
   ThreadId,
   TurnItemId,
@@ -26,6 +27,8 @@ import {
   type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadStreamItem,
   type OrchestrationV2TurnItem,
+  type ScheduledTask,
+  type ScheduledTaskUpsertInput,
   type TerminalMetadataStreamEvent,
 } from "@t3tools/contracts";
 import type {
@@ -85,7 +88,10 @@ const serverConfig: ServerConfig = {
         status: "ready",
         auth: { status: "authenticated" },
         checkedAt: "2026-03-17T19:12:28.000Z",
-        models: [{ slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: null }],
+        models: [
+          { slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: null },
+          { slug: "gpt-5.5", name: "GPT-5.5", isCustom: false, capabilities: null },
+        ],
       },
     ],
     availableEditors: [],
@@ -185,6 +191,8 @@ function run(threadId: ThreadId, id: RunId, ordinal: number, userMessageId: stri
 export interface FakeThread {
   /** Makes this a side chat of that thread. */
   readonly sideChatOf?: ThreadId;
+  /** The thread's Codex model, when not the default. */
+  readonly model?: string;
   readonly id: ThreadId;
   readonly title: string;
   readonly runs: ReadonlyArray<OrchestrationV2Run>;
@@ -221,7 +229,7 @@ function shellOf(thread: FakeThread): OrchestrationV2ThreadShell {
     projectId: PROJECT_ID,
     title: thread.title,
     providerInstanceId: CODEX,
-    modelSelection: MODEL,
+    modelSelection: thread.model === undefined ? MODEL : { instanceId: CODEX, model: thread.model },
     runtimeMode: "full-access",
     interactionMode: "default",
     branch: "main",
@@ -320,6 +328,8 @@ let terminalMetadataSubscriber: Queue.Queue<TerminalMetadataStreamEvent> | null 
 let threads: ReadonlyArray<FakeThread> = [];
 let sequence = 1;
 let vcsStatusSubscriber: Queue.Queue<VcsStatusStreamEvent> | null = null;
+// Scheduled tasks stay pending like other RPCs unless a test serves them.
+let scheduledTaskSaves: Array<ScheduledTaskUpsertInput> | null = null;
 
 const subscribe = <A>(first: ReadonlyArray<A>, register?: (queue: Queue.Queue<A>) => () => void) =>
   Stream.unwrap(
@@ -383,6 +393,28 @@ const handlers: Record<string, (input: never) => unknown> = {
     }),
   [WS_METHODS.subscribeServerConfig]: () =>
     subscribe([{ version: 1 as const, type: "snapshot" as const, config: serverConfig }]),
+  [WS_METHODS.scheduledTasksSubscribe]: () =>
+    scheduledTaskSaves === null ? Stream.never : subscribe([{ tasks: [] }]),
+  [WS_METHODS.scheduledTasksUpsert]: (input: ScheduledTaskUpsertInput) => {
+    if (scheduledTaskSaves === null) return Effect.never;
+    scheduledTaskSaves.push(input);
+    const task: ScheduledTask = {
+      ...input,
+      id: input.id ?? ScheduledTaskId.make(`scheduled-task:${scheduledTaskSaves.length}`),
+      schedule: input.schedule as ScheduledTask["schedule"],
+      threadId: input.threadId ?? null,
+      createdBy: "user",
+      creationSource: "web",
+      createdAt: "2026-03-17T19:12:28.000Z",
+      updatedAt: "2026-03-17T19:12:28.000Z",
+      nextRunAt: null,
+      lastRunAt: null,
+      lastRunStatus: "never",
+      lastRunError: null,
+      runCount: 0,
+    };
+    return Effect.succeed({ task });
+  },
 };
 
 // Unanswered calls stay pending, like a server that has not replied yet.
@@ -465,6 +497,20 @@ type ThreadEvent = Extract<OrchestrationV2ThreadStreamItem, { readonly kind: "ev
 export async function emitTerminalMetadata(event: TerminalMetadataStreamEvent): Promise<void> {
   if (terminalMetadataSubscriber === null) throw new Error("No terminal metadata subscription");
   await Effect.runPromise(Queue.offer(terminalMetadataSubscriber, event));
+}
+
+/** Answers the scheduled task list (empty) and saves until disposed, recording each save. */
+export function serveScheduledTasks(): {
+  readonly saved: ReadonlyArray<ScheduledTaskUpsertInput>;
+} & Disposable {
+  const saved: Array<ScheduledTaskUpsertInput> = [];
+  scheduledTaskSaves = saved;
+  return {
+    saved,
+    [Symbol.dispose]: () => {
+      scheduledTaskSaves = null;
+    },
+  };
 }
 
 /** Whether the app holds a live subscription to the thread, so events reach it. */

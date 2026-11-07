@@ -92,4 +92,8 @@ it("names every schedule trigger in the schedule_task schema", () => {
       },
     });
   }
+  // `deliverAs` carries no description of its own, to keep the tool list small.
+  expect(properties).toMatchObject({
+    schedule: { description: expect.stringContaining("deliverAs:'steer'") },
+  });
 });

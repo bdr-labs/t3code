@@ -31,9 +31,18 @@ export const MIN_SCHEDULED_TASK_INTERVAL_MS = 60_000;
 
 const ScheduledTaskIntervalMs = Schema.Int.check(Schema.isGreaterThan(0));
 
+/**
+ * What a bound task's run does to a turn in progress; absent means `queue`. Not on webhooks,
+ * whose runs always queue. Described once on the MCP schedule, which keeps the tool list small.
+ */
+const ScheduledTaskDeliveryFields = {
+  deliverAs: Schema.optional(Schema.Literals(["queue", "steer"])),
+};
+
 const ScheduledTaskIntervalSchedule = Schema.Struct({
   type: Schema.Literal("interval"),
   everyMs: ScheduledTaskIntervalMs,
+  ...ScheduledTaskDeliveryFields,
 });
 
 const ScheduledTaskFixedTimeSchedule = Schema.Struct({
@@ -48,6 +57,7 @@ const ScheduledTaskFixedTimeSchedule = Schema.Struct({
       description: "Default: every day.",
     }),
   ),
+  ...ScheduledTaskDeliveryFields,
 });
 
 const ISO_WITH_OFFSET =
@@ -76,6 +86,7 @@ const ScheduledTaskOnceSchedule = Schema.Struct({
       (value) => isIsoWithOffset(value) || "Expected an ISO date and time with an offset.",
     ),
   ),
+  ...ScheduledTaskDeliveryFields,
 });
 
 const ScheduledTaskWebhookSignatureFields = {
@@ -207,6 +218,7 @@ const ScheduledTaskUsageFields = {
   usedPercent: Schema.optional(
     Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 99 })),
   ).annotate({ description: "1 to 99. For `above` and `below`; refused for `reset`." }),
+  ...ScheduledTaskDeliveryFields,
 };
 
 /**
@@ -297,6 +309,7 @@ export const ScheduledTaskUpsertSchedule = Schema.Union([
     ).annotate({
       description: "Min 60000.",
     }),
+    ...ScheduledTaskDeliveryFields,
   }),
   ScheduledTaskFixedTimeSchedule,
   ScheduledTaskOnceSchedule,

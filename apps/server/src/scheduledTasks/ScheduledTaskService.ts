@@ -323,6 +323,19 @@ function iso(value: DateTime.DateTime): string {
 
 const localNow = DateTime.withCurrentZoneLocal(DateTime.nowInCurrentZone);
 
+type DeliverAs = Exclude<ScheduledTask["schedule"], { readonly type: "webhook" }>["deliverAs"];
+
+/** Only a bound task keeps one, and a webhook never does: its runs always queue. */
+function withDeliverAs(
+  schedule: ScheduledTask["schedule"],
+  deliverAs: DeliverAs,
+): ScheduledTask["schedule"] {
+  if (schedule.type === "webhook") return schedule;
+  if (deliverAs !== undefined) return { ...schedule, deliverAs };
+  const { deliverAs: _dropped, ...rest } = schedule;
+  return rest;
+}
+
 function nextRunAt(
   task: Pick<ScheduledTask, "enabled" | "schedule">,
   from: DateTime.DateTime,
@@ -806,9 +819,12 @@ export const layer = Layer.effect(
           -- A sweep can move a kept usage trigger's state during this save; the newer state stands.
           schedule_json = CASE
             WHEN ${task.schedule.type === "usage" && task.schedule.state !== undefined ? 1 : 0} = 1
-              AND json_remove(scheduled_tasks.schedule_json, '$.state')
-                = json_remove(excluded.schedule_json, '$.state')
-            THEN scheduled_tasks.schedule_json
+              AND json_remove(scheduled_tasks.schedule_json, '$.state', '$.deliverAs')
+                = json_remove(excluded.schedule_json, '$.state', '$.deliverAs')
+            THEN json_patch(
+              scheduled_tasks.schedule_json,
+              json_object('deliverAs', json_extract(excluded.schedule_json, '$.deliverAs'))
+            )
             ELSE excluded.schedule_json
           END,
           project_id = excluded.project_id,
@@ -1315,26 +1331,41 @@ export const layer = Layer.effect(
 
         // A bound thread can move to another project (No project to a project) while
         // this fires. Follow it; one move needs at most two retries. Same ids replay safely.
+        // A steer with no turn to steer, or one the turn refuses (stopping, compacting),
+        // sends as a queued message, which starts an idle thread.
+        const deliverAs = active.schedule.type === "webhook" ? "queue" : active.schedule.deliverAs;
         const sendBound = (
           threadId: ThreadId,
           projectId: ProjectId,
           retries: number,
+          mode: "queue" | "steer" = deliverAs ?? "queue",
+          ids = { commandId, messageId },
         ): ReturnType<typeof threadManagement.sendToThread> =>
           threadManagement
             .sendToThread({
               projectId,
-              commandId,
+              commandId: ids.commandId,
               threadId,
-              messageId,
+              messageId: ids.messageId,
               scheduledTaskId: active.id,
               text: prompt,
               attachments: [],
-              mode: "queue",
+              mode,
               createdBy: active.createdBy,
               creationSource: active.creationSource,
             })
             .pipe(
               Effect.catchTags({
+                ThreadManagementNoSteerableRunError: () =>
+                  sendBound(threadId, projectId, retries, "queue", ids),
+                // A refusal carries its reason as text and leaves these ids rejected.
+                OrchestratorDispatchError: (error) =>
+                  mode === "steer" && typeof error.cause === "string"
+                    ? sendBound(threadId, projectId, retries, "queue", {
+                        commandId: CommandId.make(`${ids.commandId}:queue`),
+                        messageId: MessageId.make(`${ids.messageId}:queue`),
+                      })
+                    : Effect.fail(error),
                 ThreadManagementThreadNotFoundError: (error) =>
                   retries === 0
                     ? Effect.fail(error)
@@ -1343,7 +1374,7 @@ export const layer = Layer.effect(
                         Effect.flatMap((shell) =>
                           shell === null || shell.projectId === projectId
                             ? Effect.fail(error)
-                            : sendBound(threadId, shell.projectId, retries - 1),
+                            : sendBound(threadId, shell.projectId, retries - 1, mode, ids),
                         ),
                       ),
               }),
@@ -1775,7 +1806,7 @@ export const layer = Layer.effect(
       // Keep the existing next_run_at when the schedule itself is untouched:
       // editing a title or prompt must not postpone (or resurrect) a due
       // run — only schedule/enabled changes restart the clock.
-      const schedule: ScheduledTask["schedule"] =
+      const trigger: ScheduledTask["schedule"] =
         input.schedule.type === "webhook"
           ? {
               type: "webhook",
@@ -1813,6 +1844,16 @@ export const layer = Layer.effect(
                   existing: existingTask,
                 })
               : input.schedule;
+      // Saved without one, as mobile and agents do, a bound task keeps what it had.
+      const schedule = withDeliverAs(
+        trigger,
+        input.threadId == null || input.schedule.type === "webhook"
+          ? undefined
+          : (input.schedule.deliverAs ??
+              (existingTask === null || existingTask.schedule.type === "webhook"
+                ? undefined
+                : existingTask.schedule.deliverAs)),
+      );
       // A task whose instance was removed since can still be renamed or paused.
       if (
         schedule.type === "usage" &&

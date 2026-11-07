@@ -71,7 +71,7 @@ const OrchestratorMcpSchedule = Schema.Union([
   OrchestratorMcpScheduleFromJsonString,
 ]).annotate({
   description:
-    "Trigger: {type:'interval',everyMs}, {type:'fixed_time',timeOfDay,weekdays?}, {type:'once',runAt}, {type:'webhook'}, or {type:'usage',window,on,usedPercent?,instanceId?}. A usage task already past its line waits for a crossing; `t3_usage_limits` shows where it stands.",
+    "Trigger: {type:'interval',everyMs}, {type:'fixed_time',timeOfDay,weekdays?}, {type:'once',runAt}, {type:'webhook'}, or {type:'usage',window,on,usedPercent?,instanceId?}. A usage task already past its line waits for a crossing; `t3_usage_limits` shows where it stands. deliverAs:'steer' (not webhook) steers a bound thread's running turn; default 'queue'.",
 });
 
 const OrchestratorMcpTargetOptionsFromRecord = Schema.Record(

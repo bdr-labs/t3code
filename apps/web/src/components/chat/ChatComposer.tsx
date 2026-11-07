@@ -36,6 +36,7 @@ import type {
   ResolvedKeybindingsConfig,
   RuntimeMode,
   RuntimeRequestId,
+  ScheduledTask,
   ScopedThreadRef,
   ServerProvider,
   ThreadId,
@@ -48,6 +49,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  usageWindowsOf,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
@@ -234,6 +236,16 @@ import { ComposerPromptLengthValidation } from "./ComposerPromptLengthValidation
 import { pendingDraftWork } from "./pendingDraftWork";
 import { importComposerThreadAttachment } from "./composerThreadImport";
 import { observeResize } from "~/lib/observeResize";
+import { useAtomValue } from "@effect/atom-react";
+import { useNavigate } from "@tanstack/react-router";
+import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
+import { registerCommands } from "../../shortcuts/dispatcher";
+import { serverEnvironment } from "../../state/server";
+import { stackedThreadToast } from "../ui/toast";
+import { ScheduledTaskEditorDialog, scheduledTaskLabel } from "../settings/ScheduledTasksSettings";
+import { SettingsScopeProvider } from "../settings/SettingsScopeContext";
+import { useSendOnEventEntry } from "./sendOnEventEntry";
+import type { DraftState } from "../settings/scheduledTasksSettings.logic";
 
 const isEnvironmentRequestInvalidError = Schema.is(EnvironmentRequestInvalidError);
 import { toastManager } from "../ui/toast";
@@ -830,6 +842,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (store) => store.syncPersistedAttachments,
   );
   const getComposerDraft = useComposerDraftStore((store) => store.getComposerDraft);
+  const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- starts or releases server attachment uploads as upload capability, limits and draft attachments change
   useEffect(() => {
@@ -1226,6 +1239,175 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       (supportsQuestionAttachments &&
         activePendingProgress.activeQuestion?.allowCustomAnswer !== false));
   const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
+  const navigate = useNavigate();
+  const canScheduleTasks = useAtomValue(
+    serverEnvironment.upsertScheduledTask.permissionAtom(environmentId),
+  );
+  const [sendOnEventDraft, setSendOnEventDraft] = useState<{
+    readonly environmentId: EnvironmentId;
+    readonly target: ChatComposerProps["composerDraftTarget"];
+    readonly prompt: string;
+    readonly initial: Partial<DraftState>;
+  } | null>(null);
+  // What a press of Send would do now, but later: a new thread here, or this stopped one.
+  const sendOnEventOffered =
+    !backgroundThread &&
+    activeThread?.lineage.sideChat !== true &&
+    (routeKind === "draft" || props.isServerThread) &&
+    canOperateThread &&
+    canScheduleTasks &&
+    phase !== "running" &&
+    !isEditingQueuedMessage &&
+    pendingApprovals.length === 0 &&
+    incomingPendingUserInputs.length === 0 &&
+    !showPlanFollowUpPrompt &&
+    prompt.trim().length > 0;
+  // A bound fire runs on the thread's own model; a pick here reaches it only with a send.
+  const sendOnEventThreadModel =
+    routeKind === "draft" || activeThreadId === null ? null : (activeThreadModelSelection ?? null);
+  const sendOnEventModelSelection = sendOnEventThreadModel ?? selectedModelSelection;
+  // Only a pick made here counts; the composer also falls back from a model no longer listed.
+  const sendOnEventPick =
+    sendOnEventThreadModel !== null &&
+    composerDraft.modelSelectionExplicit === true &&
+    composerDraft.activeProvider !== null
+      ? composerDraft.modelSelectionByProvider[composerDraft.activeProvider]
+      : undefined;
+  // A task holds a prompt and nothing else, so it says so rather than drop the rest.
+  const sendOnEventDisabledReason =
+    composerImages.length +
+      composerFiles.length +
+      composerDraft.persistedAttachments.length +
+      composerTerminalContexts.length +
+      composerPreviewAnnotations.length +
+      composerReviewComments.length +
+      composerThreadContexts.length +
+      composerEnvironmentContexts.length >
+    0
+      ? "Scheduled messages carry text only. Remove the attachments first."
+      : routeKind === "draft" && (multipleModelSelections?.length ?? 0) > 1
+        ? "Scheduled messages run on one model. Choose a single model first."
+        : sendOnEventPick !== undefined &&
+            (sendOnEventPick.instanceId !== sendOnEventModelSelection.instanceId ||
+              sendOnEventPick.model !== sendOnEventModelSelection.model)
+          ? "Scheduled messages run on the thread's model. Send once to move it, then schedule."
+          : null;
+  const openSendOnEvent = () => {
+    if (!sendOnEventOffered) return;
+    if (sendOnEventDisabledReason !== null) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Not scheduled",
+          description: sendOnEventDisabledReason,
+        }),
+      );
+      return;
+    }
+    const text = promptRef.current.trim();
+    const draftSession =
+      routeKind === "draft" && draftId !== null
+        ? useComposerDraftStore.getState().getDraftSession(draftId)
+        : null;
+    setSendOnEventDraft({
+      environmentId,
+      target: composerDraftTarget,
+      prompt: promptRef.current,
+      initial: {
+        prompt: text,
+        title: deriveThreadTitleSeed({ text, attachments: [] }),
+        scheduleMode: "usage",
+        // As choosing On usage in the form does: the first window the model's instance reports.
+        usageWindow:
+          usageWindowsOf(providerStatuses, sendOnEventModelSelection.instanceId)[0]?.id ?? "",
+        projectId: activeProjectId ?? "",
+        // The model whose usage a trigger watches by default, and a new thread's model.
+        modelKey: `${sendOnEventModelSelection.instanceId}:${sendOnEventModelSelection.model}`,
+        baseModelSelection: sendOnEventModelSelection,
+        ...(routeKind === "draft" || activeThreadId === null
+          ? {
+              runtimeMode,
+              interactionMode,
+              ...(draftSession === null
+                ? {}
+                : draftSession.envMode === "worktree"
+                  ? {
+                      workspaceMode: "worktree" as const,
+                      baseRef: draftSession.branch ?? "main",
+                      startFromOrigin: draftSession.startFromOrigin,
+                    }
+                  : draftSession.worktreePath
+                    ? {
+                        workspaceMode: "existing_worktree" as const,
+                        existingWorktreePath: draftSession.worktreePath,
+                      }
+                    : { workspaceMode: "root" as const }),
+            }
+          : { threadId: activeThreadId }),
+      },
+    });
+  };
+  const openSendOnEventStable = useStableCallback(openSendOnEvent);
+  const onSendOnEventSaved = (task: ScheduledTask) => {
+    if (sendOnEventDraft === null) return;
+    // Clear as a send would, and only what was scheduled.
+    const { target } = sendOnEventDraft;
+    if (getComposerDraft(target)?.prompt === sendOnEventDraft.prompt) {
+      clearComposerDraftContent(target);
+      if (composerTargetKey(target) === composerDraftTargetKeyRef.current) {
+        promptRef.current = "";
+        composerRef.current?.resetCursorState();
+      }
+    }
+    const { environmentId: taskEnvironmentId } = sendOnEventDraft;
+    toastManager.add(
+      stackedThreadToast({
+        type: "success",
+        title: "Scheduled",
+        description: scheduledTaskLabel(task, providerStatuses),
+        actionProps: {
+          children: "Open task",
+          onClick: () =>
+            void navigate({
+              to: "/settings/scheduled-tasks",
+              search: { environmentId: taskEnvironmentId, taskId: task.id },
+            }),
+        },
+      }),
+    );
+  };
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- offers this composer's entry to the command palette, which renders outside it
+  useEffect(() => {
+    if (backgroundThread || !sendOnEventOffered) return;
+    const entry = { disabledReason: sendOnEventDisabledReason, open: openSendOnEventStable };
+    useSendOnEventEntry.setState({ entry });
+    return () => {
+      if (useSendOnEventEntry.getState().entry === entry)
+        useSendOnEventEntry.setState({ entry: null });
+    };
+  }, [backgroundThread, sendOnEventOffered, sendOnEventDisabledReason, openSendOnEventStable]);
+  const handleSendOnEventShortcut = useStableCallback((event: KeyboardEvent) => {
+    if (!sendOnEventOffered) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) openSendOnEvent();
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the send-on-event shortcut with the command registry while the composer is mounted
+  useEffect(() => {
+    if (backgroundThread) return;
+    return registerCommands(
+      { "composer.sendOnEvent": handleSendOnEventShortcut },
+      {
+        // Ahead of the editor, which would take the Enter.
+        capture: true,
+        context: () => ({ composerFocus: true }),
+        when: (event) =>
+          event.target instanceof Element &&
+          event.target.closest('[data-testid="composer-editor"]') !== null &&
+          composerFormRef.current?.contains(event.target) === true,
+      },
+    );
+  }, [backgroundThread, handleSendOnEventShortcut]);
 
   const editPromptFromTraits = (edit: (prompt: string) => string) => {
     const currentPrompt = getComposerDraft(composerDraftTarget)?.prompt ?? "";
@@ -3158,7 +3340,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       focusComposer={focusComposer}
     />
   ) : null;
-  return (
+  const composerForm = (
     <form
       ref={composerFormRef}
       onSubmit={submitComposerStable}
@@ -3578,6 +3760,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     {...(compactCommandAvailable
                       ? { onCompactContext: compactThreadContextStable }
                       : {})}
+                    sendOnEvent={
+                      sendOnEventOffered
+                        ? {
+                            disabledReason: sendOnEventDisabledReason,
+                            onOpen: openSendOnEventStable,
+                          }
+                        : null
+                    }
                   />
                 </div>
               </div>
@@ -3607,5 +3797,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         </ComposerSurface.Main>
       </div>
     </form>
+  );
+  // Beside the form, not in it: React events from the dialog's portal would reach the form.
+  return (
+    <>
+      {composerForm}
+      {sendOnEventDraft ? (
+        // The form lists what Settings would, scoped to the environment it was opened on.
+        <SettingsScopeProvider
+          search={{ machine: sendOnEventDraft.environmentId }}
+          onChange={() => {}}
+        >
+          <ScheduledTaskEditorDialog
+            initialEnvironmentId={sendOnEventDraft.environmentId}
+            task={null}
+            initial={sendOnEventDraft.initial}
+            onSaved={onSendOnEventSaved}
+            onClose={() => setSendOnEventDraft(null)}
+          />
+        </SettingsScopeProvider>
+      ) : null}
+    </>
   );
 });

@@ -1,5 +1,12 @@
 import { memo, type MouseEventHandler, type PointerEventHandler } from "react";
-import { CheckIcon, ChevronDownIcon, ChevronLeftIcon, Minimize2Icon, PlayIcon } from "lucide-react";
+import {
+  CalendarClockIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  Minimize2Icon,
+  PlayIcon,
+} from "lucide-react";
 import { CornerUpRight, ListPlus } from "lucide";
 import { MorphIcon } from "~/components/MorphIcon";
 import { useEnvironmentIdentificationMode } from "~/hooks/useSettings";
@@ -52,6 +59,11 @@ interface ComposerPrimaryActionsProps {
   compactBeforeSendTokens?: number | null;
   keepFullHistory?: boolean;
   onToggleKeepFullHistory?: () => void;
+  /** Present only where the composer can schedule this message; a reason disables it. */
+  sendOnEvent?:
+    | { readonly disabledReason: string | null; readonly onOpen: () => void }
+    | null
+    | undefined;
 }
 
 const formatPendingPrimaryActionLabel = (input: {
@@ -106,6 +118,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   compactBeforeSendTokens = null,
   keepFullHistory = false,
   onToggleKeepFullHistory,
+  sendOnEvent = null,
 }: ComposerPrimaryActionsProps) {
   const pointerFocusProps = preserveComposerFocusOnPointerDown
     ? { onPointerDown: preventPointerFocus }
@@ -346,12 +359,41 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     </button>
   );
 
-  const submit = (
+  const submitWithTooltip = (
     <Tooltip key="submit">
       <TooltipTrigger render={<span className="inline-flex" />}>{sendButton}</TooltipTrigger>
       <TooltipPopup>{submitTooltip}</TooltipPopup>
     </Tooltip>
   );
+  const submit =
+    sendOnEvent === null || showResume || isEditingQueuedMessage ? (
+      submitWithTooltip
+    ) : (
+      <div data-chat-composer-send-on-event="true" className="flex items-center gap-1">
+        <Tooltip>
+          <TooltipTrigger render={<span className="inline-flex" />}>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost-muted"
+              {...pointerFocusProps}
+              aria-label="Send on an event"
+              disabled={
+                sendOnEvent.disabledReason !== null ||
+                isSendBusy ||
+                isSendDisabled ||
+                isEnvironmentUnavailable
+              }
+              onClick={sendOnEvent.onOpen}
+            >
+              <CalendarClockIcon aria-hidden="true" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipPopup>{sendOnEvent.disabledReason ?? "Send on an event"}</TooltipPopup>
+        </Tooltip>
+        {submitWithTooltip}
+      </div>
+    );
   if (compactTokens === null) return submit;
 
   return (

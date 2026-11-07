@@ -45,6 +45,14 @@ describe("scheduled task schedule calculation", () => {
       usedPercent: 80,
     } as const;
     expect(isSameSchedule(trigger, { ...trigger, state: { armed: false } })).toBe(true);
+    // How it delivers is no part of when it runs, so changing it recomputes nothing.
+    expect(isSameSchedule(trigger, { ...trigger, deliverAs: "steer" })).toBe(true);
+    expect(
+      isSameSchedule(
+        { type: "interval", everyMs: 60_000, deliverAs: "queue" },
+        { type: "interval", everyMs: 60_000, deliverAs: "steer" },
+      ),
+    ).toBe(true);
     expect(
       isSameSchedule(
         { ...trigger, state: { armed: true } },

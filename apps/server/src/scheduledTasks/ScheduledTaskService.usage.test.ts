@@ -258,12 +258,20 @@ const withUsage = <A, E>(
                 Effect.tap(() => once(duringRecords)),
                 Effect.map((value) => value as never),
               ),
+            // No thread here has a turn running, so a steer has nothing to reach.
             sendToThread: (input) =>
-              Ref.update(sent, (all) => [...all, input.mode]).pipe(
-                Effect.andThen(Ref.get(sendGate)),
-                Effect.flatten,
-                Effect.as({ delivery: "started" } as never),
-              ),
+              input.mode === "steer"
+                ? Effect.fail(
+                    new ThreadManagementService.ThreadManagementNoSteerableRunError({
+                      threadId: input.threadId,
+                      mode: "steer",
+                    }),
+                  )
+                : Ref.update(sent, (all) => [...all, input.mode]).pipe(
+                    Effect.andThen(Ref.get(sendGate)),
+                    Effect.flatten,
+                    Effect.as({ delivery: "started" } as never),
+                  ),
           }),
         ),
       ),
@@ -674,7 +682,7 @@ it.effect("a sweep that fires during a save is not undone by it, so the crossing
         reading(90).pipe(Effect.flatMap(harness.publish), Effect.andThen(harness.sweep)),
       );
       yield* harness.service.upsert(
-        usageTask(ABOVE, {
+        usageTask({ ...ABOVE, deliverAs: "steer" } as ScheduledTaskUpsertSchedule, {
           title: "Renamed",
           workspaceStrategy: { type: "worktree", baseRef: "main" },
         }),
@@ -682,6 +690,7 @@ it.effect("a sweep that fires during a save is not undone by it, so the crossing
       assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
       const task = yield* harness.stored;
       assert.equal(task.title, "Renamed");
+      assert.equal(scheduleOf(task).deliverAs, "steer");
       assert.deepEqual(scheduleOf(task).state, aboveState(false));
 
       yield* settled(harness, 90);
@@ -1281,6 +1290,14 @@ it.effect.each([
   [
     "an edit that keeps the trigger keeps it",
     (harness: Harness) => harness.service.upsert(usageTask(RENEWS, { title: "Renamed" })),
+    true,
+  ],
+  [
+    "a change to how it delivers keeps it",
+    (harness: Harness) =>
+      harness.service.upsert(
+        usageTask({ ...RENEWS, deliverAs: "steer" } as ScheduledTaskUpsertSchedule),
+      ),
     true,
   ],
   [

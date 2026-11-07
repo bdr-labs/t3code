@@ -6,6 +6,7 @@ import {
   ProviderInstanceId,
   ScheduledTaskId,
   type ScheduledTask,
+  ThreadId,
 } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -170,6 +171,29 @@ describe("editing scheduled task branch settings", () => {
     const draft = taskToDraft(legacyTask);
     expect(draft.baseRef).toBe("release");
     expect(draft.startFromOrigin).toBe(false);
+  });
+});
+
+describe("how a bound task delivers", () => {
+  const bound = { ...legacyTask, threadId: ThreadId.make("thread:bound") };
+
+  it.each<ScheduledTask["schedule"]>([
+    { type: "interval", everyMs: 60_000, deliverAs: "steer" },
+    { type: "once", runAt: "2026-11-03T17:00:42.000Z", deliverAs: "queue" },
+    { type: "usage", window: "weekly", on: "reset", deliverAs: "steer" },
+  ])("round-trips $deliverAs on $type", (schedule) => {
+    expect(scheduleFromDraft(taskToDraft({ ...bound, schedule }))).toEqual(schedule);
+  });
+
+  it("sends queue for a bound task that has none, and nothing for an unbound one or a webhook", () => {
+    const draft = taskToDraft(bound);
+    expect(draft.deliverAs).toBe("queue");
+    expect(scheduleFromDraft(draft)).toEqual({ ...bound.schedule, deliverAs: "queue" });
+    expect(scheduleFromDraft({ ...draft, deliverAs: "steer", threadId: "" })).toEqual(
+      bound.schedule,
+    );
+    const webhook = taskToDraft({ ...bound, schedule: { type: "webhook", signature: null } });
+    expect(scheduleFromDraft({ ...webhook, deliverAs: "steer" })).not.toHaveProperty("deliverAs");
   });
 });
 

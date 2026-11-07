@@ -92,6 +92,22 @@ running the send button shows which action it will take. Long-press it to use th
 other action for a single message, or hold `Cmd` while sending from a hardware
 keyboard. The button only offers Steer when the running agent supports it.
 
+## Send on an event
+
+On web and desktop, the clock button beside Send schedules your message instead of
+sending it. It opens the scheduled task form with your text as the prompt and **On usage**
+chosen, so the message can wait for a usage window to renew; you can also pick a time, an
+interval or a webhook. From a new thread, each run starts a new thread with the model,
+permissions and workspace you chose. On a stopped thread, each run posts into that thread,
+and you choose whether a run that finds it working queues after the turn or steers it.
+It runs on the thread's model, so after picking another one, send once to move the thread.
+Saving clears the composer, and the toast opens the task. Cancel leaves your message as it was.
+
+The button shows once you type, while no turn is running. A scheduled message carries text
+only, so remove attachments and attached context, and pick a single model, before you
+schedule it. `mod+Alt+Shift+Enter` and **Send on an event…** in the command palette do the
+same. The mobile app can't schedule from its composer.
+
 ## Queue messages offline on mobile
 
 Mobile keeps local copies of draft attachments, so you can preview them and queue

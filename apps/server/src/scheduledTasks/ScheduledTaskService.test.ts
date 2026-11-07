@@ -29,6 +29,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -97,6 +98,16 @@ const stoppedRecords = (input: {
     providerSessions: input.providerSessions ?? [],
   };
 };
+
+const runningRecords = {
+  ...ordinaryRecords,
+  runs: [
+    { ...stoppedRecords({}).runs[0], id: "run:running", status: "running", completedAt: null },
+  ],
+  turnItems: [],
+};
+// Still running, but stopping, so the orchestrator refuses a steer at dispatch.
+const stoppingRecords = { ...runningRecords };
 
 const insertRow = (
   sql: SqlClient.SqlClient,
@@ -728,6 +739,7 @@ const withFires = <A, E>(
     const sent = state?.sent ?? (yield* Ref.make<ReadonlyArray<string>>([]));
     const records = state?.records ?? (yield* Ref.make<unknown>(ordinaryRecords));
     const workers = new Map<string, Effect.Effect<void>>();
+    const rejected = new Set<string>();
     const layer = ScheduledTaskService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -755,10 +767,35 @@ const withFires = <A, E>(
                     : Effect.succeed(value as never),
                 ),
               ),
+            // A steer reaches only a running turn, as the real service checks. A stopping
+            // turn refuses it at dispatch, and its command id stays rejected.
             sendToThread: (input) =>
-              Ref.update(sent, (all) => [...all, input.mode]).pipe(
-                Effect.as({ delivery: "started" } as never),
-              ),
+              Effect.gen(function* () {
+                const value = yield* Ref.get(records);
+                if (rejected.has(input.commandId)) {
+                  return yield* new Orchestrator.OrchestratorCommandPreviouslyRejectedError({
+                    commandId: input.commandId,
+                    commandType: "message.dispatch",
+                    detail: "Previously rejected.",
+                  });
+                }
+                if (input.mode === "steer" && value === stoppingRecords) {
+                  rejected.add(input.commandId);
+                  return yield* new Orchestrator.OrchestratorDispatchError({
+                    commandId: input.commandId,
+                    commandType: "message.dispatch",
+                    cause: "Target run run:running is stopping and cannot be steered.",
+                  });
+                }
+                if (input.mode === "steer" && value !== runningRecords) {
+                  return yield* new ThreadManagementService.ThreadManagementNoSteerableRunError({
+                    threadId: input.threadId,
+                    mode: "steer",
+                  });
+                }
+                yield* Ref.update(sent, (all) => [...all, input.mode]);
+                return { delivery: "started" } as never;
+              }),
           }),
         ),
       ),
@@ -1412,6 +1449,56 @@ it.effect("an edit keeps a postponed time unless it changes the schedule", () =>
 
       yield* fires.service.upsert(boundTask({ type: "interval", everyMs: 2 * DAY_MS }));
       assert.equal((yield* fires.stored).nextRunAt, later(dueAt, 2 * DAY_MS));
+    }),
+  ),
+);
+
+const STEER = { ...INTERVAL, deliverAs: "steer" } as const;
+
+it.effect.each([
+  ["steers a running turn", STEER, runningRecords, ["steer"]],
+  ["starts an idle thread that it would steer", STEER, ordinaryRecords, ["queue"]],
+  ["queues behind a turn that refuses the steer", STEER, stoppingRecords, ["queue"]],
+  ["queues behind a running turn by default", INTERVAL, runningRecords, ["queue"]],
+] as const)("a bound fire %s", ([, schedule, records, sent]) =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { task } = yield* fires.service.upsert(boundTask(schedule));
+      yield* Ref.set(fires.records, records);
+      yield* TestClock.setTime(Date.parse(task.nextRunAt!));
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), sent);
+      assert.equal((yield* fires.stored).lastRunStatus, "succeeded");
+    }),
+  ),
+);
+
+it.effect("a steering task on a limit-stopped thread waits for the reset like any fire", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const { resetAt } = yield* postponed(fires, { ...LONG_INTERVAL, deliverAs: "steer" });
+      assert.deepEqual(yield* Ref.get(fires.sent), []);
+      yield* TestClock.setTime(Date.parse(resetAt));
+      yield* fires.sweep;
+      assert.deepEqual(yield* Ref.get(fires.sent), ["queue"]);
+    }),
+  ),
+);
+
+it.effect("a save without deliverAs keeps the task's, and only a bound task has one", () =>
+  firesOverMemory((fires) =>
+    Effect.gen(function* () {
+      const deliverAs = fires.stored.pipe(
+        Effect.map(({ schedule }) => (schedule.type === "webhook" ? null : schedule.deliverAs)),
+      );
+      yield* fires.service.upsert(boundTask(STEER));
+      // As mobile and an agent's update save it.
+      yield* fires.service.upsert(boundTask(FIXED_TIME, { title: "Renamed" }));
+      assert.equal(yield* deliverAs, "steer");
+      yield* fires.service.upsert(boundTask({ ...FIXED_TIME, deliverAs: "queue" }));
+      assert.equal(yield* deliverAs, "queue");
+      yield* fires.service.upsert(boundTask(STEER, { threadId: null }));
+      assert.isUndefined(yield* deliverAs);
     }),
   ),
 );

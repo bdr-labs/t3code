@@ -100,6 +100,7 @@ import {
   taskToDraft,
   usageWindowOnInstance,
   usageWindowOptions,
+  type DeliverAs,
   type DraftState,
   type ScheduleMode,
   type UsageOn,
@@ -138,6 +139,11 @@ import {
 const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0] as const;
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 const WEEKDAY_SHORT = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"] as const;
+
+const DELIVER_AS_LABELS: Record<DeliverAs, string> = {
+  queue: "Queue it for after the turn",
+  steer: "Steer the turn",
+};
 
 const WORKSPACE_MODE_LABELS: Record<WorkspaceMode, string> = {
   worktree: "Create a new worktree",
@@ -179,6 +185,7 @@ const EMPTY_DRAFT: DraftState = {
   usageWindow: "",
   usageOn: "reset",
   usagePercent: USAGE_PERCENT_DEFAULT,
+  deliverAs: "queue",
 };
 
 function WebhookFiltersField({
@@ -469,6 +476,19 @@ function scheduleLabel(schedule: ScheduledTaskSchedule): string {
         ? "Weekdays"
         : weekdays.map((day) => WEEKDAY_LABELS[day]).join(", ");
   return `${days} at ${schedule.timeOfDay}`;
+}
+
+/** A task's schedule in words, such as "Every 15 min" or "When Weekly renews". */
+export function scheduledTaskLabel(
+  task: ScheduledTask,
+  providers: ReadonlyArray<ServerProvider>,
+): string {
+  return task.schedule.type === "usage"
+    ? usageScheduleLabel(
+        task.schedule,
+        usageWindowsOf(providers, task.schedule.instanceId ?? task.modelSelection.instanceId),
+      )
+    : scheduleLabel(task.schedule);
 }
 
 // Its own component, so only a usage task's row follows provider updates.
@@ -1296,16 +1316,19 @@ function WebhookDeliveryMode({ environmentId }: { readonly environmentId: Enviro
   );
 }
 
-function ScheduledTaskEditorDialog({
-  initialEnvironmentId,
-  task,
-  onClose,
-}: {
+interface ScheduledTaskEditorProps {
   readonly initialEnvironmentId: EnvironmentId;
   readonly task: ScheduledTask | null;
+  /** A new task's fields, over the empty form, as the composer fills them. */
+  readonly initial?: Partial<DraftState> | undefined;
+  readonly onSaved?: ((task: ScheduledTask) => void) | undefined;
   readonly onClose: () => void;
-}) {
+}
+
+/** Reads the Settings scope: outside Settings, wrap it in a `SettingsScopeProvider`. */
+export function ScheduledTaskEditorDialog(props: ScheduledTaskEditorProps) {
   const [saving, setSaving] = useState(false);
+  const { onClose } = props;
   return (
     <Dialog
       open
@@ -1315,13 +1338,7 @@ function ScheduledTaskEditorDialog({
     >
       {/* The form owns the draft so a keystroke re-renders it, not the dialog chrome. */}
       <DialogPopup className="max-w-xl">
-        <ScheduledTaskEditorForm
-          initialEnvironmentId={initialEnvironmentId}
-          task={task}
-          saving={saving}
-          onSavingChange={setSaving}
-          onClose={onClose}
-        />
+        <ScheduledTaskEditorForm {...props} saving={saving} onSavingChange={setSaving} />
       </DialogPopup>
     </Dialog>
   );
@@ -1362,15 +1379,14 @@ function ScheduledTaskDestination({
 function ScheduledTaskEditorForm({
   initialEnvironmentId,
   task,
+  initial,
+  onSaved,
   saving,
   onSavingChange: setSaving,
   onClose,
-}: {
-  readonly initialEnvironmentId: EnvironmentId;
-  readonly task: ScheduledTask | null;
+}: ScheduledTaskEditorProps & {
   readonly saving: boolean;
   readonly onSavingChange: (saving: boolean) => void;
-  readonly onClose: () => void;
 }) {
   const { scope, connectedEnvironments } = useSettingsScope();
   const [environmentId, setEnvironmentId] = useState(initialEnvironmentId);
@@ -1406,6 +1422,7 @@ function ScheduledTaskEditorForm({
       : {
           ...EMPTY_DRAFT,
           projectId: defaultScheduledTaskProjectId(scopedProjects, scope),
+          ...initial,
         },
   );
   // Pinned first. The chosen project stays listed after it is archived.
@@ -1564,6 +1581,7 @@ function ScheduledTaskEditorForm({
       }
       return;
     }
+    onSaved?.(result.value.task);
     onClose();
   };
 
@@ -1672,6 +1690,30 @@ function ScheduledTaskEditorForm({
             environmentId={environmentId}
             threadId={draft.threadId ? (draft.threadId as ThreadId) : null}
           />
+          {draft.threadId && draft.scheduleMode !== "webhook" ? (
+            <Field
+              label="If the thread is running when this fires"
+              htmlFor="scheduled-task-deliver-as"
+            >
+              <Select
+                value={draft.deliverAs}
+                onValueChange={(value) =>
+                  setDraft((current) => ({
+                    ...current,
+                    deliverAs: value === "steer" ? "steer" : "queue",
+                  }))
+                }
+              >
+                <SelectTrigger size="sm" id="scheduled-task-deliver-as">
+                  <SelectValue>{DELIVER_AS_LABELS[draft.deliverAs]}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  <SelectItem value="queue">{DELIVER_AS_LABELS.queue}</SelectItem>
+                  <SelectItem value="steer">{DELIVER_AS_LABELS.steer}</SelectItem>
+                </SelectPopup>
+              </Select>
+            </Field>
+          ) : null}
 
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Project" htmlFor="scheduled-task-project">

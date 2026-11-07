@@ -507,6 +507,13 @@ Explicit `bindToCurrentThread: true` without a caller thread in that project
 is rejected. Pausing uses `schedule_task` with `scheduledTaskId` and `enabled: false`;
 deletion is permanent.
 
+A bound run queues behind a running turn. With `deliverAs: "steer"` it steers that turn
+instead, and with no turn to steer it sends as a queued message, which starts an idle
+thread; the limit checks below come first either way. A save whose schedule omits
+`deliverAs` keeps the stored one, so a client that predates it cannot drop a steer, and
+changing it moves neither `nextRunAt` nor a usage trigger's `state`. Unbound tasks and
+webhooks store none: a webhook run always queues.
+
 While a bound task's thread is stopped on a usage limit and is still on the model
 that hit it, or on a model that a used-up window of its current instance binds,
 and that limit's reset is known and ahead, a run sends nothing and records

@@ -835,6 +835,32 @@ describe("composer and pull request shortcuts", () => {
     },
   );
 
+  it.each(["MacIntel", "Win32", "Linux"])(
+    "keeps the send-on-event chord apart from the background sends on %s",
+    (platform) => {
+      const modifier = { metaKey: platform === "MacIntel", ctrlKey: platform !== "MacIntel" };
+      for (const draftThreadRoute of [false, true]) {
+        const options = { platform, context: { composerFocus: true, draftThreadRoute } };
+        assert.strictEqual(
+          resolveShortcutCommand(
+            event({ key: "Enter", altKey: true, shiftKey: true, ...modifier }),
+            DEFAULT_RESOLVED_KEYBINDINGS,
+            options,
+          ),
+          "composer.sendOnEvent",
+        );
+        assert.strictEqual(
+          resolveShortcutCommand(
+            event({ key: "Enter", altKey: true, ...modifier }),
+            DEFAULT_RESOLVED_KEYBINDINGS,
+            options,
+          ),
+          draftThreadRoute ? "composer.sendBackground" : "composer.sendAndNewThread",
+        );
+      }
+    },
+  );
+
   const altEffortBindings = compileResolvedKeybindingsConfig([
     { key: "mod+alt+e", command: "composer.effort", when: "!terminalFocus" },
   ]);

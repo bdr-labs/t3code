@@ -89,6 +89,12 @@ environment is offline then, the task runs when it is back.
 Deleting a thread also deletes tasks that post into that thread. Tasks that start
 a new thread on each run survive deletion of their previous threads.
 
+A task that posts into a thread queues its message when that thread is working. On web
+or desktop, set **If the thread is running when this fires** to **Steer the turn** to send
+it into the running turn instead; on an idle thread either choice starts a turn. Editing
+the task on mobile keeps that choice. You can also start a task from what you typed, with
+[Send on an event](composer.md#send-on-an-event).
+
 A task that posts into a thread stopped on a usage limit with a known reset time
 sends nothing until the limit resets, and its last run shows as failed with the
 reason. A timed task tries again at its next run or when the limit resets, whichever

@@ -326,7 +326,9 @@ describe("ScheduledTasksSettings", () => {
     await expect.element(dialog.getByLabelText("Usage window")).toHaveTextContent("Session");
     await dialog.getByRole("button", { name: "Save task" }).click();
     await vi.waitFor(() =>
-      expect(state.saved).toEqual([{ type: "usage", window: "five_hour", on: "reset" }]),
+      expect(state.saved).toEqual([
+        { type: "usage", window: "five_hour", on: "reset", deliverAs: "queue" },
+      ]),
     );
   });
 
@@ -355,6 +357,7 @@ describe("ScheduledTasksSettings", () => {
         window: "seven_day",
         on: "below",
         usedPercent: 20,
+        deliverAs: "steer",
       },
       provider: "Codex",
       window: "Weekly",
@@ -393,8 +396,14 @@ describe("ScheduledTasksSettings", () => {
         .toHaveValue(row.stored.usedPercent);
     }
     await expect.element(screen.getByText(row.label, { exact: false })).toBeInTheDocument();
+    await expect
+      .element(dialog.getByLabelText("If the thread is running when this fires"))
+      .toHaveTextContent(
+        "deliverAs" in row.stored ? "Steer the turn" : "Queue it for after the turn",
+      );
 
     await dialog.getByRole("button", { name: "Save task" }).click();
-    await vi.waitFor(() => expect(state.saved).toEqual([row.stored]));
+    // A bound task always says how it delivers.
+    await vi.waitFor(() => expect(state.saved).toEqual([{ deliverAs: "queue", ...row.stored }]));
   });
 });
