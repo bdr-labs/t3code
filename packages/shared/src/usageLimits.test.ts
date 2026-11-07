@@ -23,6 +23,7 @@ import {
   paceRemainingPercent,
   usesChatGptSharing,
   resolveNewThreadModelSelection,
+  usageLimitBindsSelection,
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
@@ -132,6 +133,9 @@ describe("new thread model fallback", () => {
     ["antigravity", ["gemini-weekly"], "antigravity-default", true],
     ["opencode", ["go_weekly"], "opencode/big-pickle", false],
     ["opencode", ["go_weekly"], "opencode-go/big-pickle", true],
+    ["claudeAgent", ["seven_day_fable"], "claude-sonnet-5-5", false],
+    ["claudeAgent", ["seven_day_fable"], "claude-fable-5-1", true],
+    ["claudeAgent", ["seven_day"], "claude-sonnet-5-5", true],
   ] as const)("matches %s pools %s to %s", (driver, ids, model, usesFallback) => {
     const defaultSelection = { ...selection, model };
     expect(
@@ -150,6 +154,98 @@ describe("new thread model fallback", () => {
         ],
       }).selection,
     ).toEqual(usesFallback ? fallback : defaultSelection);
+  });
+});
+
+describe("a usage-limit stop and the model a thread would run on", () => {
+  const claude = ProviderInstanceId.make("claude");
+  const fable = "claude-fable-5-1";
+  const opus = "claude-opus-5-5";
+  const sonnet = "claude-sonnet-5-5";
+  // The stop was seen on Haiku, so every model below is another model on that instance.
+  const failed = { providerInstanceId: claude, modelSelection: { model: "claude-haiku-5-5" } };
+  const reading = (windows: ReadonlyArray<readonly [id: string, usedPercent: number]>) =>
+    provider({
+      instanceId: claude,
+      driver: ProviderDriverKind.make("claudeAgent"),
+      usageLimits: {
+        checkedAt: "2026-09-03T11:00:00.000Z",
+        windows: windows.map(([id, usedPercent]) => ({ ...window, id, usedPercent })),
+      },
+    });
+  const binds = (model: string, windows: ReadonlyArray<readonly [string, number]>) =>
+    usageLimitBindsSelection({
+      failed,
+      selection: { instanceId: claude, model },
+      provider: reading(windows),
+      now,
+    });
+
+  it.each([
+    ["five_hour", [true, true, true]],
+    ["seven_day", [true, true, true]],
+    ["seven_day_fable", [true, false, false]],
+    ["seven_day_opus", [false, true, false]],
+  ] as const)("%s at 100 holds Fable, Opus, Sonnet: %j", (id, held) => {
+    expect([fable, opus, sonnet].map((model) => binds(model, [[id, 100]]))).toEqual(held);
+  });
+  it("holds Fable on the overall weekly even while its own share reads lower", () => {
+    expect(
+      binds(fable, [
+        ["seven_day", 100],
+        ["seven_day_fable", 40],
+      ]),
+    ).toBe(true);
+  });
+  it("holds the model the limit was seen on, with no reading", () => {
+    expect(
+      usageLimitBindsSelection({
+        failed,
+        selection: { instanceId: claude, model: failed.modelSelection.model },
+        provider: undefined,
+        now,
+      }),
+    ).toBe(true);
+  });
+  it.each([
+    ["no reading, as for a free cap", undefined],
+    ["no window at 100", reading([["seven_day", 99]])],
+    [
+      "a window past its reset",
+      provider({
+        instanceId: claude,
+        usageLimits: {
+          checkedAt: "2026-09-03T11:00:00.000Z",
+          windows: [
+            { ...window, id: "seven_day", usedPercent: 100, resetsAt: "2026-09-03T11:59:59.000Z" },
+          ],
+        },
+      }),
+    ],
+  ] as const)("leaves another model room with %s", (_name, reading) => {
+    expect(
+      usageLimitBindsSelection({
+        failed,
+        selection: { instanceId: claude, model: sonnet },
+        provider: reading,
+        now,
+      }),
+    ).toBe(false);
+  });
+  // The user's rule: a window binding the model work would run on stops it, whatever the instance.
+  const work = ProviderInstanceId.make("claude_work");
+  it.each([
+    ["its five-hour at 100", fable, { ...reading([["five_hour", 100]]), instanceId: work }, true],
+    [
+      "no reading, on the model the limit was seen on",
+      failed.modelSelection.model,
+      undefined,
+      false,
+    ],
+  ] as const)("holds another instance by its own reading: %s", (_name, model, provider, held) => {
+    expect(
+      usageLimitBindsSelection({ failed, selection: { instanceId: work, model }, provider, now }),
+    ).toBe(held);
   });
 });
 

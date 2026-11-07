@@ -256,12 +256,19 @@ thread** from its long-press menu on mobile.
 
 **Limited** means the provider stopped on a usage or rate limit. The conversation
 keeps the provider's explanation. Retry after the limit resets, or switch to
-another provider instance.
+another provider instance or to a model the limit doesn't cover, such as Sonnet
+when only Claude's Fable weekly share has run out.
 Press **Resume** in an empty composer to continue a limited or interrupted turn
 manually. Do this when the provider reports no reset time, because nothing
 continues the turn on its own.
 Queued messages stay saved while the limit blocks the thread. They run after
-the continuation finishes. If the queue was held by a restart, resume it then.
+the continuation finishes. Picking another model in the composer moves the
+thread only when you press **Resume** or send. An agent that moves the thread to
+another model starts the queue as sending a message does, so the stopped turn
+isn't continued unless you use **Resume**. A message queued for the limited
+model goes with the thread while that limit is still the thread's last stop, or,
+once another turn has run, until the limit's reported reset. If the queue was
+held by a restart, resume it then.
 
 When the provider reports a reset time, choose **Resume at reset** to schedule a
 continuation. You can cancel it from the thread. Enable **Resume after

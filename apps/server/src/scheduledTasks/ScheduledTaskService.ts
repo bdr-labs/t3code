@@ -43,7 +43,10 @@ import {
   usageLimitBlockedRun,
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
-import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+import {
+  resolveNewThreadModelSelection,
+  usageLimitBindsSelection,
+} from "@t3tools/shared/usageLimits";
 import * as Exit from "effect/Exit";
 import * as Duration from "effect/Duration";
 import * as Metric from "effect/Metric";
@@ -366,18 +369,20 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * The reset a fire waits for: the latest executed run failed on a usage limit, on the instance the
- * thread uses now (the orchestrator's usageLimitHoldsQueue), and the limit's reset is known, ahead,
- * and later than that failure (a reset at or before it is stale, as in limitRecoveryCommand).
+ * The reset a fire waits for: the latest executed run failed on a usage limit that binds the model
+ * the thread uses now (the orchestrator's usageLimitHoldsQueue), and the limit's reset is known,
+ * ahead, and later than that failure (a reset at or before it is stale, as in limitRecoveryCommand).
  */
 function usageLimitResetAhead(
   records: Pick<
     OrchestrationV2ThreadProjection,
     "thread" | "runs" | "turnItems" | "providerSessions"
   >,
+  providers: ReadonlyArray<ServerProvider>,
   now: DateTime.DateTime,
 ): DateTime.Utc | null {
-  const instanceId = records.thread.modelSelection.instanceId;
+  const selection = records.thread.modelSelection;
+  const instanceId = selection.instanceId;
   const [session] = records.providerSessions
     .filter((candidate) => candidate.providerInstanceId === instanceId)
     .toSorted(
@@ -385,7 +390,16 @@ function usageLimitResetAhead(
         DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
     );
   const run = usageLimitBlockedRun(records.runs, records.turnItems, session?.lastError ?? null);
-  if (run?.providerInstanceId !== instanceId) return null;
+  if (
+    run === null ||
+    !usageLimitBindsSelection({
+      failed: run,
+      selection,
+      provider: providers.find((provider) => provider.instanceId === instanceId),
+      now: DateTime.toEpochMillis(now),
+    })
+  )
+    return null;
   const reported = latestRootProviderFailure(run, records.turnItems)?.resetAt;
   const reset = reported == null ? null : Option.getOrNull(DateTime.make(reported));
   if (reset === null) return null;
@@ -1065,7 +1079,17 @@ export const layer = Layer.effect(
                   { turnItemTypes: ["error"] },
                 )
                 .pipe(Effect.orElseSucceed(() => null));
-        const resetAhead = records === null ? null : usageLimitResetAhead(records, startedAt);
+        // A failed provider read is no reading, which gives another model room.
+        const resetAhead =
+          records === null
+            ? null
+            : usageLimitResetAhead(
+                records,
+                yield* providerRegistry.getProviders.pipe(
+                  Effect.catchCause(() => Effect.succeed([])),
+                ),
+                startedAt,
+              );
         if (trigger !== "webhook" && resetAhead !== null) {
           return yield* recordUnsentFire(active, trigger, iso(resetAhead), startedAt);
         }

@@ -58,8 +58,42 @@ export function exhaustedUsageWindow(
         (window) => !window.id.startsWith("go_") || model.startsWith("opencode-go/"),
       );
     default:
-      return exhausted[0];
+      return exhausted.find((window) => windowBindsModel(window, model));
   }
+}
+
+const normalizeModelScope = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+
+/** A model-scoped weekly (`seven_day_fable`) limits only its family; every other window limits every model. */
+export function windowBindsModel(
+  window: Pick<ServerProviderUsageWindow, "id">,
+  model: string,
+): boolean {
+  const scope = /^seven_day_(.+)$/.exec(window.id)?.[1];
+  return scope === undefined || normalizeModelScope(model).includes(normalizeModelScope(scope));
+}
+
+/**
+ * Whether a usage-limit stop still holds work about to run on `selection`. The limit was seen on
+ * the failed run's model and instance; anything else is held only by a window of the selected
+ * instance that binds its model, so with no reading it has room and at worst fails once.
+ */
+export function usageLimitBindsSelection(input: {
+  readonly failed: {
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly modelSelection: Pick<ModelSelection, "model">;
+  };
+  readonly selection: Pick<ModelSelection, "instanceId" | "model">;
+  readonly provider: ServerProvider | undefined;
+  readonly now: number;
+}): boolean {
+  if (
+    input.failed.providerInstanceId === input.selection.instanceId &&
+    input.failed.modelSelection.model === input.selection.model
+  ) {
+    return true;
+  }
+  return exhaustedUsageWindow(input.provider, input.now, input.selection.model) !== undefined;
 }
 
 export function resolveNewThreadModelSelection(input: {

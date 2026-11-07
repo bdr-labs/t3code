@@ -167,6 +167,7 @@ const stoppedRecords = (resetAt: string) => {
         ordinal: 1,
         status: "failed",
         providerInstanceId: codex,
+        modelSelection: ordinaryRecords.thread.modelSelection,
         rootNodeId: "node:stopped",
         startedAt: at,
         completedAt: at,

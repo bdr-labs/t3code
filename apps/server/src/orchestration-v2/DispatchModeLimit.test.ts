@@ -344,6 +344,19 @@ it.layer(layerWithCeiling)("runtime mode ceiling", (it) => {
         ],
       });
 
+      // A model change starts a waiting queue, but not above the ceiling.
+      yield* orchestrator.dispatch({
+        type: "thread.model-selection.set",
+        commandId: CommandId.make("model:ceiling-queue"),
+        threadId,
+        modelSelection: { instanceId, model: "gpt-5.5" },
+      });
+      assert.equal(
+        (yield* orchestrator.getThreadRecords(threadId, ["runs"])).runs.find(
+          (run) => run.id === waiting!.id,
+        )?.status,
+        "queued",
+      );
       yield* orchestrator.dispatch({
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("lower:ceiling-queue"),

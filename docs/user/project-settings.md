@@ -94,7 +94,9 @@ sends nothing until the limit resets, and its last run shows as failed with the
 reason. A timed task tries again at its next run or when the limit resets, whichever
 comes first; a **Once** task waits for the reset. **Run now** on such a thread only
 reports why. If a limit has no known reset time, the task sends as usual and may
-hit the limit again. A webhook task bound to a limited thread doesn't wait: it
+hit the limit again. Once you move the thread to another model or provider, the
+task sends unless a usage window covering the new model, such as Claude's overall
+weekly, is used up. A webhook task bound to a limited thread doesn't wait: it
 starts a run that hits the limit. A task that starts a new thread, on a webhook
 too, uses your fallback model when its own has run out.
 

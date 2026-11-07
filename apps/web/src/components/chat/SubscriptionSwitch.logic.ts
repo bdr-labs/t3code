@@ -4,7 +4,7 @@ import type {
   ServerProviderUsageLimits,
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
-import { formatResetsIn } from "@t3tools/shared/usageLimits";
+import { formatResetsIn, windowBindsModel } from "@t3tools/shared/usageLimits";
 
 import { composerLimitResetPending, composerLimitsFreshness } from "./ComposerStats.logic";
 
@@ -66,8 +66,6 @@ export function isRunningOut(pace: WindowPace): boolean {
   );
 }
 
-const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-
 /**
  * The windows that limit this model: every account-wide window plus the
  * model-scoped weeklies (`seven_day_opus`, `seven_day_fable`) of its family.
@@ -76,11 +74,7 @@ export function windowsForModel(
   limits: ServerProviderUsageLimits,
   model: string,
 ): ReadonlyArray<ServerProviderUsageWindow> {
-  const slug = normalize(model);
-  return limits.windows.filter((window) => {
-    const scope = /^seven_day_(.+)$/.exec(window.id)?.[1];
-    return scope === undefined || slug.includes(normalize(scope));
-  });
+  return limits.windows.filter((window) => windowBindsModel(window, model));
 }
 
 interface Assessment {

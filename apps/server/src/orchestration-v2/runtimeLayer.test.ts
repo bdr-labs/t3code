@@ -73,6 +73,7 @@ import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderL
 import * as ModelManifest from "../provider/ModelManifest.ts";
 import * as ProviderInstanceRegistryMutator from "../provider/ProviderInstanceRegistryMutator.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ProviderUsageReading from "./ProviderUsageReading.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
@@ -5637,10 +5638,20 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       yield* witness.end("active", "completed");
       assert.equal(yield* Queue.take(witness.startedRunIds), (yield* witness.runFor("queued")).id);
       assert.isTrue((yield* dispatcher.runFor("issue")).queueHeld);
+      // A model change starts a waiting queue, but not one held for the missing worktree.
+      yield* orchestrator.dispatch({
+        type: "thread.model-selection.set",
+        commandId: CommandId.make(`${dispatcherId}:model`),
+        threadId: dispatcherId,
+        modelSelection: { ...modelSelection, model: "gpt-5.5" },
+      });
+      const issue = yield* dispatcher.runFor("issue");
+      assert.equal(issue.status, "queued");
+      assert.isTrue(issue.queueHeld);
     }),
   );
 
-  it.effect("keeps queued user selections and pauses only the limited provider", () =>
+  it.effect("moves a message queued for a limited provider with the thread, keeping others", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const eventSink = yield* EventSink.EventSinkV2;
@@ -5748,12 +5759,6 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           },
         ],
       });
-      yield* orchestrator.dispatch({
-        type: "thread.model-selection.set",
-        commandId: CommandId.make(`${threadId}:select-other`),
-        threadId,
-        modelSelection: queuedSelection,
-      });
       yield* orchestrator.resumeQueuedRuns;
       const held = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(held.runs.find((run) => run.id === limited.id)?.status, "queued");
@@ -5766,41 +5771,22 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         .pipe(Effect.flip);
       assert.equal(blocked._tag, "OrchestratorDispatchError");
 
+      // Another instance has room, so the move alone starts the message queued for the limited one.
+      const moved = { instanceId: alternateInstanceId, model: modelSelection.model };
       yield* orchestrator.dispatch({
         type: "thread.model-selection.set",
-        commandId: CommandId.make(`${threadId}:select-original`),
+        commandId: CommandId.make(`${threadId}:select-other`),
         threadId,
-        modelSelection,
+        modelSelection: moved,
       });
-      yield* orchestrator.dispatch({
-        type: "queued-run.cancel",
-        commandId: CommandId.make(`${threadId}:cancel-limited`),
-        threadId,
-        runId: limited.id,
-      });
-      yield* eventSink.write({
-        events: [
-          {
-            id: EventId.make(`${threadId}:hold-available`),
-            type: "run.updated",
-            threadId,
-            runId: available.id,
-            occurredAt: now,
-            payload: { ...available, queueHeld: true },
-          },
-        ],
-      });
-      yield* orchestrator.dispatch({
-        type: "queue.resume",
-        commandId: CommandId.make(`${threadId}:resume-available`),
-        threadId,
-      });
-      yield* orchestrator.resumeQueuedRuns;
       const after = yield* orchestrator.getThreadProjection(threadId);
-      const started = after.runs.find((run) => run.id === available.id);
+      const started = after.runs.find((run) => run.id === limited.id);
       assert.equal(started?.status, "starting");
-      assert.deepEqual(started?.modelSelection, queuedSelection);
-      assert.deepEqual(after.thread.modelSelection, queuedSelection);
+      assert.deepEqual(started?.modelSelection, moved);
+      assert.deepEqual(after.thread.modelSelection, moved);
+      const waiting = after.runs.find((run) => run.id === available.id);
+      assert.equal(waiting?.status, "queued");
+      assert.deepEqual(waiting?.modelSelection, queuedSelection);
     }),
   );
 
@@ -6748,6 +6734,364 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.equal(cancelAgainError._tag, "OrchestratorDispatchError");
     }),
   );
+});
+
+const claudeFable = { ...modelSelection, model: "claude-fable-5-1" };
+const claudeSonnet = { ...modelSelection, model: "claude-sonnet-5-5" };
+const usageReading = (
+  windows: ReadonlyArray<readonly [id: string, usedPercent: number]>,
+  resetsAt: string,
+): ServerProvider => ({
+  instanceId: modelSelection.instanceId,
+  driver,
+  enabled: true,
+  installed: true,
+  version: null,
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: resetsAt,
+  models: [],
+  slashCommands: [],
+  skills: [],
+  usageLimits: {
+    checkedAt: resetsAt,
+    windows: windows.map(([id, usedPercent]) => ({
+      id,
+      kind: "weekly",
+      label: id,
+      usedPercent,
+      resetsAt,
+    })),
+  },
+});
+const sendOnThread = (
+  threadId: ThreadId,
+  key: string,
+  type: "start_immediately" | "queue_after_active",
+  selection?: ModelSelection,
+) =>
+  Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+    orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make(`${threadId}:${key}`),
+      threadId,
+      messageId: MessageId.make(`${threadId}:${key}`),
+      text: key,
+      attachments: [],
+      dispatchMode: { type },
+      createdBy: "user",
+      creationSource: "web",
+      ...(selection === undefined ? {} : { modelSelection: selection }),
+    }),
+  );
+// A Fable thread whose turn stopped on a usage limit, with messages queued behind it: the first
+// ones for the selections given, the rest for Fable.
+const limitStoppedOnFable = (
+  threadId: ThreadId,
+  queued: number,
+  queuedOn: ReadonlyArray<ModelSelection> = [],
+  resetIn: Partial<DateTime.DateTime.PartsForMath> = { days: 3 },
+) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const eventSink = yield* EventSink.EventSinkV2;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`${threadId}:create`),
+      threadId,
+      projectId: ProjectId.make(`${threadId}:project`),
+      title: "Limited on Fable",
+      modelSelection: claudeFable,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: process.cwd(),
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* sendOnThread(threadId, "first", "start_immediately");
+    for (let index = 0; index < queued; index++) {
+      yield* sendOnThread(threadId, `queued-${index}`, "queue_after_active", queuedOn[index]);
+    }
+    const [stopped, ...waiting] = (yield* orchestrator.getThreadProjection(threadId)).runs;
+    assert.isDefined(stopped);
+    assert.isNotNull(stopped.rootNodeId);
+    const now = yield* DateTime.now;
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make(`${threadId}:error`),
+          type: "turn-item.updated",
+          threadId,
+          runId: stopped.id,
+          nodeId: stopped.rootNodeId,
+          providerInstanceId: stopped.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`${threadId}:error`),
+            type: "error",
+            threadId,
+            runId: stopped.id,
+            nodeId: stopped.rootNodeId,
+            providerThreadId: stopped.providerThreadId,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 2,
+            status: "failed",
+            title: "Usage limit reached",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            failure: {
+              class: "usage_limit",
+              message: "Plan limit reached.",
+              code: "usageLimitExceeded",
+              retryable: null,
+              resetAt: DateTime.formatIso(DateTime.add(now, resetIn)),
+            },
+          },
+        },
+        {
+          id: EventId.make(`${threadId}:failed`),
+          type: "run.updated",
+          threadId,
+          runId: stopped.id,
+          providerInstanceId: stopped.providerInstanceId,
+          occurredAt: now,
+          payload: { ...stopped, status: "failed", completedAt: now },
+        },
+      ],
+    });
+    return waiting;
+  });
+const selectModel = (threadId: ThreadId, selection: ModelSelection, key: string) =>
+  Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+    orchestrator.dispatch({
+      type: "thread.model-selection.set",
+      commandId: CommandId.make(`${threadId}:select:${key}`),
+      threadId,
+      modelSelection: selection,
+    }),
+  );
+const resumeQueue = (threadId: ThreadId, key: string) =>
+  Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+    orchestrator.dispatch({
+      type: "queue.resume",
+      commandId: CommandId.make(`${threadId}:resume:${key}`),
+      threadId,
+    }),
+  ).pipe(Effect.exit);
+const queuedRunOf = (threadId: ThreadId, runId: RunId) =>
+  Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+    orchestrator.getThreadProjection(threadId),
+  ).pipe(Effect.map(({ runs }) => runs.find((run) => run.id === runId)!));
+
+// The orchestrator reads its usage reading when it is built, so each test builds its own.
+describe("a usage-limit hold on the model the thread would run on", () => {
+  type Readings = { current: ServerProvider | undefined };
+  // Like the registry, a read returns only the snapshot of the instance asked for.
+  const layerReading = (readings: Readings) =>
+    layerTest.pipe(
+      Layer.provide(
+        Layer.succeed(ProviderUsageReading.ProviderUsageReading, (instanceId) =>
+          Effect.sync(() =>
+            readings.current?.instanceId === instanceId ? readings.current : undefined,
+          ),
+        ),
+      ),
+    );
+  const elsewhere = { instanceId: alternateInstanceId, model: "gpt-5.5" };
+
+  it.effect.each([
+    ["only Fable's weekly share is out", true],
+    ["nothing is read, as for a free cap", false],
+  ] as const)("a Fable thread moved to Sonnet when %s runs its queue there", ([, read]) => {
+    const readings: Readings = { current: undefined };
+    return Effect.gen(function* () {
+      const threadId = ThreadId.make(`usage-hold:to-sonnet:${read}`);
+      const [first, second] = yield* limitStoppedOnFable(threadId, 2);
+      const resetsAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { days: 3 }));
+      if (read) readings.current = usageReading([["seven_day_fable", 100]], resetsAt);
+      yield* selectModel(threadId, claudeSonnet, "sonnet");
+      const started = yield* queuedRunOf(threadId, first!.id);
+      assert.equal(started.status, "starting");
+      assert.deepEqual(started.modelSelection, claudeSonnet);
+
+      // The next message was queued for Fable too, and follows the thread rather than taking it back.
+      const eventSink = yield* EventSink.EventSinkV2;
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make(`${threadId}:first-done`),
+            type: "run.updated",
+            threadId,
+            runId: started.id,
+            providerInstanceId: started.providerInstanceId,
+            occurredAt: yield* DateTime.now,
+            payload: { ...started, status: "completed", completedAt: yield* DateTime.now },
+          },
+        ],
+      });
+      assert.equal((yield* resumeQueue(threadId, "second"))._tag, "Success");
+      const next = yield* queuedRunOf(threadId, second!.id);
+      assert.equal(next.status, "starting");
+      assert.deepEqual(next.modelSelection, claudeSonnet);
+      const { thread } = yield* Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+        orchestrator.getThreadProjection(threadId),
+      );
+      assert.deepEqual(thread.modelSelection, claudeSonnet);
+    }).pipe(Effect.provide(layerReading(readings)));
+  });
+
+  it.effect("holds a moved thread only while a window binds the model it moved to", () => {
+    const readings: Readings = { current: undefined };
+    return Effect.gen(function* () {
+      const threadId = ThreadId.make("usage-hold:binding-window");
+      const [queued] = yield* limitStoppedOnFable(threadId, 1);
+      const resetsAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { hours: 1 }));
+
+      // The overall weekly binds every model.
+      readings.current = usageReading([["seven_day", 100]], resetsAt);
+      yield* selectModel(threadId, claudeSonnet, "weekly-out");
+      assert.equal((yield* queuedRunOf(threadId, queued!.id)).status, "queued");
+      assert.equal((yield* resumeQueue(threadId, "weekly-out"))._tag, "Failure");
+
+      // Back on Fable, where the limit was seen, nothing starts even with no usageReading.
+      readings.current = undefined;
+      yield* selectModel(threadId, claudeFable, "fable-again");
+      assert.equal((yield* queuedRunOf(threadId, queued!.id)).status, "queued");
+      assert.equal((yield* resumeQueue(threadId, "fable-again"))._tag, "Failure");
+
+      // On Sonnet again, the weekly holds it until its reset has passed.
+      readings.current = usageReading([["seven_day", 100]], resetsAt);
+      yield* selectModel(threadId, claudeSonnet, "weekly-again");
+      assert.equal((yield* queuedRunOf(threadId, queued!.id)).status, "queued");
+      yield* TestClock.adjust("61 minutes");
+      assert.equal((yield* resumeQueue(threadId, "after-reset"))._tag, "Success");
+      const started = yield* queuedRunOf(threadId, queued!.id);
+      assert.equal(started.status, "starting");
+      assert.deepEqual(started.modelSelection, claudeSonnet);
+    }).pipe(Effect.provide(layerReading(readings)));
+  });
+
+  it.effect("holds a thread moved to another instance by that instance's own reading", () => {
+    const readings: Readings = { current: undefined };
+    return Effect.gen(function* () {
+      const threadId = ThreadId.make("usage-hold:other-instance");
+      const [queued] = yield* limitStoppedOnFable(threadId, 1);
+      const resetsAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { hours: 4 }));
+      readings.current = {
+        ...usageReading([["five_hour", 100]], resetsAt),
+        instanceId: alternateInstanceId,
+      };
+      yield* selectModel(threadId, elsewhere, "elsewhere-out");
+      assert.equal((yield* queuedRunOf(threadId, queued!.id)).status, "queued");
+      assert.equal((yield* resumeQueue(threadId, "elsewhere-out"))._tag, "Failure");
+
+      // The stopped instance's reading says nothing of the one the thread moved to.
+      readings.current = usageReading([["five_hour", 100]], resetsAt);
+      assert.equal((yield* resumeQueue(threadId, "stopped-instance-out"))._tag, "Success");
+      const started = yield* queuedRunOf(threadId, queued!.id);
+      assert.equal(started.status, "starting");
+      assert.deepEqual(started.modelSelection, elsewhere);
+    }).pipe(Effect.provide(layerReading(readings)));
+  });
+
+  // While Fable's stop is the thread's latest run, its reset, past or stale, does not send it back.
+  it.effect.each([
+    ["73 hours on, past Fable's reset", "the move", { days: 3 }, "73 hours"],
+    ["73 hours on, past Fable's reset", "queue.resume", { days: 3 }, "73 hours"],
+    ["at once, with a reset reported before the stop", "the move", { minutes: -1 }, "0 millis"],
+    ["at once, with a reset reported before the stop", "queue.resume", { minutes: -1 }, "0 millis"],
+  ] as const)(
+    "a message queued for Fable goes with a thread moved %s, started by %s",
+    ([, startedBy, resetIn, wait]) => {
+      const readings: Readings = { current: undefined };
+      return Effect.gen(function* () {
+        const threadId = ThreadId.make(`usage-hold:moved-past-reset:${wait}:${startedBy}`);
+        const [queued] = yield* limitStoppedOnFable(threadId, 1, [], resetIn);
+        yield* TestClock.adjust(wait);
+        if (startedBy === "queue.resume") {
+          // The window of the instance it moved to holds it, until that reading clears.
+          readings.current = {
+            ...usageReading(
+              [["five_hour", 100]],
+              DateTime.formatIso(DateTime.add(yield* DateTime.now, { hours: 1 })),
+            ),
+            instanceId: alternateInstanceId,
+          };
+        }
+        yield* selectModel(threadId, elsewhere, "away");
+        if (startedBy === "queue.resume") {
+          assert.equal((yield* queuedRunOf(threadId, queued!.id)).status, "queued");
+          assert.equal((yield* resumeQueue(threadId, "window-out"))._tag, "Failure");
+          readings.current = undefined;
+          assert.equal((yield* resumeQueue(threadId, "room"))._tag, "Success");
+        }
+        const started = yield* queuedRunOf(threadId, queued!.id);
+        assert.equal(started.status, "starting");
+        assert.deepEqual(started.modelSelection, elsewhere);
+      }).pipe(Effect.provide(layerReading(readings)));
+    },
+  );
+
+  it.effect("runs a message queued for Fable on Fable once Fable's limit has reset", () => {
+    const readings: Readings = { current: undefined };
+    return Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("usage-hold:after-reset");
+      const [other, fable] = yield* limitStoppedOnFable(threadId, 2, [elsewhere]);
+      assert.equal((yield* resumeQueue(threadId, "other"))._tag, "Success");
+      const started = yield* queuedRunOf(threadId, other!.id);
+      assert.equal(started.status, "starting");
+      assert.deepEqual(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.modelSelection,
+        elsewhere,
+      );
+
+      // That run ends after Fable's reset, three days on, so Fable's message no longer follows.
+      yield* TestClock.adjust("73 hours");
+      const endedAt = yield* DateTime.now;
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make(`${threadId}:other-done`),
+            type: "run.updated",
+            threadId,
+            runId: started.id,
+            providerInstanceId: started.providerInstanceId,
+            occurredAt: endedAt,
+            payload: { ...started, status: "completed", completedAt: endedAt },
+          },
+        ],
+      });
+      assert.equal((yield* resumeQueue(threadId, "fable"))._tag, "Success");
+      const next = yield* queuedRunOf(threadId, fable!.id);
+      assert.equal(next.status, "starting");
+      assert.deepEqual(next.modelSelection, claudeFable);
+    }).pipe(Effect.provide(layerReading(readings)));
+  });
+
+  it.effect("does not start a queue under a running turn when the model changes", () => {
+    const readings: Readings = { current: undefined };
+    return Effect.gen(function* () {
+      const threadId = ThreadId.make("usage-hold:active-run");
+      const [queued] = yield* limitStoppedOnFable(threadId, 1);
+      // The person continues on Sonnet; the message queued for Fable waits behind that turn.
+      yield* sendOnThread(threadId, "continue", "start_immediately");
+      yield* selectModel(threadId, claudeSonnet, "during-run");
+      const { runs } = yield* Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+        orchestrator.getThreadProjection(threadId),
+      );
+      assert.equal(
+        runs.find((run) => run.userMessageId === `${threadId}:continue`)?.status,
+        "starting",
+      );
+      assert.equal((yield* queuedRunOf(threadId, queued!.id)).status, "queued");
+    }).pipe(Effect.provide(layerReading(readings)));
+  });
 });
 
 it.layer(layerSharedApplicationDataPlaneTest)("pending provider interruption", (it) => {
@@ -9439,28 +9783,48 @@ describe("a scheduled fire on the real orchestrator", () => {
   });
 });
 
-// A cycle through a new dependency of the scheduled task service would never finish building.
-it.effect("the production runtime builds with what the scheduled task service now needs", () =>
-  Effect.gen(function* () {
+// A cycle through a new dependency of the scheduled task service would never finish building, and
+// a usage reading provided where the orchestrator is not yet built would leave it reading nothing.
+it.effect("the production runtime builds, and its orchestrator reads the registry's usage", () => {
+  const readings: { current: Effect.Effect<ReadonlyArray<ServerProvider>> } = {
+    current: Effect.succeed([]),
+  };
+  return Effect.gen(function* () {
     const services = yield* Layer.build(
-      RuntimeLayer.layerProduction.pipe(
+      Layer.merge(RuntimeLayer.layerProduction, RuntimeLayer.layerEventSink).pipe(
         Layer.provide(
           Layer.mergeAll(
             ManagedPolicy.layerTest(),
             ServerSettings.layerTest(),
-            ProviderRegistry.layer.pipe(
+            // The real registry, with its readings replaced.
+            Layer.effect(
+              ProviderRegistry.ProviderRegistry,
+              Effect.gen(function* () {
+                const registry = yield* ProviderRegistry.ProviderRegistry;
+                return { ...registry, getProviders: Effect.suspend(() => readings.current) };
+              }),
+            ).pipe(
               Layer.provide(
-                Layer.mergeAll(
-                  Layer.mock(ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator)({}),
-                  Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
-                    getInstance: () => Effect.undefined,
-                    listInstances: Effect.succeed([]),
-                    listUnavailable: Effect.succeed([]),
-                    streamChanges: Stream.empty,
-                    subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
-                  }),
-                  ModelManifest.layerTest,
-                  ProviderLatestVersions.layer,
+                ProviderRegistry.layer.pipe(
+                  Layer.provide(
+                    Layer.mergeAll(
+                      Layer.mock(ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator)(
+                        {},
+                      ),
+                      Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
+                        getInstance: () => Effect.undefined,
+                        listInstances: Effect.succeed([]),
+                        listUnavailable: Effect.succeed([]),
+                        streamChanges: Stream.empty,
+                        subscribeChanges: Effect.flatMap(
+                          PubSub.unbounded<void>(),
+                          PubSub.subscribe,
+                        ),
+                      }),
+                      ModelManifest.layerTest,
+                      ProviderLatestVersions.layer,
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -9493,5 +9857,19 @@ it.effect("the production runtime builds with what the scheduled task service no
     );
     const tasks = Context.get(services, ScheduledTaskService.ScheduledTaskService);
     assert.deepEqual((yield* tasks.list()).tasks, []);
-  }).pipe(Effect.scoped),
-);
+
+    // With no reading Sonnet would have room, so only the registry's weekly can hold this queue.
+    yield* Effect.gen(function* () {
+      const threadId = ThreadId.make("production-usage-reading");
+      const [queued] = yield* limitStoppedOnFable(threadId, 1);
+      const resetsAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { hours: 1 }));
+      readings.current = Effect.succeed([usageReading([["seven_day", 100]], resetsAt)]);
+      yield* selectModel(threadId, claudeSonnet, "weekly-out");
+      assert.equal((yield* queuedRunOf(threadId, queued!.id)).status, "queued");
+      // A read that fails is no reading, so it does not keep the thread stopped.
+      readings.current = Effect.die("provider registry unavailable");
+      assert.equal((yield* resumeQueue(threadId, "unreadable"))._tag, "Success");
+      assert.equal((yield* queuedRunOf(threadId, queued!.id)).status, "starting");
+    }).pipe(Effect.provideContext(services));
+  }).pipe(Effect.scoped);
+});

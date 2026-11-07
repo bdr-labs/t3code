@@ -3,6 +3,7 @@ import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
   OrchestrationV2ThreadHistoryPage,
+  ServerProvider,
 } from "@t3tools/contracts";
 import {
   latestExecutedRun,
@@ -76,6 +77,7 @@ import {
   managedRuntimeModeCeilingMessage,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import { usageLimitBindsSelection } from "@t3tools/shared/usageLimits";
 import { modelSwitchSince } from "./modelSwitch.ts";
 import { recordThreadOpen } from "@t3tools/shared/paletteSearch";
 import {
@@ -168,6 +170,7 @@ import {
   type ShellSnapshotOptions,
 } from "./ProjectionStore.ts";
 import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
+import { ProviderUsageReading } from "./ProviderUsageReading.ts";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
@@ -835,34 +838,78 @@ function followsCurrentConversation(
   );
 }
 
-function queuedRunModelSelection(
-  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "messages">,
+// The person moves a thread to get past a limit, so a message queued for the limited model goes
+// too while that limit is the thread's latest stop, whatever its reset. Once a later run replaced
+// it, only until its reset, and a missing or unreadable reset is still ahead.
+function limitStoppedQueuedModel(
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "turnItems">,
   run: OrchestrationV2Run,
-): ModelSelection {
+  now: number,
+): boolean {
+  const { instanceId, model } = projection.thread.modelSelection;
+  if (instanceId === run.modelSelection.instanceId && model === run.modelSelection.model) {
+    return false;
+  }
+  const latestStop = latestExecutedRun(projection.runs);
+  return projection.runs.some((candidate) => {
+    if (
+      candidate.status !== "failed" ||
+      candidate.completedAt === null ||
+      DateTime.isLessThan(candidate.completedAt, run.requestedAt) ||
+      candidate.modelSelection.instanceId !== run.modelSelection.instanceId ||
+      candidate.modelSelection.model !== run.modelSelection.model
+    ) {
+      return false;
+    }
+    const failure = latestRootProviderFailure(candidate, projection.turnItems);
+    if (failure?.class !== "usage_limit") return false;
+    if (candidate.id === latestStop?.id) return true;
+    const resetMs = Date.parse(failure.resetAt ?? "");
+    return !Number.isFinite(resetMs) || resetMs > now;
+  });
+}
+
+function queuedRunFollowsThread(
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "turnItems" | "messages">,
+  run: OrchestrationV2Run,
+  now: number,
+): boolean {
   const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
-  return followsCurrentConversation(message)
+  return followsCurrentConversation(message) || limitStoppedQueuedModel(projection, run, now);
+}
+
+function queuedRunModelSelection(
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "turnItems" | "messages">,
+  run: OrchestrationV2Run,
+  now: number,
+): ModelSelection {
+  return queuedRunFollowsThread(projection, run, now)
     ? projection.thread.modelSelection
     : run.modelSelection;
 }
 
 function usageLimitHoldsQueue(
   projection: Pick<OrchestrationV2ThreadProjection, "runs" | "turnItems" | "providerSessions">,
-  providerInstanceId: ModelSelection["instanceId"],
+  selection: ModelSelection,
+  provider: ServerProvider | undefined,
+  now: number,
 ): boolean {
   let latestSession: OrchestrationV2ThreadProjection["providerSessions"][number] | undefined;
   for (const session of projection.providerSessions) {
     if (
-      session.providerInstanceId === providerInstanceId &&
+      session.providerInstanceId === selection.instanceId &&
       (latestSession === undefined ||
         DateTime.isGreaterThan(session.updatedAt, latestSession.updatedAt))
     ) {
       latestSession = session;
     }
   }
-  return (
-    usageLimitBlockedRun(projection.runs, projection.turnItems, latestSession?.lastError ?? null)
-      ?.providerInstanceId === providerInstanceId
+  const failed = usageLimitBlockedRun(
+    projection.runs,
+    projection.turnItems,
+    latestSession?.lastError ?? null,
   );
+  return failed !== null && usageLimitBindsSelection({ failed, selection, provider, now });
 }
 
 function latestStableRun(
@@ -1062,6 +1109,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
+  // Read at build: dispatch runs on callers' fibers, which do not carry this layer's references.
+  const readProviderUsage = yield* ProviderUsageReading;
   const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
   const providerSessions = yield* ProviderSessionManagerV2;
   const providerSwitchService = yield* ProviderSwitchServiceV2;
@@ -1677,14 +1726,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const queuedMessage = projection.messages.find(
         (candidate) => candidate.id === storedQueuedRun.userMessageId,
       );
-      const modelSelection = queuedRunModelSelection(projection, storedQueuedRun);
+      const decidedAt = DateTime.toEpochMillis(yield* DateTime.now);
+      const modelSelection = queuedRunModelSelection(projection, storedQueuedRun, decidedAt);
       const queuedRun = {
         ...storedQueuedRun,
         modelSelection,
         providerInstanceId: modelSelection.instanceId,
       };
-      // A limited provider would fail and consume every waiting message.
-      if (usageLimitHoldsQueue(projection, queuedRun.providerInstanceId)) {
+      // A limited model would fail and consume every waiting message.
+      if (
+        usageLimitHoldsQueue(
+          projection,
+          modelSelection,
+          yield* readProviderUsage(modelSelection.instanceId),
+          decidedAt,
+        )
+      ) {
         return;
       }
       // Waits without a hold: lowering the thread's mode starts the queue again.
@@ -1721,7 +1778,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         instanceDisabledForProject ||
         (failureClass !== undefined &&
           failureClass !== "validation_error" &&
-          failedRun?.providerInstanceId === queuedRun.providerInstanceId)
+          failedRun?.providerInstanceId === queuedRun.providerInstanceId &&
+          // A limit reaches another model only through its windows, weighed above.
+          (failureClass !== "usage_limit" ||
+            failedRun.modelSelection.model === queuedRun.modelSelection.model))
       ) {
         const now = yield* DateTime.now;
         yield* writeSystemEvents(
@@ -1806,7 +1866,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const activeProviderThread = projection.providerThreads.find(
         (candidate) => candidate.id === projection.thread.activeProviderThreadId,
       );
-      const followsCurrent = followsCurrentConversation(queuedMessage);
+      const followsCurrent = queuedRunFollowsThread(projection, storedQueuedRun, decidedAt);
       const targetProviderThread = followsCurrent
         ? activeProviderThread?.providerInstanceId === queuedRun.providerInstanceId
           ? activeProviderThread
@@ -13482,18 +13542,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }
         }
         const nextRun = selectedRun ?? queuedRunsInDeliveryOrder(projection)[0];
+        const resumedAt = DateTime.toEpochMillis(yield* DateTime.now);
+        const nextSelection =
+          nextRun === undefined
+            ? projection.thread.modelSelection
+            : queuedRunModelSelection(projection, nextRun, resumedAt);
         if (
           usageLimitHoldsQueue(
             projection,
-            nextRun === undefined
-              ? projection.thread.providerInstanceId
-              : queuedRunModelSelection(projection, nextRun).instanceId,
+            nextSelection,
+            yield* readProviderUsage(nextSelection.instanceId),
+            resumedAt,
           )
         ) {
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause: "Continue the limited thread before resuming its queue.",
+            cause:
+              "This thread's model is out of usage. Continue it after the reset, or move it to a model with room, before resuming its queue.",
           });
         }
         const now = yield* DateTime.now;
@@ -13822,6 +13888,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (
       command.type === "queue.resume" ||
       command.type === "queued-run.start" ||
+      // A thread moved off a limit may now have room; the hold and every other check still apply.
+      command.type === "thread.model-selection.set" ||
+      command.type === "provider.switch" ||
       (command.type === "thread.runtime-mode.set" && runtimeModeCeiling !== undefined)
     ) {
       yield* mapDispatchError(command)(

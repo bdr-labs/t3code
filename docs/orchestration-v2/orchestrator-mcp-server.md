@@ -500,8 +500,9 @@ Explicit `bindToCurrentThread: true` without a caller thread in that project
 is rejected. Pausing uses `schedule_task` with `scheduledTaskId` and `enabled: false`;
 deletion is permanent.
 
-While a bound task's thread is stopped on a usage limit on the provider it uses
-now, and that limit's reset is known and ahead, a run sends nothing and records
+While a bound task's thread is stopped on a usage limit and is still on the model
+that hit it, or on a model that a used-up window of its current instance binds,
+and that limit's reset is known and ahead, a run sends nothing and records
 `failed` with the reason in `lastRunError`. A timed run tries again at its next
 run or at the reset, whichever comes first, and a `once` task at the reset; Run
 now leaves `nextRunAt` alone. A limit with no reset time, or a reset no later than

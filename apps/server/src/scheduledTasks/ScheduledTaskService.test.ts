@@ -39,14 +39,14 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
-import { layerNewThreadModelTest } from "./testLayers.ts";
+import { layerNewThreadModelTest, layerProvidersTest } from "./testLayers.ts";
 
 const isScheduledTaskError = Schema.is(ScheduledTaskError);
 
 const codex = ProviderInstanceId.make("codex");
 const alternate = ProviderInstanceId.make("codex_alternate");
-const threadOn = (instanceId: ProviderInstanceId) => ({
-  modelSelection: { instanceId, model: "gpt-5.4" },
+const threadOn = (instanceId: ProviderInstanceId, model = "gpt-5.4") => ({
+  modelSelection: { instanceId, model },
 });
 const ordinaryRecords = {
   thread: threadOn(codex),
@@ -59,18 +59,20 @@ const stoppedRecords = (input: {
   readonly failureClass?: string;
   readonly resetAt?: string | null;
   readonly threadInstance?: ProviderInstanceId;
+  readonly threadModel?: string;
   readonly providerSessions?: ReadonlyArray<unknown>;
   readonly completedAt?: string;
 }) => {
   const at = DateTime.makeUnsafe(input.completedAt ?? "2026-09-09T11:00:00.000Z");
   return {
-    thread: threadOn(input.threadInstance ?? codex),
+    thread: threadOn(input.threadInstance ?? codex, input.threadModel),
     runs: [
       {
         id: "run:stopped",
         ordinal: 1,
         status: "failed",
         providerInstanceId: codex,
+        modelSelection: threadOn(codex).modelSelection,
         rootNodeId: "node:stopped",
         startedAt: at,
         completedAt: at,
@@ -720,6 +722,7 @@ type Fires = {
 const withFires = <A, E>(
   body: (fires: Fires) => Effect.Effect<A, E>,
   state?: Pick<Fires, "sent" | "records">,
+  providers = layerNewThreadModelTest,
 ) =>
   Effect.gen(function* () {
     const sent = state?.sent ?? (yield* Ref.make<ReadonlyArray<string>>([]));
@@ -729,7 +732,7 @@ const withFires = <A, E>(
       Layer.provide(
         Layer.mergeAll(
           taskDependencies,
-          layerNewThreadModelTest,
+          providers,
           Layer.succeed(Scheduler.Scheduler, {
             register: <E, R>(name: string, work: Effect.Effect<void, E, R>) =>
               Effect.gen(function* () {
@@ -1141,6 +1144,71 @@ it.effect.each([
       assert.isNull(stored.lastRunError);
       assert.equal(stored.nextRunAt, later(task.nextRunAt!, HOUR_MS));
     }),
+  ),
+);
+
+const exhaustedOn = (instanceId: ProviderInstanceId) =>
+  Effect.succeed([
+    {
+      instanceId,
+      driver: ProviderDriverKind.make("codex"),
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: FIRE_AT,
+      models: [],
+      slashCommands: [],
+      skills: [],
+      usageLimits: {
+        checkedAt: FIRE_AT,
+        windows: [
+          {
+            id: "seven_day",
+            kind: "weekly",
+            label: "Weekly",
+            usedPercent: 100,
+            resetsAt: RESET_AT,
+          },
+        ],
+      },
+    } satisfies ServerProvider,
+  ]);
+
+// The limit was seen on codex's gpt-5.4; only a window of the thread's new instance that binds its
+// new model holds the fire.
+it.effect.each([
+  ["a model whose provider has room", codex, Effect.succeed([]), ["queue"]],
+  ["a model whose provider cannot be read", codex, Effect.die("unreadable"), ["queue"]],
+  ["a model whose provider reads its weekly at 100", codex, exhaustedOn(codex), []],
+  ["another provider that reads its own weekly at 100", alternate, exhaustedOn(alternate), []],
+  [
+    "another provider while only the stopped one reads at 100",
+    alternate,
+    exhaustedOn(codex),
+    ["queue"],
+  ],
+] as const)("a fire on a thread moved to %s", ([, threadInstance, providers, sent]) =>
+  startClock.pipe(
+    Effect.andThen(
+      withFires(
+        (fires) =>
+          Effect.gen(function* () {
+            const { task } = yield* fires.service.upsert(boundTask(INTERVAL));
+            yield* Ref.set(
+              fires.records,
+              stoppedRecords({ resetAt: RESET_AT, threadInstance, threadModel: "gpt-5.5" }),
+            );
+            yield* TestClock.setTime(Date.parse(task.nextRunAt!));
+            yield* fires.sweep;
+            assert.deepEqual(yield* Ref.get(fires.sent), sent);
+          }),
+        undefined,
+        layerProvidersTest(providers),
+      ),
+    ),
+    Effect.provide(SqlitePersistence.layerMemory),
   ),
 );
 
