@@ -955,7 +955,11 @@ function ScheduledTaskRow({
             ) : isWebhook ? (
               "Listening"
             ) : task.schedule.type === "usage" ? (
-              "Watching usage"
+              task.schedule.state?.owedSince === undefined ? (
+                "Watching usage"
+              ) : (
+                "Renewal waiting"
+              )
             ) : task.nextRunAt ? (
               <>
                 Next run <ScheduledRelativeLabel value={task.nextRunAt} />

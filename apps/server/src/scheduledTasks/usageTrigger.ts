@@ -17,6 +17,8 @@ const RESET_HOLD_MS = 60_000;
 const EARLY_RESET_FALL_POINTS = 5;
 /** A spent line arms again only this far back, so a small move is still the same crossing. */
 const LINE_REARM_POINTS = 5;
+/** An owed renewal looks again this often, so a thread moved or resumed sends within a minute. */
+const OWED_RECHECK_MS = 60_000;
 
 /** `state` is the schedule's own object when nothing changed, so the caller writes only a change. */
 type UsageTriggerResult = {
@@ -155,20 +157,28 @@ export function evaluateUsageTrigger(input: {
       ? undefined
       : resolveUsageWindow(limits.windows, schedule.window);
   if (window === undefined) return { fire: false, state: schedule.state };
-  return schedule.on === "reset"
-    ? evaluateReset(schedule, window, nowMs)
-    : evaluateLine(schedule, window, nowMs);
+  const result =
+    schedule.on === "reset"
+      ? evaluateReset(schedule, window, nowMs)
+      : evaluateLine(schedule, window, nowMs);
+  // Only the service settles an owed renewal; a later one while it waits stays this one fire.
+  const owedSince = schedule.state?.owedSince;
+  return owedSince === undefined || result.state === schedule.state
+    ? result
+    : { fire: result.fire, state: { ...result.state, owedSince } };
 }
 
 /**
  * When time alone can fire this task. A reset past its hold and still unfired had no reading to
- * fire on, so the next reading, not the clock, brings it back.
+ * fire on, so the next reading, not the clock, brings it back. An owed renewal looks again within
+ * a minute; the service weighs the reset it waits for.
  */
 export function usageTriggerDueAtMs(schedule: ScheduledTaskUsageSchedule, nowMs: number): number {
-  if (schedule.on !== "reset") return Infinity;
+  const recheck = schedule.state?.owedSince === undefined ? Infinity : nowMs + OWED_RECHECK_MS;
+  if (schedule.on !== "reset") return recheck;
   const unfired = unfiredReset(schedule.state);
   const dueAt = unfired === null ? Infinity : unfired.resetMs + RESET_HOLD_MS;
-  return dueAt > nowMs ? dueAt : Infinity;
+  return Math.min(dueAt > nowMs ? dueAt : Infinity, recheck);
 }
 
 /**

@@ -595,6 +595,71 @@ describe("a usage reset", () => {
     // Past its minute and still unfired means no reading: the next one invalidates the hint.
     expect(usageTriggerDueAtMs(renews(recorded()), T_MS + 61 * SECOND)).toBe(Infinity);
   });
+
+  describe("while a renewal is owed", () => {
+    const OWED = at(-HOUR);
+
+    it.each<
+      [
+        string,
+        ScheduledTaskUsageState,
+        Partial<ServerProviderUsageWindow>,
+        number,
+        boolean,
+        ScheduledTaskUsageState,
+      ]
+    >([
+      [
+        "a later renewal fires again with its own firedFor, and stays the one owed fire",
+        recorded({ firedFor: at(-2 * HOUR), owedSince: OWED }),
+        { resetsAt: T, usedPercent: 80 },
+        T_MS + 60 * SECOND,
+        true,
+        recorded({ firedFor: T, owedSince: OWED }),
+      ],
+      [
+        "the new period's first reading is recorded, still owed",
+        recorded({ firedFor: T, owedSince: OWED }),
+        { resetsAt: NEXT, usedPercent: 2 },
+        T_MS + 70 * SECOND,
+        false,
+        { resetsAt: NEXT, usedPercent: 2, firedFor: T, owedSince: OWED },
+      ],
+      [
+        "an early reset credit, still owed",
+        recorded({ owedSince: OWED }),
+        { resetsAt: NEXT, usedPercent: 75 },
+        NOW_MS,
+        true,
+        { resetsAt: NEXT, usedPercent: 75, firedFor: T, owedSince: OWED },
+      ],
+    ])("%s", (_name, state, reading, nowMs, fire, next) => {
+      expect(
+        evaluateUsageTrigger({
+          schedule: renews(state),
+          limits: limitsOf(weekly(reading)),
+          nowMs,
+        }),
+      ).toEqual({ fire, state: next });
+    });
+
+    it("an unchanged reading or none at all is the same state, so a re-check writes nothing", () => {
+      const state = recorded({ firedFor: T, owedSince: OWED });
+      for (const limits of [limitsOf(weekly({ resetsAt: T, usedPercent: 80 })), undefined]) {
+        expect(
+          evaluateUsageTrigger({ schedule: renews(state), limits, nowMs: T_MS + HOUR }).state,
+        ).toBe(state);
+      }
+    });
+
+    it("the sweep looks again within a minute, or at a reset due sooner", () => {
+      expect(usageTriggerDueAtMs(renews(recorded({ firedFor: T, owedSince: OWED })), NOW_MS)).toBe(
+        NOW_MS + 60 * SECOND,
+      );
+      const unfired = renews(recorded({ firedFor: at(-2 * HOUR), owedSince: OWED }));
+      expect(usageTriggerDueAtMs(unfired, T_MS + 30 * SECOND)).toBe(T_MS + 60 * SECOND);
+    });
+  });
 });
 
 describe("through the registry's real merge", () => {

@@ -209,12 +209,16 @@ const ScheduledTaskUsageFields = {
   ).annotate({ description: "1 to 99. For `above` and `below`; refused for `reset`." }),
 };
 
-/** Written only by the server's sweep: `armed` for a line, with `resetsAt` for `above`; else a reset's. */
+/**
+ * Written only by the server's sweep: `armed` for a line, with `resetsAt` for `above`; else a
+ * reset's, and `owedSince` while a renewal that could not run waits to send.
+ */
 const ScheduledTaskUsageState = Schema.Struct({
   armed: Schema.optional(Schema.Boolean),
   resetsAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   usedPercent: Schema.optional(Schema.Number),
   firedFor: Schema.optional(IsoDateTime),
+  owedSince: Schema.optional(IsoDateTime),
 });
 
 const ScheduledTaskUsageSchedule = Schema.Struct({

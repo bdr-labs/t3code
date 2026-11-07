@@ -2,6 +2,7 @@ import {
   CommandId,
   MessageId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  type ModelSelection,
   type OrchestrationV2ThreadProjection,
   type ProjectId,
   ScheduledTask,
@@ -24,6 +25,7 @@ import {
   type ScheduledTaskRunNowResult,
   type ScheduledTaskSetEnabledInput,
   type ScheduledTaskUpsertInput,
+  type ScheduledTaskUsageSchedule,
   type ServerProvider,
   managedPolicyDeniedMessage,
   managedRuntimeModeDenial,
@@ -44,6 +46,7 @@ import {
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
+  exhaustedUsageWindow,
   resolveNewThreadModelSelection,
   usageLimitBindsSelection,
 } from "@t3tools/shared/usageLimits";
@@ -408,6 +411,54 @@ function usageLimitResetAhead(
     resetMs > DateTime.toEpochMillis(now)
     ? reset
     : null;
+}
+
+type ThreadRecords = Parameters<typeof usageLimitResetAhead>[0];
+type RenewalBlock = { readonly resetAt: string; readonly blocker: string };
+
+/**
+ * What holds a due renewal back on the model it would run on, and the reset it waits for: a window
+ * binding that model read used up, then the thread's own limit stop. A window with no reset time
+ * blocks nothing, so a limit with no known end cannot stop a task for good.
+ */
+function renewalBlock(
+  records: ThreadRecords | null,
+  providers: ReadonlyArray<ServerProvider>,
+  selection: Pick<ModelSelection, "instanceId" | "model">,
+  now: DateTime.DateTime,
+): RenewalBlock | null {
+  const nowMs = DateTime.toEpochMillis(now);
+  const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
+  const limits = provider?.usageLimits;
+  const timed =
+    provider === undefined || limits === undefined
+      ? undefined
+      : {
+          ...provider,
+          usageLimits: {
+            ...limits,
+            windows: limits.windows.filter((window) => Date.parse(window.resetsAt ?? "") > nowMs),
+          },
+        };
+  const window = exhaustedUsageWindow(timed, nowMs, selection.model);
+  if (window?.resetsAt != null) {
+    return {
+      resetAt: window.resetsAt,
+      blocker: `the ${window.label} limit on ${provider?.displayName ?? selection.instanceId}`,
+    };
+  }
+  const stopped = records === null ? null : usageLimitResetAhead(records, providers, now);
+  return stopped === null
+    ? null
+    : { resetAt: iso(stopped), blocker: "the usage limit the thread stopped on" };
+}
+
+function owedRenewalError(block: RenewalBlock, bound: boolean): string {
+  return `Not sent because ${block.blocker} resets at ${block.resetAt}. ${
+    bound
+      ? "This renewal waits and sends once when the thread can run."
+      : "This renewal waits and starts its thread once the model can run."
+  }`;
 }
 
 // Auto-resume falls due in the same tick as a fire past the reset, and it must go first. Counted
@@ -1003,6 +1054,112 @@ export const layer = Layer.effect(
             ] as const);
       });
 
+    // A failed read keeps the stored model, which is what a fire launched on before.
+    const newThreadModelFor = (active: ScheduledTask, startedAt: DateTime.DateTime) =>
+      Effect.all([
+        serverSettings.getSettings,
+        projects.getById(active.projectId),
+        providerRegistry.getProviders,
+      ]).pipe(
+        Effect.map(([settings, project, providers]) => {
+          const effective = resolveProjectSettings(
+            settings,
+            active.projectId,
+            Option.getOrUndefined(project),
+          ).settings;
+          return resolveNewThreadModelSelection({
+            defaultSelection: active.modelSelection,
+            fallbackSelection: effective.fallbackModelSelection,
+            providers,
+            settings: effective,
+            projectId: active.projectId,
+            now: DateTime.toEpochMillis(startedAt),
+          }).selection;
+        }),
+        Effect.orElseSucceed(() => null),
+        Effect.map((selection) => selection ?? active.modelSelection),
+      );
+
+    /** The one rule for a due renewal in the sweep and in the send, on the model it would run on. */
+    const renewalBlockedUntil = Effect.fn("ScheduledTaskService.renewalBlockedUntil")(function* (
+      task: ScheduledTask,
+      records: ThreadRecords | null,
+      providers: ReadonlyArray<ServerProvider>,
+      now: DateTime.DateTime,
+    ) {
+      // A bound thread that cannot be read goes to the send, which reports it.
+      if (task.threadId !== null && records === null) return null;
+      const selection = records?.thread.modelSelection ?? (yield* newThreadModelFor(task, now));
+      return renewalBlock(records, providers, selection, now);
+    });
+
+    /**
+     * Keeps a due renewal owed, with why, guarded by the schedule it was decided on so an edit or a
+     * pause wins. A re-check that changes nothing writes nothing, and only a new reason or a new
+     * debt is news to clients.
+     */
+    const recordOwedRenewal = Effect.fn("ScheduledTaskService.recordOwedRenewal")(function* (
+      task: ScheduledTask,
+      readScheduleJson: string,
+      owed: ScheduledTaskUsageSchedule,
+      block: RenewalBlock,
+      now: DateTime.DateTime,
+    ) {
+      const before = task.schedule.type === "usage" ? task.schedule.state : undefined;
+      const error = owedRenewalError(block, task.threadId !== null);
+      const reasonMoved = task.lastRunStatus !== "failed" || task.lastRunError !== error;
+      if (!reasonMoved && owed.state === before) return;
+      const written = yield* sql`
+        UPDATE scheduled_tasks
+        SET schedule_json = ${yield* encodeScheduleJson(owed)},
+            last_run_status = 'failed',
+            last_run_error = ${error},
+            last_run_at = CASE WHEN ${reasonMoved ? 1 : 0} = 1
+              THEN ${owed.state?.owedSince ?? null} ELSE last_run_at END,
+            updated_at = CASE WHEN ${reasonMoved ? 1 : 0} = 1 THEN ${iso(now)} ELSE updated_at END
+        WHERE task_id = ${task.id} AND schedule_json = ${readScheduleJson}
+          AND enabled = 1 AND last_run_status <> 'running'
+        RETURNING task_id
+      `;
+      if (written.length > 0 && (reasonMoved || before?.owedSince === undefined)) {
+        yield* notifyChanged;
+      }
+    });
+
+    // The thread stopped after the sweep looked: the renewal goes back to owed rather than spent.
+    const keepRenewalOwed = Effect.fn("ScheduledTaskService.keepRenewalOwed")(
+      function* (active: ScheduledTask, block: RenewalBlock, now: DateTime.DateTime) {
+        const [row] = yield* getRows(active.id);
+        const current = row === undefined ? null : yield* decodeRow(row);
+        if (
+          row !== undefined &&
+          current?.schedule.type === "usage" &&
+          isSameSchedule(current.schedule, active.schedule)
+        ) {
+          const { state } = current.schedule;
+          const owedSince = state?.owedSince ?? iso(now);
+          yield* recordOwedRenewal(
+            current,
+            row.schedule_json,
+            { ...current.schedule, state: { ...state, owedSince } },
+            block,
+            now,
+          );
+        }
+        // The sweep that called this read the renewal as settled, and looks again only when told.
+        yield* notifyChanged;
+        return { task: current ?? active, threadId: null, dispatchFailed: false };
+      },
+      (effect, active) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isScheduledTaskError(cause)
+              ? cause
+              : taskError("Could not record schedule task run.", { taskId: active.id, cause }),
+          ),
+        ),
+    );
+
     const runTask = Effect.fn("ScheduledTaskService.runTask")(function* (
       task: ScheduledTask,
       trigger: "scheduled" | "manual" | "webhook" | "usage",
@@ -1050,7 +1207,18 @@ export const layer = Layer.effect(
         ) {
           return { task: active, threadId: null, dispatchFailed: false };
         }
-        if (trigger === "usage" && (!active.enabled || active.schedule.type !== "usage")) {
+        // The sweep spent this fire on the task it read: an edit of its trigger or thread since then
+        // sends nothing, as a pause does.
+        if (
+          trigger === "usage" &&
+          (!active.enabled ||
+            active.schedule.type !== "usage" ||
+            task.schedule.type !== "usage" ||
+            !isSameSchedule(active.schedule, task.schedule) ||
+            (active.schedule.instanceId ?? active.modelSelection.instanceId) !==
+              (task.schedule.instanceId ?? task.modelSelection.instanceId) ||
+            active.threadId !== task.threadId)
+        ) {
           return { task: active, threadId: null, dispatchFailed: false };
         }
         // Reject queued deliveries after pause, same-id recreation or trigger changes.
@@ -1079,17 +1247,22 @@ export const layer = Layer.effect(
                   { turnItemTypes: ["error"] },
                 )
                 .pipe(Effect.orElseSucceed(() => null));
+        // A renewal that cannot run now is owed rather than spent, and the sweep sends it later.
+        const renewal =
+          trigger === "usage" && active.schedule.type === "usage" && active.schedule.on === "reset";
         // A failed provider read is no reading, which gives another model room.
-        const resetAhead =
-          records === null
-            ? null
-            : usageLimitResetAhead(
-                records,
-                yield* providerRegistry.getProviders.pipe(
-                  Effect.catchCause(() => Effect.succeed([])),
-                ),
-                startedAt,
+        const providers =
+          records === null && !renewal
+            ? []
+            : yield* providerRegistry.getProviders.pipe(
+                Effect.catchCause(() => Effect.succeed([])),
               );
+        const block = renewal
+          ? yield* renewalBlockedUntil(active, records, providers, startedAt)
+          : null;
+        if (block !== null) return yield* keepRenewalOwed(active, block, startedAt);
+        const resetAhead =
+          records === null || renewal ? null : usageLimitResetAhead(records, providers, startedAt);
         if (trigger !== "webhook" && resetAhead !== null) {
           return yield* recordUnsentFire(active, trigger, iso(resetAhead), startedAt);
         }
@@ -1101,6 +1274,19 @@ export const layer = Layer.effect(
           return { task: active, threadId: null, dispatchFailed: false };
         }
 
+        // Run now is the message an owed renewal waited to send.
+        if (trigger === "manual" && active.schedule.type === "usage") {
+          yield* sql`
+            UPDATE scheduled_tasks
+            SET schedule_json = json_remove(schedule_json, '$.state.owedSince')
+            WHERE task_id = ${active.id}
+              AND json_extract(schedule_json, '$.state.owedSince') IS NOT NULL
+          `.pipe(
+            Effect.mapError((cause) =>
+              taskError("Could not record schedule task run.", { taskId: active.id, cause }),
+            ),
+          );
+        }
         if (webhook === undefined) yield* markRunning(active.id, startedAtIso);
         else
           yield* sql
@@ -1163,30 +1349,7 @@ export const layer = Layer.effect(
               }),
             );
 
-        // A failed read keeps the stored model, which is what a fire launched on before.
-        const newThreadModel = Effect.all([
-          serverSettings.getSettings,
-          projects.getById(active.projectId),
-          providerRegistry.getProviders,
-        ]).pipe(
-          Effect.map(([settings, project, providers]) => {
-            const effective = resolveProjectSettings(
-              settings,
-              active.projectId,
-              Option.getOrUndefined(project),
-            ).settings;
-            return resolveNewThreadModelSelection({
-              defaultSelection: active.modelSelection,
-              fallbackSelection: effective.fallbackModelSelection,
-              providers,
-              settings: effective,
-              projectId: active.projectId,
-              now: DateTime.toEpochMillis(startedAt),
-            }).selection;
-          }),
-          Effect.orElseSucceed(() => null),
-          Effect.map((selection) => selection ?? active.modelSelection),
-        );
+        const newThreadModel = newThreadModelFor(active, startedAt);
 
         // Capture defects and interrupts too so dispatch failures still reach markCompleted.
         const result =
@@ -1408,17 +1571,41 @@ export const layer = Layer.effect(
           ),
           nowMs,
         });
-        if (fire && task.threadId !== null) {
-          const records = yield* threadManagement
-            .getThreadRecords(ThreadId.make(task.threadId), ["runs"])
-            .pipe(Effect.orElseSucceed(() => null));
-          // The crossing stays unspent and the sweep due, so the next tick retries.
-          if (records !== null && (yield* autoResumeGoesFirst(task.id, records, nowMs))) {
-            return nowMs;
+        // A renewal that could not run stays due until it sends.
+        const owedSince = task.schedule.on === "reset" ? state?.owedSince : undefined;
+        const due = fire || owedSince !== undefined;
+        const records =
+          due && task.threadId !== null
+            ? yield* threadManagement
+                .getThreadRecords(
+                  ThreadId.make(task.threadId),
+                  ["runs", "turnItems", "providerSessions"],
+                  { turnItemTypes: ["error"] },
+                )
+                .pipe(Effect.orElseSucceed(() => null))
+            : null;
+        if (due && task.schedule.on === "reset") {
+          const now = DateTime.makeUnsafe(nowMs);
+          const block = yield* renewalBlockedUntil(task, records, providers, now);
+          if (block !== null) {
+            const owed = {
+              ...task.schedule,
+              state: owedSince === undefined ? { ...state, owedSince: iso(now) } : state,
+            };
+            yield* recordOwedRenewal(task, row.schedule_json, owed, block, now);
+            return Math.min(Date.parse(block.resetAt), usageTriggerDueAtMs(owed, nowMs));
           }
         }
-        const schedule = state === undefined ? task.schedule : { ...task.schedule, state };
-        if (state !== task.schedule.state) {
+        // The crossing stays unspent and the sweep due, so the next tick retries.
+        if (due && records !== null && (yield* autoResumeGoesFirst(task.id, records, nowMs))) {
+          return nowMs;
+        }
+        const kept =
+          owedSince === undefined || state === undefined
+            ? state
+            : Struct.omit(state, ["owedSince"]);
+        const schedule = kept === undefined ? task.schedule : { ...task.schedule, state: kept };
+        if (kept !== task.schedule.state) {
           // The state lands before the fire, so a crash or a restart cannot fire this crossing twice.
           const written = yield* sql`
             UPDATE scheduled_tasks SET schedule_json = ${yield* encodeScheduleJson(schedule)}
@@ -1427,7 +1614,7 @@ export const layer = Layer.effect(
           `;
           if (written.length === 0) return Infinity;
         }
-        if (fire) yield* runTask(task, "usage");
+        if (due) yield* runTask(task, "usage");
         return usageTriggerDueAtMs(schedule, nowMs);
       },
       (effect, row) =>

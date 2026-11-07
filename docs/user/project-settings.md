@@ -200,9 +200,17 @@ out or doesn't report that window, and a provider that reports no usage at all c
 be picked. **Below** only sees usage fall in a new reading. Claude is read with no
 client open and Codex while a session is open; on others, a task can wait until you
 next open T3 Code or run that provider.
-A task that posts into a thread stopped on a usage limit with a known reset time
-sends nothing and shows why as a failed last run; that crossing is used, so it runs
-again at the next one.
+A line task that posts into a thread stopped on a usage limit with a known reset
+time sends nothing and shows why as a failed last run; that crossing is used, so it
+runs again at the next one. A renewal waits instead when it can't run: when the
+thread is stopped on a limit, or when a window covering the model it would run on,
+such as the session window while the weekly renews, is used up with a known reset
+time. The list reads **Renewal waiting** with the reason, and the task sends once
+as soon as it can run, checked every minute, so moving the thread to a model with
+room sends it too. A task that starts a new thread moves to your fallback model
+when that one has room, and waits only otherwise. Pausing and resuming the task, or
+changing what it watches, drops a waiting renewal, and a **Run now** that sends
+takes its place.
 
 Mobile lists these tasks and can pause, resume, run or delete them. Edit them on web
 or desktop.

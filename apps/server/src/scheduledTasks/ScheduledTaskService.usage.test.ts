@@ -1,6 +1,7 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import {
+  type ModelSelection,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -26,6 +27,7 @@ import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Statement from "effect/sql/Statement";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -146,8 +148,12 @@ type Harness = Persisted & {
   readonly duringSweep: Ref.Ref<Effect.Effect<void>>;
   /** Runs once, in a save, after it read the task and before it writes. */
   readonly duringSave: Ref.Ref<Effect.Effect<void>>;
+  /** Runs once, after the next read of the thread's records. */
+  readonly duringRecords: Ref.Ref<Effect.Effect<void>>;
   /** What a send waits for, and fails on when it is set. */
   readonly sendGate: Ref.Ref<Effect.Effect<void, never>>;
+  /** The model of each new thread a fire launched. */
+  readonly launches: Ref.Ref<ReadonlyArray<ModelSelection>>;
   readonly stored: Effect.Effect<ScheduledTask>;
 };
 
@@ -157,7 +163,7 @@ const ordinaryRecords = {
   turnItems: [],
   providerSessions: [],
 };
-const stoppedRecords = (resetAt: string) => {
+const stoppedRecords = (resetAt: string | null) => {
   const at = DateTime.makeUnsafe(NOW);
   return {
     ...ordinaryRecords,
@@ -193,6 +199,7 @@ const withUsage = <A, E>(
   body: (harness: Harness) => Effect.Effect<A, E>,
   kept?: Persisted,
   scheduler?: typeof Scheduler.layer,
+  settings = ServerSettings.layerTest(),
 ) =>
   Effect.gen(function* () {
     const sent = kept?.sent ?? (yield* Ref.make<ReadonlyArray<string>>([]));
@@ -201,7 +208,9 @@ const withUsage = <A, E>(
     const providerReads = yield* Ref.make(0);
     const duringSweep = yield* Ref.make<Effect.Effect<void>>(Effect.void);
     const duringSave = yield* Ref.make<Effect.Effect<void>>(Effect.void);
+    const duringRecords = yield* Ref.make<Effect.Effect<void>>(Effect.void);
     const sendGate = yield* Ref.make<Effect.Effect<void, never>>(Effect.void);
+    const launches = yield* Ref.make<ReadonlyArray<ModelSelection>>([]);
     const changes = yield* Queue.unbounded<ReadonlyArray<ServerProvider>>();
     const pulls = yield* Queue.unbounded<void>();
     const once = (hook: Ref.Ref<Effect.Effect<void>>) =>
@@ -217,7 +226,7 @@ const withUsage = <A, E>(
             isScratchProject: () => once(duringSave).pipe(Effect.as(false)),
           }),
           NodeCrypto.layer,
-          ServerSettings.layerTest(),
+          settings,
           Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
           Layer.mock(ProviderRegistry.ProviderRegistry)({
             getProviders: Ref.update(providerReads, (count) => count + 1).pipe(
@@ -237,13 +246,18 @@ const withUsage = <A, E>(
                 }),
             }),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({
-            launch: () =>
+            launch: (input) =>
               Ref.update(sent, (all) => [...all, "launch"]).pipe(
+                Effect.andThen(Ref.update(launches, (all) => [...all, input.modelSelection])),
                 Effect.as({ threadId: ThreadId.make("thread:launched"), resumed: false } as never),
               ),
           }),
           Layer.mock(ThreadManagementService.ThreadManagementService)({
-            getThreadRecords: () => Ref.get(records).pipe(Effect.map((value) => value as never)),
+            getThreadRecords: () =>
+              Ref.get(records).pipe(
+                Effect.tap(() => once(duringRecords)),
+                Effect.map((value) => value as never),
+              ),
             sendToThread: (input) =>
               Ref.update(sent, (all) => [...all, input.mode]).pipe(
                 Effect.andThen(Ref.get(sendGate)),
@@ -268,7 +282,9 @@ const withUsage = <A, E>(
         providerReads,
         duringSweep,
         duringSave,
+        duringRecords,
         sendGate,
+        launches,
         publish: (next) =>
           Effect.gen(function* () {
             yield* Ref.set(providers, next);
@@ -1031,6 +1047,482 @@ it.effect("one malformed row does not stop the sweep for the rest", () =>
       })}`;
       yield* settled(harness, 90);
       assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+    }),
+  ),
+);
+
+const HELD_UNTIL = "2026-09-09T19:00:00.000Z";
+const LATER_RESET = "2026-09-10T03:00:00.000Z";
+const RENEWED_AT = "2026-09-09T17:01:00.000Z";
+const owedReason = (blocker: string, resetAt: string, bound = true) =>
+  `Not sent because ${blocker} resets at ${resetAt}. ${
+    bound
+      ? "This renewal waits and sends once when the thread can run."
+      : "This renewal waits and starts its thread once the model can run."
+  }`;
+const fiveHour = (
+  usedPercent: number,
+  resetsAt: string | null = HELD_UNTIL,
+): ServerProviderUsageWindow => ({
+  id: "five_hour",
+  kind: "session",
+  label: "Session",
+  usedPercent,
+  ...(resetsAt === null ? {} : { resetsAt }),
+});
+const unbound = (schedule: ScheduledTaskUpsertSchedule) => {
+  const { threadId: _threadId, ...task } = usageTask(schedule);
+  return task;
+};
+
+/** A renewal of the weekly at T, owed a minute later on a thread stopped until `resetAt`. */
+const owedOnStoppedThread = (harness: Harness, resetAt = HELD_UNTIL) =>
+  Effect.gen(function* () {
+    yield* harness.service.upsert(usageTask(RENEWS));
+    yield* settled(harness, 80);
+    yield* Ref.set(harness.records, stoppedRecords(resetAt));
+    yield* TestClock.setTime(T_MS + MINUTE_MS);
+    yield* harness.sweep;
+    // The debt is news, so its write wakes the sweep once more, which finds nothing new.
+    yield* harness.sweep;
+    assert.deepEqual(yield* Ref.get(harness.sent), []);
+    const task = yield* harness.stored;
+    assert.equal(scheduleOf(task).state?.owedSince, RENEWED_AT);
+    return task;
+  });
+
+it.effect(
+  "a renewal on a limit-stopped thread is owed, not spent, and sends once at the reset",
+  () =>
+    overMemory((harness) =>
+      Effect.gen(function* () {
+        const owed = yield* owedOnStoppedThread(harness);
+        assert.equal(owed.lastRunStatus, "failed");
+        assert.equal(
+          owed.lastRunError,
+          owedReason("the usage limit the thread stopped on", HELD_UNTIL),
+        );
+        assert.equal(scheduleOf(owed).state?.firedFor, T);
+        assert.isNull(owed.nextRunAt);
+        assert.equal(owed.runCount, 0);
+
+        // Re-checks and new readings while it is held send nothing.
+        for (const usedPercent of [5, 3, 40]) {
+          yield* TestClock.adjust("1 minute");
+          yield* settled(harness, usedPercent, { resetsAt: NEXT_PERIOD });
+        }
+        assert.deepEqual(yield* Ref.get(harness.sent), []);
+
+        yield* thereFor(HELD_UNTIL);
+        yield* harness.sweep;
+        assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+        const sent = yield* harness.stored;
+        assert.equal(sent.lastRunStatus, "succeeded");
+        assert.isUndefined(scheduleOf(sent).state?.owedSince);
+
+        yield* TestClock.adjust("1 minute");
+        yield* harness.sweep;
+        yield* settled(harness, 40, { resetsAt: NEXT_PERIOD });
+        assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+      }),
+    ),
+);
+
+it.effect("a renewal whose thread stops between the sweep's check and the send stays owed", () =>
+  overMemory((harness) =>
+    Effect.gen(function* () {
+      yield* harness.service.upsert(usageTask(RENEWS));
+      yield* settled(harness, 80);
+      // The sweep reads a thread that can run; it has stopped by the time the send reads it.
+      yield* Ref.set(harness.duringRecords, Ref.set(harness.records, stoppedRecords(HELD_UNTIL)));
+      yield* TestClock.setTime(T_MS + MINUTE_MS);
+      yield* harness.sweep;
+      assert.deepEqual(yield* Ref.get(harness.sent), []);
+      const owed = yield* harness.stored;
+      assert.equal(scheduleOf(owed).state?.owedSince, RENEWED_AT);
+      assert.equal(
+        owed.lastRunError,
+        owedReason("the usage limit the thread stopped on", HELD_UNTIL),
+      );
+
+      yield* thereFor(HELD_UNTIL);
+      yield* harness.sweep;
+      assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+    }),
+  ),
+);
+
+// Lands `edit` after the sweep wrote the task's state and before the fire reads the task again.
+const afterStateWrite = (edit: Effect.Effect<void>): Statement.Transformer => {
+  let wrote = false;
+  let landed = false;
+  return (statement) => {
+    const [query] = statement.compile();
+    if (landed) return Effect.succeed(statement);
+    if (query.includes("SET schedule_json")) wrote = true;
+    else if (wrote && query.includes("FROM scheduled_tasks")) {
+      landed = true;
+      return edit.pipe(Effect.as(statement));
+    }
+    return Effect.succeed(statement);
+  };
+};
+
+it.effect.each([
+  [
+    "an owed renewal that can run",
+    (harness: Harness) =>
+      owedOnStoppedThread(harness).pipe(
+        Effect.andThen(Ref.set(harness.records, ordinaryRecords)),
+        Effect.andThen(TestClock.adjust("1 minute")),
+      ),
+    usageTask({ ...RENEWS, window: "seven_day" } as ScheduledTaskUpsertSchedule),
+  ],
+  [
+    "a line's crossing",
+    (harness: Harness) =>
+      armedAbove(harness).pipe(Effect.andThen(reading(90)), Effect.flatMap(harness.publish)),
+    usageTask({ ...ABOVE, usedPercent: 99 } as ScheduledTaskUpsertSchedule),
+  ],
+] as const)(
+  "%s sends nothing when an edit of its trigger lands between the sweep's write and the send",
+  ([, due, edited]) =>
+    overMemory((harness) =>
+      Effect.gen(function* () {
+        yield* due(harness);
+        yield* harness.sweep.pipe(
+          Effect.provideService(
+            Statement.CurrentTransformer,
+            afterStateWrite(harness.service.upsert(edited).pipe(Effect.orDie, Effect.asVoid)),
+          ),
+        );
+        assert.deepEqual(yield* Ref.get(harness.sent), []);
+        assert.deepEqual(scheduleOf(yield* harness.stored), edited.schedule);
+      }),
+    ),
+);
+
+it.effect("a renewal owed on a thread moved to a model with room sends at the next re-check", () =>
+  overMemory((harness) =>
+    Effect.gen(function* () {
+      yield* owedOnStoppedThread(harness, LATER_RESET);
+      const stopped = stoppedRecords(LATER_RESET);
+      yield* Ref.set(harness.records, {
+        ...stopped,
+        thread: { modelSelection: { instanceId: codex, model: "gpt-5.5" } },
+      });
+      const reads = yield* Ref.get(harness.providerReads);
+      yield* TestClock.adjust("59 seconds");
+      yield* harness.sweep;
+      assert.equal(yield* Ref.get(harness.providerReads), reads, "no re-check sooner");
+      yield* TestClock.adjust("1 second");
+      yield* harness.sweep;
+      assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+    }),
+  ),
+);
+
+it.effect("a second renewal while one is owed is the same owed fire, and sends once", () =>
+  overMemory((harness) =>
+    Effect.gen(function* () {
+      yield* owedOnStoppedThread(harness, LATER_RESET);
+      yield* TestClock.adjust("1 minute");
+      yield* settled(harness, 30, { resetsAt: NEXT_PERIOD });
+      yield* TestClock.setTime(Date.parse(NEXT_PERIOD) + MINUTE_MS);
+      yield* harness.sweep;
+      const twice = scheduleOf(yield* harness.stored).state;
+      assert.equal(twice?.firedFor, NEXT_PERIOD);
+      assert.equal(twice?.owedSince, RENEWED_AT);
+      assert.deepEqual(yield* Ref.get(harness.sent), []);
+
+      yield* Ref.set(harness.records, ordinaryRecords);
+      yield* TestClock.adjust("1 minute");
+      yield* harness.sweep;
+      yield* TestClock.adjust("1 minute");
+      yield* harness.sweep;
+      assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+    }),
+  ),
+);
+
+it.effect("a renewal owed across a restart sends once, when it can", () =>
+  Effect.gen(function* () {
+    yield* thereFor(NOW);
+    const persisted = yield* withUsage((harness) =>
+      owedOnStoppedThread(harness).pipe(
+        Effect.as({ sent: harness.sent, records: harness.records, providers: harness.providers }),
+      ),
+    );
+    yield* withUsage(
+      (harness) =>
+        Effect.gen(function* () {
+          yield* harness.sweep;
+          assert.deepEqual(yield* Ref.get(harness.sent), []);
+          yield* thereFor(HELD_UNTIL);
+          yield* harness.sweep;
+          assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+        }),
+      persisted,
+    );
+    yield* withUsage(
+      (harness) =>
+        Effect.gen(function* () {
+          yield* harness.sweep;
+          yield* TestClock.adjust("1 minute");
+          yield* harness.sweep;
+          assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+        }),
+      persisted,
+    );
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect.each([
+  [
+    "an edit that keeps the trigger keeps it",
+    (harness: Harness) => harness.service.upsert(usageTask(RENEWS, { title: "Renamed" })),
+    true,
+  ],
+  [
+    "a rebind keeps it, and the new thread sends it",
+    (harness: Harness) =>
+      harness.service.upsert(usageTask(RENEWS, { threadId: ThreadId.make("thread:other") })),
+    true,
+  ],
+  [
+    "an edit of the trigger drops it",
+    (harness: Harness) =>
+      harness.service.upsert(
+        usageTask({ ...RENEWS, window: "seven_day" } as ScheduledTaskUpsertSchedule),
+      ),
+    false,
+  ],
+  [
+    "a pause sends nothing, and resuming drops it",
+    (harness: Harness) =>
+      Effect.gen(function* () {
+        yield* harness.service.setEnabled({ id: taskId, enabled: false });
+        yield* Ref.set(harness.records, ordinaryRecords);
+        yield* TestClock.adjust("1 minute");
+        yield* harness.sweep;
+        assert.deepEqual(yield* Ref.get(harness.sent), []);
+        return yield* harness.service.setEnabled({ id: taskId, enabled: true });
+      }),
+    false,
+  ],
+] as const)("an owed renewal: %s", ([, edit, kept]) =>
+  overMemory((harness) =>
+    Effect.gen(function* () {
+      yield* owedOnStoppedThread(harness);
+      yield* edit(harness);
+      assert.equal(scheduleOf(yield* harness.stored).state?.owedSince !== undefined, kept);
+      // The thread can run now, and the edit woke the sweep.
+      yield* Ref.set(harness.records, ordinaryRecords);
+      yield* harness.sweep;
+      yield* TestClock.adjust("1 minute");
+      yield* harness.sweep;
+      assert.deepEqual(yield* Ref.get(harness.sent), kept ? ["queue"] : []);
+    }),
+  ),
+);
+
+it.effect.each([
+  [
+    "held by a used-up window sends it, and nothing follows for it",
+    (harness: Harness) =>
+      Effect.gen(function* () {
+        yield* harness.service.upsert(usageTask(RENEWS));
+        yield* harness.publish([providerWith(readingNow([weekly(80), fiveHour(100)]))]);
+        yield* harness.sweep;
+        yield* TestClock.setTime(T_MS + MINUTE_MS);
+        yield* harness.sweep;
+        assert.equal(
+          (yield* harness.stored).lastRunError,
+          owedReason("the Session limit on codex", HELD_UNTIL),
+        );
+      }),
+    ["queue"],
+  ],
+  [
+    "on a stopped thread only says why, and the renewal still sends once at the reset",
+    (harness: Harness) => owedOnStoppedThread(harness).pipe(Effect.asVoid),
+    [],
+  ],
+] as const)("Run now on an owed renewal %s", ([, owe, sentByRunNow]) =>
+  overMemory((harness) =>
+    Effect.gen(function* () {
+      yield* owe(harness);
+      assert.deepEqual(yield* Ref.get(harness.sent), []);
+      yield* harness.service.runNow({ id: taskId });
+      assert.deepEqual(yield* Ref.get(harness.sent), sentByRunNow);
+      assert.equal(
+        scheduleOf(yield* harness.stored).state?.owedSince === undefined,
+        sentByRunNow.length > 0,
+      );
+
+      yield* thereFor(HELD_UNTIL);
+      yield* harness.sweep;
+      yield* TestClock.adjust("1 minute");
+      yield* harness.sweep;
+      assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+    }),
+  ),
+);
+
+it.effect("a renewal with no known reset to wait for sends at once", () =>
+  overMemory((harness) =>
+    Effect.gen(function* () {
+      yield* harness.service.upsert(usageTask(RENEWS));
+      // A five-hour window used up with no reset time, on a thread stopped with none either.
+      yield* harness.publish([providerWith(readingNow([weekly(80), fiveHour(100, null)]))]);
+      yield* harness.sweep;
+      yield* Ref.set(harness.records, stoppedRecords(null));
+      yield* TestClock.setTime(T_MS + MINUTE_MS);
+      yield* harness.sweep;
+      assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+    }),
+  ),
+);
+
+it.effect.each([
+  ["a bound renewal", usageTask(RENEWS), "queue", true],
+  ["an unbound renewal", unbound(RENEWS), "launch", false],
+] as const)("the five-hour window at 100 holds %s until it resets", ([, task, send, bound]) =>
+  overMemory((harness) =>
+    Effect.gen(function* () {
+      yield* harness.service.upsert(task);
+      yield* harness.publish([providerWith(readingNow([weekly(80), fiveHour(100)]))]);
+      yield* harness.sweep;
+      yield* TestClock.setTime(T_MS + MINUTE_MS);
+      yield* harness.sweep;
+      assert.deepEqual(yield* Ref.get(harness.sent), []);
+      assert.equal(
+        (yield* harness.stored).lastRunError,
+        owedReason("the Session limit on codex", HELD_UNTIL, bound),
+      );
+
+      yield* thereFor(HELD_UNTIL);
+      yield* harness.sweep;
+      assert.deepEqual(yield* Ref.get(harness.sent), [send]);
+    }),
+  ),
+);
+
+it.effect("a line's crossing is not held by a used-up window, as before", () =>
+  overMemory((harness) =>
+    Effect.gen(function* () {
+      yield* armedAbove(harness);
+      yield* harness.publish([providerWith(readingNow([weekly(90), fiveHour(100)]))]);
+      yield* harness.sweep;
+      assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+      assert.deepEqual(scheduleOf(yield* harness.stored).state, aboveState(false));
+    }),
+  ),
+);
+
+it.effect("an unbound renewal whose fallback has room launches on the fallback at once", () => {
+  const fallback = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-sonnet-5-5",
+  };
+  return thereFor(NOW).pipe(
+    Effect.andThen(
+      withUsage(
+        (harness) =>
+          Effect.gen(function* () {
+            yield* harness.publish([
+              providerWith(readingNow([weekly(80), fiveHour(100)])),
+              providerWith(readingNow([weekly(10, { resetsAt: NEXT_PERIOD })]), {
+                instanceId: fallback.instanceId,
+              }),
+            ]);
+            yield* harness.service.upsert(unbound(RENEWS));
+            yield* harness.sweep;
+            yield* TestClock.setTime(T_MS + MINUTE_MS);
+            yield* harness.sweep;
+            assert.deepEqual(yield* Ref.get(harness.sent), ["launch"]);
+            assert.deepEqual(yield* Ref.get(harness.launches), [fallback]);
+          }),
+        undefined,
+        undefined,
+        ServerSettings.layerTest({ fallbackModelSelection: fallback }),
+      ),
+    ),
+    Effect.provide(SqlitePersistence.layerMemory),
+  );
+});
+
+it.effect("an unchanged re-check of an owed renewal writes nothing and wakes nothing", () =>
+  overMemory((harness) =>
+    Effect.gen(function* () {
+      yield* owedOnStoppedThread(harness, LATER_RESET);
+      const row = harness.sql<{ schedule_json: string; updated_at: string }>`
+        SELECT schedule_json, updated_at FROM scheduled_tasks`;
+      const before = yield* row;
+      for (let check = 0; check < 3; check++) {
+        yield* TestClock.adjust("1 minute");
+        const reads = yield* Ref.get(harness.providerReads);
+        yield* harness.sweep;
+        assert.equal(yield* Ref.get(harness.providerReads), reads + 1, "a re-check each minute");
+        yield* harness.sweep;
+        assert.equal(yield* Ref.get(harness.providerReads), reads + 1, "nothing woke it again");
+      }
+      assert.deepEqual(yield* row, before);
+      assert.deepEqual(yield* Ref.get(harness.sent), []);
+    }),
+  ),
+);
+
+it.effect("an owed renewal lets an armed auto-resume go first at the reset, then sends", () =>
+  overMemory((harness) =>
+    Effect.gen(function* () {
+      yield* owedOnStoppedThread(harness);
+      const stopped = stoppedRecords(HELD_UNTIL);
+      yield* Ref.set(harness.records, {
+        ...stopped,
+        thread: {
+          ...stopped.thread,
+          limitRecovery: {
+            runId: "run:stopped",
+            resetAt: HELD_UNTIL,
+            autoResume: true,
+            snooze: false,
+          },
+        },
+      });
+      yield* thereFor(HELD_UNTIL);
+      yield* harness.sweep;
+      yield* TestClock.adjust("14 seconds");
+      yield* harness.sweep;
+      assert.deepEqual(yield* Ref.get(harness.sent), []);
+      yield* TestClock.adjust("1 second");
+      yield* harness.sweep;
+      assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+    }),
+  ),
+);
+
+it.effect("an owed renewal can neither arrive with a save nor be cleared by one", () =>
+  overMemory((harness) =>
+    Effect.gen(function* () {
+      const smuggled = (state: object) =>
+        usageTask({ ...RENEWS, state } as ScheduledTaskUpsertSchedule);
+      const { task: created } = yield* harness.service.upsert(
+        smuggled({ resetsAt: T, usedPercent: 80, firedFor: T, owedSince: NOW }),
+      );
+      assert.isUndefined(scheduleOf(created).state);
+      yield* settled(harness, 80);
+      assert.deepEqual(yield* Ref.get(harness.sent), []);
+      assert.isUndefined(scheduleOf(yield* harness.stored).state?.owedSince);
+
+      // Owed for real, then an update that sends the stored schedule back without the debt.
+      yield* Ref.set(harness.records, stoppedRecords(HELD_UNTIL));
+      yield* TestClock.setTime(T_MS + MINUTE_MS);
+      yield* harness.sweep;
+      const { task: updated } = yield* harness.service.upsert(
+        smuggled({ resetsAt: T, usedPercent: 80, firedFor: T }),
+      );
+      assert.equal(scheduleOf(updated).state?.owedSince, RENEWED_AT);
     }),
   ),
 );

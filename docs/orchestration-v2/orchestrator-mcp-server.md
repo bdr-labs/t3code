@@ -534,8 +534,16 @@ read after that reset: the registry's merge keeps the old time when an idle wind
 reads `0, null`. A failed probe keeps the last reading, so a line waits, while a
 recorded reset still fires by the clock, unless it was recorded at 0. A signed-out
 provider keeps its last windows, so it reads as no reading at all. On a
-limit-stopped thread with a reset ahead the crossing sends nothing, records why and
-is used, with no postponement. A window with no reset time never fires `reset`.
+limit-stopped thread with a reset ahead a line's crossing sends nothing, records why
+and is used, with no postponement. A `reset` that cannot run is owed instead: when
+the bound thread is limit-stopped with a reset ahead, or a window binding the model
+it would run on (the thread's, or for an unbound task the launch model after the
+fallback) reads exhausted with a reset ahead. The stored `state.owedSince` is set,
+`lastRunError` names what it waits for, the sweep looks again each minute and at
+that reset, and the renewal sends once when nothing holds it, after an armed
+auto-resume. A later renewal while owed is the same fire. Re-enabling or changing
+the trigger drops it, and a Run now that sends settles it. A window with no reset
+time holds nothing, and never fires `reset`.
 
 ## Delegated Task Lifecycle
 

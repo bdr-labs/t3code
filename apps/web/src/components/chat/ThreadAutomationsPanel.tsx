@@ -44,7 +44,11 @@ function taskScheduleLine(task: ScheduledTask, environmentId: EnvironmentId) {
       {task.blockedByPolicy !== undefined ? (
         ` · ${task.blockedByPolicy}`
       ) : task.enabled && task.schedule.type === "usage" ? (
-        " · Watching usage"
+        task.schedule.state?.owedSince === undefined ? (
+          " · Watching usage"
+        ) : (
+          " · Renewal waiting"
+        )
       ) : task.enabled && task.nextRunAt !== null ? (
         <>
           {" · next "}
