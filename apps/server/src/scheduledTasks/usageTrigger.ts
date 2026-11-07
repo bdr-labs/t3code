@@ -15,6 +15,8 @@ import { isSameSchedule } from "./Schedule.ts";
 const RESET_HOLD_MS = 60_000;
 /** Less than this fall in usage is ordinary aging out, not a credited reset. */
 const EARLY_RESET_FALL_POINTS = 5;
+/** A spent line arms again only this far back, so a small move is still the same crossing. */
+const LINE_REARM_POINTS = 5;
 
 /** `state` is the schedule's own object when nothing changed, so the caller writes only a change. */
 type UsageTriggerResult = {
@@ -58,6 +60,11 @@ function evaluateLine(
     schedule.on === "above"
       ? window.usedPercent >= schedule.usedPercent
       : window.usedPercent < schedule.usedPercent;
+  // The clamps keep a line near 0 or 100 able to arm.
+  const backPastMargin =
+    schedule.on === "above"
+      ? window.usedPercent <= Math.max(0, schedule.usedPercent - LINE_REARM_POINTS)
+      : window.usedPercent >= Math.min(100, schedule.usedPercent + LINE_REARM_POINTS);
   const { state } = schedule;
   // `above` starts over with a new period; `below` would fire each period on an idle window.
   const tracked = schedule.on === "above" ? window.resetsAt : undefined;
@@ -71,7 +78,7 @@ function evaluateLine(
   const armed = newPeriod ? true : state?.armed;
   if (armed === undefined) return { fire: false, state: withReset(!past) };
   if (armed && past) return { fire: true, state: withReset(false) };
-  const next = withReset(armed || !past);
+  const next = withReset(armed || backPastMargin);
   return {
     fire: false,
     state: next.armed === state?.armed && next.resetsAt === state?.resetsAt ? state : next,

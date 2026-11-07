@@ -77,11 +77,31 @@ describe("a usage line", () => {
       false,
       aboveState(false),
     ],
-    ["not armed, back under: rearms", line("above", 80, false), 79, false, aboveState(true)],
+    [
+      "not armed, back under inside the margin: stays spent",
+      line("above", 80, false),
+      79,
+      false,
+      aboveState(false),
+    ],
+    [
+      "not armed, 5 points back under: rearms",
+      line("above", 80, false),
+      75,
+      false,
+      aboveState(true),
+    ],
     ["no state, already below: no fire", line("below", 20), 5, false, { armed: false }],
     ["armed, falls under: fires", line("below", 20, true), 19, true, { armed: false }],
     ["armed, on the line is not below", line("below", 20, true), 20, false, { armed: true }],
-    ["not armed, back over: rearms", line("below", 20, false), 20, false, { armed: true }],
+    [
+      "not armed, back over inside the margin: stays spent",
+      line("below", 20, false),
+      20,
+      false,
+      { armed: false },
+    ],
+    ["not armed, 5 points back over: rearms", line("below", 20, false), 25, false, { armed: true }],
   ])("%s", (_name, schedule, usedPercent, fire, state) => {
     expect(
       evaluateUsageTrigger({
@@ -90,6 +110,38 @@ describe("a usage line", () => {
         nowMs: NOW_MS,
       }),
     ).toEqual({ fire, state });
+  });
+
+  it.each<[string, ScheduledTaskUsageSchedule, ReadonlyArray<number>, number]>([
+    ["`above 80` over 81, 79, 81: once", line("above", 80, true), [81, 79, 81], 1],
+    ["`above 80` over 81, 76, 81: once", line("above", 80, true), [81, 76, 81], 1],
+    ["`above 80` over 81, 75, 81: twice", line("above", 80, true), [81, 75, 81], 2],
+    ["`below 20` over 19, 21, 19: once", line("below", 20, true), [19, 21, 19], 1],
+    ["`below 20` over 19, 24, 19: once", line("below", 20, true), [19, 24, 19], 1],
+    ["`below 20` over 19, 25, 19: twice", line("below", 20, true), [19, 25, 19], 2],
+    ["made at 78, the first crossing has no margin", line("above", 80), [78, 80], 1],
+    ["made at 21, the first crossing has no margin", line("below", 20), [21, 19], 1],
+    ["made at 81, 79 does not arm it", line("above", 80), [81, 79, 80], 0],
+    ["made at 81, it needs 75 and then 80", line("above", 80), [81, 75, 80], 1],
+    ["made at 19, 24 does not arm it", line("below", 20), [19, 24, 19], 0],
+    ["made at 19, it needs 25 and then under", line("below", 20), [19, 25, 19], 1],
+    ["`above 3` does not rearm at 1", line("above", 3, true), [3, 1, 3], 1],
+    ["`above 3` rearms at 0", line("above", 3, true), [3, 0, 3], 2],
+    ["`below 97` does not rearm at 99", line("below", 97, true), [96, 99, 96], 1],
+    ["`below 97` rearms at 100", line("below", 97, true), [96, 100, 96], 2],
+  ])("%s", (_name, schedule, readings, fires) => {
+    let current = schedule;
+    let fired = 0;
+    for (const usedPercent of readings) {
+      const result = evaluateUsageTrigger({
+        schedule: current,
+        limits: limitsOf(weekly({ usedPercent })),
+        nowMs: NOW_MS,
+      });
+      if (result.fire) fired += 1;
+      current = { ...schedule, state: result.state! };
+    }
+    expect(fired).toBe(fires);
   });
 
   it.each<
@@ -116,6 +168,13 @@ describe("a usage line", () => {
       aboveState(true),
     ],
     [
+      "back under the line by less than the margin in the new period: rearms all the same",
+      { ...line("above", 80), state: { armed: false, resetsAt: at(-HOUR) } },
+      { usedPercent: 79 },
+      false,
+      aboveState(true),
+    ],
+    [
       "its reset still ahead, moved later: no new period",
       { ...line("above", 80), state: { armed: false, resetsAt: at(30 * 60 * SECOND) } },
       { usedPercent: 85 },
@@ -136,6 +195,13 @@ describe("a usage line", () => {
       false,
       { armed: false },
     ],
+    [
+      "`below` has no new period, so inside the margin it stays spent across a reset",
+      line("below", 20, false),
+      { usedPercent: 22, resetsAt: at(6 * HOUR) },
+      false,
+      { armed: false },
+    ],
   ])("%s", (_name, schedule, reading, fire, state) => {
     expect(
       evaluateUsageTrigger({ schedule, limits: limitsOf(weekly(reading)), nowMs: NOW_MS }),
@@ -146,6 +212,7 @@ describe("a usage line", () => {
     ["below", line("below", 20, true)],
     ["above", line("above", 20, true)],
     ["no state yet", line("below", 20)],
+    ["`above` not armed, where 0 would rearm", line("above", 20, false)],
   ])("%s: the placeholder 0 of a passed reset fires nothing", (_name, schedule) => {
     // What the registry really publishes once the reset has passed.
     const limits = makeUsageLimits({
@@ -162,6 +229,8 @@ describe("a usage line", () => {
   it.each([
     ["below", line("below", 20, true), 5],
     ["above", line("above", 20, true), 90],
+    ["`above` not armed, where 5 would rearm", line("above", 20, false), 5],
+    ["`below` not armed, where 90 would rearm", line("below", 20, false), 90],
   ])(
     "%s: a percent from before a reset that has passed fires nothing",
     (_name, schedule, usedPercent) => {
@@ -320,6 +389,14 @@ describe("a usage reset", () => {
       T_MS + 60 * SECOND,
       true,
       recorded({ firedFor: T }),
+    ],
+    [
+      "a minute old at 1%: fires, a renewal has no margin",
+      recorded({ usedPercent: 1 }),
+      { resetsAt: T, usedPercent: 1 },
+      T_MS + 60 * SECOND,
+      true,
+      recorded({ usedPercent: 1, firedFor: T }),
     ],
     [
       "already fired, same reading: nothing",

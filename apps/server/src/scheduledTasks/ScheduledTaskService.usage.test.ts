@@ -315,6 +315,12 @@ it.effect("a task created past its line waits for a crossing, then fires once fo
       yield* settled(harness, 95);
       assert.deepEqual(yield* Ref.get(harness.sent), []);
 
+      // Under the line, but not 5 points under.
+      yield* settled(harness, 79);
+      assert.deepEqual(scheduleOf(yield* harness.stored).state, aboveState(false));
+      yield* settled(harness, 85);
+      assert.deepEqual(yield* Ref.get(harness.sent), []);
+
       yield* settled(harness, 50);
       assert.deepEqual(yield* Ref.get(harness.sent), []);
       assert.deepEqual(scheduleOf(yield* harness.stored).state, aboveState(true));
@@ -327,6 +333,36 @@ it.effect("a task created past its line waits for a crossing, then fires once fo
       yield* settled(harness, 92);
       yield* settled(harness, 85);
       assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+
+      // A small move is the same crossing; 5 points back is a new one.
+      yield* settled(harness, 79);
+      yield* settled(harness, 81);
+      assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+      yield* settled(harness, 75);
+      assert.deepEqual(scheduleOf(yield* harness.stored).state, aboveState(true));
+      yield* settled(harness, 81);
+      assert.deepEqual(yield* Ref.get(harness.sent), ["queue", "queue"]);
+    }),
+  ),
+);
+
+it.effect("`below` fires at the line with no margin, and rearms only 5 points back", () =>
+  overMemory((harness) =>
+    Effect.gen(function* () {
+      yield* harness.service.upsert(usageTask(BELOW));
+      yield* settled(harness, 21);
+      yield* settled(harness, 19);
+      assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+
+      yield* settled(harness, 21);
+      assert.deepEqual(scheduleOf(yield* harness.stored).state, { armed: false });
+      yield* settled(harness, 19);
+      assert.deepEqual(yield* Ref.get(harness.sent), ["queue"]);
+
+      yield* settled(harness, 25);
+      assert.deepEqual(scheduleOf(yield* harness.stored).state, { armed: true });
+      yield* settled(harness, 19);
+      assert.deepEqual(yield* Ref.get(harness.sent), ["queue", "queue"]);
     }),
   ),
 );

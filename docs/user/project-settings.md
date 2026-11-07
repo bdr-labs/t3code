@@ -181,7 +181,9 @@ is above 80%".
 
 A task runs once per crossing. One that is already past its line when you save it
 waits for usage to come back and cross again, and its own run can't start it a
-second time. For **Above**, a new period counts as a new crossing, so it runs again
+second time. To cross again, usage first moves 5 points back past the line, so
+**Above** 80% over 81, 79, 81 runs once; a line within 5 points of 0% or 100%
+re-arms at 0% or 100%. For **Above**, a new period counts as a new crossing, so it runs again
 if usage is still over the line after the window renews. A renewal runs about a minute after the window's reset time, or when
 the provider credits an early reset. A window with no reset time never renews, so
 use a line for those, and one that was at 0% has nothing to renew, so it doesn't
